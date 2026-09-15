@@ -34,9 +34,9 @@ export interface FusedIsolines {
  * fields are projected exactly, sampled fields keep the marching-squares
  * segments.
  */
-export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData, values: GpuGrid, colour?: ScalarFieldData): FusedIsolines {
+export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData, values: GpuGrid, colour?: ScalarFieldData, opts: { exact?: boolean } = {}): FusedIsolines {
   const grid = values.grid;
-  const exact = field.kind === "symbolic";
+  const exact = opts.exact ?? field.kind === "symbolic";
   const b = new ProgramBuilder(grid);
   const fn = exact ? b.scalar(field) : "", dx = exact ? b.scalar(field, [0]) : "", dy = exact ? b.scalar(field, [1]) : "";
   const col = colour ? b.scalar(colour) : undefined;

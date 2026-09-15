@@ -130,7 +130,12 @@ export function joinSegments(segments: Float64Array, tolerance = 1e-9): Polyline
     const fwd = walk(s, 1);
     const rev: number[] = [];
     for (let i = back.length - 2; i >= 4; i -= 2) rev.push(back[i]!, back[i + 1]!); // excludes s's own endpoints (already in fwd)
-    lines.push(Float64Array.from([...rev, ...fwd]));
+    const line = Float64Array.from([...rev, ...fwd]);
+    // a loop closes with the neighbouring segment's copy of the seam vertex: snap it onto the first point exactly,
+    // so consumers can detect closure by equality
+    const m = line.length;
+    if (m >= 6 && Math.hypot(line[m - 2]! - line[0]!, line[m - 1]! - line[1]!) <= 2 * tolerance) { line[m - 2] = line[0]!; line[m - 1] = line[1]!; }
+    lines.push(line);
   }
   return lines;
 }

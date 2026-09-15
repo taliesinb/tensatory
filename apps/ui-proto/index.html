@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tensatory UI prototypes</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+<h1>interval slider <small>apps/ui-proto — nothing here is used by the viewer</small></h1>
+<div class="help">
+  press a <b>handle</b>: move that end · press the <b>band</b>: move the whole interval · press <b>outside</b>: centre jumps there, then drags ·
+  <kbd>alt</kbd>-press: symmetric resize about the centre · <kbd>shift</kbd>-hover: preview the centre under the pointer ·
+  wheel: translate, <kbd>alt</kbd>-wheel: resize · <kbd>←</kbd> <kbd>→</kbd>: nudge 10 %, <kbd>alt</kbd>+arrows: narrow / widen ·
+  <kbd>esc</kbd>: cancel drag · nullable: quick click on the band or <kbd>⌫</kbd> unsets, click the empty bar to bring it back
+</div>
+
+<div class="panel">
+  <div class="strip"><span class="title">basic</span><span class="ticks"><div class="isl" id="stripIsl" data-min="0" data-max="1" data-step="0.01" data-lo="0.3" data-hi="0.7" data-tip="an interval slider in a strip, 150px"></div></span></div>
+  <div class="body">
+    <div class="row"><label>slider</label><div class="sl" id="plain" data-min="0" data-max="1" data-step="0.001" data-value="0.5"></div><span class="val" id="plainv"></span></div>
+    <div class="row"><label>interval</label><div class="isl" id="basic" data-min="0" data-max="1" data-step="0.001" data-lo="0.25" data-hi="0.6"></div><span class="val" id="basicv"></span></div>
+    <div class="row"><label>stepped</label><div class="isl" id="stepped" data-min="0" data-max="100" data-step="5" data-lo="20" data-hi="45"></div><span class="val" id="steppedv"></span></div>
+    <div class="row"><label>nullable</label><div class="isl" id="nullable" data-min="-1" data-max="1" data-step="0.01" data-lo="-0.5" data-hi="0.5" data-nullable></div><span class="val" id="nullablev"></span></div>
+    <div class="row"><label>unset</label><div class="isl" id="unset" data-min="0" data-max="10" data-step="0.1" data-lo="null" data-hi="6" data-nullable></div><span class="val" id="unsetv"></span></div>
+    <div class="row"><label>point</label><div class="isl" id="point" data-min="0" data-max="1" data-step="0.001" data-lo="0.5" data-hi="0.5"></div><span class="val" id="pointv"></span></div>
+    <div class="row"><label>full</label><div class="isl" id="full" data-min="0" data-max="1" data-step="0.001"></div><span class="val" id="fullv"></span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="strip"><span class="title">programmatic</span></div>
+  <div class="body">
+    <div class="row"><label>target</label><div class="isl" id="prog" data-min="0" data-max="1" data-step="0.001" data-lo="0.1" data-hi="0.3"></div><span class="val" id="progv"></span></div>
+    <div class="row"><label>api</label><div class="bar">
+      <button class="tab" id="setA">value = "0.4,0.9"</button>
+      <button class="tab" id="setB">lo = 0.2</button>
+      <button class="tab" id="setC">setRange(-5, 5, .5)</button>
+      <button class="tab" id="setD">setRange(0, 1, .001)</button>
+    </div></div>
+    <div class="row"><label>events</label><div id="log" style="flex:1"></div></div>
+  </div>
+</div>
+
+<div class="panel wide">
+  <div class="strip"><span class="title">wide</span></div>
+  <div class="body">
+    <div class="row"><label>interval</label><div class="isl" id="wide" data-min="1e-5" data-max="1" data-step="1e-5" data-lo="0.001" data-hi="0.01"></div><span class="val" id="widev"></span></div>
+  </div>
+</div>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

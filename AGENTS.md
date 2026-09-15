@@ -124,6 +124,10 @@ profiling test.
   no readback, exact isolines every frame. gpu/canvas reads back asynchronously
   (pending layers skipped or rough lines shown until results land). cpu/gpu
   uploads CPU values and polylines. `?check=1` logs CPU/GPU agreement.
+  Statistics (reduction), box blur and Taubin smoothing are GPU passes too
+  (`packages/gpu/src/passes.ts`), so gpu/gpu covers every isoline option;
+  symbolic ranges start from a coarse CPU grid and are refined by the GPU
+  reduction when it lands.
 * WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
   by Metal's fast-math.
 * Performance: the compiler does

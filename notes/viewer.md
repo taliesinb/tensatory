@@ -23,7 +23,10 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 `compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (bundle panel; `?compute=`,
 `?render=`; stored in `tensatory.modes`; default gpu/gpu when WebGPU exists).
 GPU/gpu is the fused path: `renderGpu()` in `main.ts` builds a `GpuScene`
-from resident grids and segment sets; the other combinations reuse the CPU
+from resident grids and segment sets — including the `metric` blur (GPU box
+blur of the resident grid, contoured with plain marching squares), `line`
+Taubin smoothing (edge-graph kernel) and value ranges (GPU reduction, with a
+coarse CPU range shown until it lands); the other combinations reuse the CPU
 pipelines and either draw with Canvas 2D or upload their results. See
 [gpu.md](gpu.md).
 

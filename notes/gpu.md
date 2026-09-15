@@ -145,11 +145,45 @@ Measured in Chrome (M-series): all four combinations hold ~60 fps with both
 animations on `|∇ mixture|` at 128²; in the fused combination the isolines
 are exact (projected) in every frame.
 
+## Stage 5 (done): statistics, blur and Taubin passes
+
+`packages/gpu/src/passes.ts` closes the last CPU round trips of the fused path.
+Each pass has a test in `test/passes.test.ts` asserting agreement with core.
+
+* `gpuStats(backend, grid, channel)` — a workgroup reduction (`STATS_WG = 256`
+  threads, one partial `{min, max, posMin, sum, finite}` per workgroup) and a
+  readback of the partials, folded on the CPU. NaN/±∞ samples are skipped by
+  bit test (`isfinite_`). Returns the same `Stats` shape as core's
+  `computeStats` (`posMin` for log codomains). The viewer's `rangeOf` uses it
+  for symbolic fields in gpu compute mode: a provisional range from a 24×24 CPU
+  grid is returned synchronously (sliders and legend need a number at once),
+  the reduction over the field's default stats grid replaces it when it lands
+  and marks the frame dirty. Sampled data keeps core's precomputed stats.
+* `blurResidentSync(backend, src, radius)` — separable, edge-truncated box
+  blur of a resident grid, NaN propagating, identical to core's `boxBlur`
+  (returns `src` unchanged for radius ≤ 0 or multi-channel grids). The viewer
+  caches blurred grids per `(grid, radius)` in `FusedGeometry.blur`; blurred
+  values are contoured with the non-exact marching-squares kernel
+  (`fusedIsolines(…, { exact: false })`), exactly as the CPU path does.
+* `smoothedIsolines(backend, values, colour)` — Taubin smoothing of
+  marching-squares output on the GPU. Vertices live on grid *edges*
+  (`hEdge(i,j) = i*NY+j`, `vEdge(i,j) = HEDGES + i*(NY-1)+j`), each cell
+  writes the edge ids of its segments, a neighbour pass gives every edge
+  vertex its ≤2 polyline neighbours, then λ = 0.5 / μ = −0.53 passes ping-pong
+  positions over the edge array (vertices with < 2 neighbours — open ends —
+  stay fixed, as in core), and an emit kernel appends `Seg` records. Same
+  `dispatch(segs, level, iterations)` fire-and-forget shape as the fused
+  kernels. Matching this exposed a core bug: `joinSegments` closed loops with
+  a near-equal (not identical) last point, so `taubinSmooth` treated them as
+  open; the seam is now snapped exactly.
+
+With these, gpu/gpu handles every isoline option (`metric`, `line`, exact
+projection, I_C colouring) without a readback; the only asynchronous piece is
+the stats refinement, and it is invisible unless the coarse range was wrong.
+
 ## Next stages
 
-1. Statistics (min/max for slider ranges) as a reduction pass, so derived
-   fields never touch the CPU even once.
-2. Blur (`metric`) as a compute pass so the fused path covers every isoline
-   option; Taubin smoothing likewise.
-3. 3D: marching cubes as a fused kernel appending triangles, a mesh pipeline
+1. 3D: marching cubes as a fused kernel appending triangles, a mesh pipeline
    with OIT — the same resident-grid / indirect-draw structure.
+2. Interval-arithmetic quadtree seeding for exact isolines (topology still
+   comes from the seed grid).

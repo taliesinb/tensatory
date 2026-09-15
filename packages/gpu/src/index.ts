@@ -20,3 +20,5 @@ export type { FusedIsolines, FusedStreamlines, FusedStreamlineOptions } from "./
 export { marchingSquaresWgsl, projectionWgsl } from "./isolines";
 export { GpuRenderer } from "./render";
 export type { GpuView, ValueMap, Lut, GpuRasterLayer, GpuLineLayer, GpuScene } from "./render";
+export { gpuStats, blurResidentSync, smoothedIsolines } from "./passes";
+export type { GpuStats, SmoothedIsolines } from "./passes";

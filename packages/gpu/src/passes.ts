@@ -1,0 +1,237 @@
+// Grid passes on resident data: statistics (reduction), separable box blur,
+// and Taubin-smoothed marching-squares isolines on the edge graph.
+
+import type { DenseGrid, ScalarFieldData } from "@tensatory/core";
+import { RESIDENT_USAGE, type GpuBackend } from "./device";
+import { marchingSquaresWgsl } from "./isolines";
+import { ProgramBuilder } from "./program";
+import type { GpuGrid } from "./resident";
+import { SEG_APPEND_WGSL, SEG_WGSL, type GpuSegments } from "./segments";
+import { f32 } from "./wgsl";
+
+const ISNAN = `fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+fn isfinite_(v: f32) -> bool { return (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000u; }`;
+
+/*******************************************************/
+/* statistics */
+
+export interface GpuStats { min: number; max: number; posMin: number; mean: number; finite: number }
+
+const STATS_WG = 256;
+function statsCode(n: number, channels: number, channel: number): string {
+  return `
+${ISNAN}
+@group(0) @binding(0) var<storage, read_write> partials: array<f32>;
+@group(0) @binding(1) var<storage, read> vals: array<f32>;
+var<workgroup> wmin: array<f32, 64>; var<workgroup> wmax: array<f32, 64>; var<workgroup> wpos: array<f32, 64>; var<workgroup> wsum: array<f32, 64>; var<workgroup> wcnt: array<f32, 64>;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  var mn = 3.4e38; var mx = -3.4e38; var pm = 3.4e38; var sum = 0.0; var cnt = 0.0;
+  let stride = ${STATS_WG}u * 64u;
+  for (var i = wid.x * 64u + lid.x; i < ${n}u; i += stride) {
+    let v = vals[i * ${channels}u + ${channel}u];
+    if (isfinite_(v)) { mn = min(mn, v); mx = max(mx, v); if (v > 0.0) { pm = min(pm, v); } sum += v; cnt += 1.0; }
+  }
+  wmin[lid.x] = mn; wmax[lid.x] = mx; wpos[lid.x] = pm; wsum[lid.x] = sum; wcnt[lid.x] = cnt;
+  workgroupBarrier();
+  for (var s = 32u; s > 0u; s = s >> 1u) {
+    if (lid.x < s) {
+      wmin[lid.x] = min(wmin[lid.x], wmin[lid.x + s]); wmax[lid.x] = max(wmax[lid.x], wmax[lid.x + s]);
+      wpos[lid.x] = min(wpos[lid.x], wpos[lid.x + s]); wsum[lid.x] += wsum[lid.x + s]; wcnt[lid.x] += wcnt[lid.x + s];
+    }
+    workgroupBarrier();
+  }
+  if (lid.x == 0u) { let o = wid.x * 5u; partials[o] = wmin[0]; partials[o + 1] = wmax[0]; partials[o + 2] = wpos[0]; partials[o + 3] = wsum[0]; partials[o + 4] = wcnt[0]; }
+}`;
+}
+
+/** min / max / positive min / mean over the finite values of one channel of a resident grid */
+export async function gpuStats(backend: GpuBackend, g: GpuGrid, channel = 0): Promise<GpuStats> {
+  const n = g.grid.sampleCount;
+  const { read: [buf] } = await backend.runKernel({
+    code: statsCode(n, g.channels, channel),
+    invocations: STATS_WG * 64,
+    buffers: [{ role: "rw", size: STATS_WG * 5 * 4, readback: true }, { role: "r", buffer: g.buffer }],
+  });
+  const p = new Float32Array(buf!);
+  let min = Infinity, max = -Infinity, posMin = Infinity, sum = 0, cnt = 0;
+  for (let w = 0; w < STATS_WG; w++) {
+    if (p[w * 5 + 4]! > 0) { min = Math.min(min, p[w * 5]!); max = Math.max(max, p[w * 5 + 1]!); posMin = Math.min(posMin, p[w * 5 + 2]!); sum += p[w * 5 + 3]!; cnt += p[w * 5 + 4]!; }
+  }
+  return { min: cnt ? min : NaN, max: cnt ? max : NaN, posMin: posMin < 3e38 ? posMin : NaN, mean: cnt ? sum / cnt : NaN, finite: cnt };
+}
+
+/*******************************************************/
+/* separable box blur */
+
+function blurAxisCode(grid: DenseGrid, axis: number, radius: number): string {
+  const D = grid.size[axis]!, S = grid.strides[axis]!;
+  return `
+@group(0) @binding(0) var<storage, read_write> dst: array<f32>;
+@group(0) @binding(1) var<storage, read> src: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let v = i32(id.x);
+  if (v >= ${grid.sampleCount}) { return; }
+  let c = (v / ${S}) % ${D};
+  var sum = 0.0; var cnt = 0.0;
+  for (var k = -${radius}; k <= ${radius}; k++) {
+    let cc = c + k;
+    if (cc < 0 || cc >= ${D}) { continue; }
+    sum += src[v + k * ${S}]; cnt += 1.0;
+  }
+  dst[v] = sum / cnt;
+}`;
+}
+
+/** core's `boxBlur` on a resident scalar grid: a new resident grid (enqueued, no readback) */
+export function blurResidentSync(backend: GpuBackend, src: GpuGrid, radius: number): GpuGrid {
+  const grid = src.grid, n = grid.sampleCount;
+  const r = Math.floor(radius);
+  if (r <= 0 || src.channels !== 1) return src;
+  let cur = src.buffer;
+  const temps: GPUBuffer[] = [];
+  for (let axis = 0; axis < grid.dimCount; axis++) {
+    if (grid.size[axis]! < 2) continue;
+    const [out] = backend.dispatch({
+      code: blurAxisCode(grid, axis, r),
+      invocations: n,
+      buffers: [{ role: "rw", size: n * 4, keep: true }, { role: "r", buffer: cur }],
+    });
+    if (cur !== src.buffer) temps.push(cur);
+    cur = out!;
+  }
+  for (const t of temps) t.destroy(); // safe: the queue has already been submitted with them
+  if (cur === src.buffer) return src;
+  const buffer = cur;
+  return { grid, channels: 1, buffer, destroy: () => buffer.destroy() };
+}
+
+/*******************************************************/
+/* Taubin-smoothed marching squares on the edge graph */
+
+export interface SmoothedIsolines {
+  /** marching squares of the resident grid at `level`, smoothed with `iterations` Taubin λ|μ rounds, appended into `segs` */
+  dispatch(segs: GpuSegments, level: number, iterations: number): void;
+  readonly capacity: number;
+  destroy(): void;
+}
+
+/**
+ * Non-exact isolines (sampled or blurred fields) with Taubin smoothing, fully on
+ * the GPU. Every marching-squares vertex lies on a grid edge shared by two
+ * cells, and each cell holds at most two segments, so a vertex's two polyline
+ * neighbours are found from the adjacent cells' segment lists: the smoothing
+ * runs on the edge graph without ever joining polylines. Vertices with fewer
+ * than two neighbours (open ends at the box) stay fixed, like core.
+ */
+export function smoothedIsolines(backend: GpuBackend, values: GpuGrid, colour?: ScalarFieldData): SmoothedIsolines {
+  const grid = values.grid;
+  const [nx, ny] = grid.size as [number, number];
+  const cells = (nx - 1) * (ny - 1);
+  const hEdges = (nx - 1) * ny, vEdges = nx * (ny - 1), edges = hEdges + vEdges;
+  const capacity = cells * 2;
+  const b = new ProgramBuilder(grid);
+  const col = colour ? b.scalar(colour) : undefined;
+  const lib = b.library();
+  const dev = backend.device;
+  // persistent scratch: edge positions (ping-pong), edge used flags, cell segments as edge ids
+  const posA = dev.createBuffer({ size: Math.max(16, edges * 8), usage: RESIDENT_USAGE });
+  const posB = dev.createBuffer({ size: Math.max(16, edges * 8), usage: RESIDENT_USAGE });
+  const cellSegs = dev.createBuffer({ size: Math.max(16, cells * 4 * 4), usage: RESIDENT_USAGE }); // e0a, e0b, e1a, e1b (i32; -1 = none)
+  const EDGES = `
+const HEDGES: i32 = ${hEdges};
+fn hEdge(i: i32, j: i32) -> i32 { return i * NY + j; }                   // bottom edge of cell (i, j): (i,j)-(i+1,j)
+fn vEdge(i: i32, j: i32) -> i32 { return HEDGES + i * (NY - 1) + j; }    // left edge of cell (i, j): (i,j)-(i,j+1)
+`;
+  const DIMS = `const NX: i32 = ${nx}; const NY: i32 = ${ny};`;
+  const seedCode = `
+${ISNAN}
+@group(0) @binding(0) var<storage, read_write> pos: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> cseg: array<i32>;
+@group(0) @binding(2) var<storage, read> vals: array<f32>;
+@group(0) @binding(3) var<storage, read> params: array<f32>;
+${marchingSquaresWgsl(grid)}
+${EDGES}
+// which edge a marching-squares endpoint lies on, from its position relative to the cell
+fn edgeOf(p: vec2<f32>, i: i32, j: i32, x0: f32, y0: f32) -> i32 {
+  let hx = ${f32(grid.spacing[0]!)}; let hy = ${f32(grid.spacing[1]!)};
+  if (abs(p.y - y0) < 1e-6 * hy) { return hEdge(i, j); }
+  if (abs(p.y - (y0 + hy)) < 1e-6 * hy) { return hEdge(i, j + 1); }
+  if (abs(p.x - x0) < 1e-6 * hx) { return vEdge(i, j); }
+  return vEdge(i + 1, j);
+}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = i32(id.x);
+  if (c >= CELLS) { return; }
+  let r = cellSegments(c, params[0]);
+  let i = c / (NY - 1); let j = c % (NY - 1);
+  let x0 = ${f32(grid.box.a[0]!)} + f32(i) * ${f32(grid.spacing[0]!)};
+  let y0 = ${f32(grid.box.a[1]!)} + f32(j) * ${f32(grid.spacing[1]!)};
+  var e = vec4<i32>(-1, -1, -1, -1);
+  if (r.n >= 1u) { e.x = edgeOf(r.a0, i, j, x0, y0); e.y = edgeOf(r.b0, i, j, x0, y0); pos[e.x] = r.a0; pos[e.y] = r.b0; }
+  if (r.n == 2u) { e.z = edgeOf(r.a1, i, j, x0, y0); e.w = edgeOf(r.b1, i, j, x0, y0); pos[e.z] = r.a1; pos[e.w] = r.b1; }
+  cseg[c * 4] = e.x; cseg[c * 4 + 1] = e.y; cseg[c * 4 + 2] = e.z; cseg[c * 4 + 3] = e.w;
+}`;
+  const passCode = `
+@group(0) @binding(0) var<storage, read_write> dst: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read> src: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> cseg: array<i32>;
+@group(0) @binding(3) var<storage, read> params: array<f32>;
+${DIMS}
+${EDGES}
+// the other endpoint of the segment of cell c that uses edge e (-1 if none)
+fn partner(c: i32, e: i32) -> i32 {
+  if (c < 0 || c >= (NX - 1) * (NY - 1)) { return -1; }
+  let o = c * 4;
+  if (cseg[o] == e) { return cseg[o + 1]; } if (cseg[o + 1] == e) { return cseg[o]; }
+  if (cseg[o + 2] == e) { return cseg[o + 3]; } if (cseg[o + 3] == e) { return cseg[o + 2]; }
+  return -1;
+}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let e = i32(id.x);
+  if (e >= ${edges}) { return; }
+  var c0: i32; var c1: i32;
+  if (e < HEDGES) { let i = e / NY; let j = e % NY; c0 = select(-1, i * (NY - 1) + (j - 1), j > 0); c1 = select(-1, i * (NY - 1) + j, j < NY - 1); }
+  else { let k = e - HEDGES; let i = k / (NY - 1); let j = k % (NY - 1); c0 = select(-1, (i - 1) * (NY - 1) + j, i > 0); c1 = select(-1, i * (NY - 1) + j, i < NX - 1); }
+  let n0 = partner(c0, e); let n1 = partner(c1, e);
+  let p = src[e];
+  if (n0 < 0 || n1 < 0) { dst[e] = p; return; } // unused edge or open end: fixed
+  let lap = 0.5 * (src[n0] + src[n1]) - p;
+  dst[e] = p + params[0] * lap;
+}`;
+  const emitCode = `${lib.code}
+${SEG_WGSL}
+@group(0) @binding(0) var<storage, read_write> segs: array<Seg>;
+@group(0) @binding(2) var<storage, read> pos: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> ind: Indirect;
+@group(0) @binding(4) var<storage, read> cseg: array<i32>;
+const CAP: u32 = ${capacity}u;
+${SEG_APPEND_WGSL}
+fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+fn emit(ea: i32, eb: i32) {
+  let a = pos[ea]; let b = pos[eb];
+  var s: Seg; s.a = a; s.b = b; s.ca = colour_(a); s.cb = colour_(b); s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0;
+  appendSeg(s);
+}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = i32(id.x);
+  if (c >= ${cells}) { return; }
+  let o = c * 4;
+  if (cseg[o] >= 0) { emit(cseg[o], cseg[o + 1]); }
+  if (cseg[o + 2] >= 0) { emit(cseg[o + 2], cseg[o + 3]); }
+}`;
+  return {
+    capacity,
+    dispatch(segs, level, iterations) {
+      backend.dispatch({ code: seedCode, invocations: cells, buffers: [{ role: "rw", buffer: posA }, { role: "rw", buffer: cellSegs }, { role: "r", buffer: values.buffer }, { role: "r", data: Float32Array.of(level) }] });
+      let cur = posA, other = posB;
+      for (let it = 0; it < iterations; it++) {
+        for (const k of [0.5, -0.53]) {
+          backend.dispatch({ code: passCode, invocations: edges, buffers: [{ role: "rw", buffer: other }, { role: "r", buffer: cur }, { role: "r", buffer: cellSegs }, { role: "r", data: Float32Array.of(k) }] });
+          [cur, other] = [other, cur];
+        }
+      }
+      backend.dispatch({ code: emitCode, invocations: cells, buffers: [{ role: "rw", buffer: segs.buffer }, { role: "r", data: lib.data }, { role: "r", buffer: cur }, { role: "rw", buffer: segs.indirect }, { role: "r", buffer: cellSegs }] });
+    },
+    destroy() { posA.destroy(); posB.destroy(); cellSegs.destroy(); },
+  };
+}

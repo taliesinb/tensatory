@@ -1,0 +1,16 @@
+{
+  "name": "@tensatory/ui-proto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UI widget prototypes (interval slider, colormap interval selection). Builds a single static dist/index.html; never imported by production code.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0"
+  }
+}

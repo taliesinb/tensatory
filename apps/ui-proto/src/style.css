@@ -1,0 +1,54 @@
+/* page chrome (loosely the viewer's look) */
+html, body { margin: 0; background: #0b0d12; color: #ddd; font: 13px/1.4 system-ui, sans-serif; user-select: none; -webkit-user-select: none; }
+body { padding: 24px; }
+h1 { font-size: 15px; font-weight: 600; color: #cfd6e6; margin: 0 0 4px; }
+h1 small { color: #667; font-weight: 400; margin-left: 10px; }
+.panel { background: rgba(15,18,26,.88); border: 1px solid #2a2f3d; border-radius: 8px; overflow: hidden; width: 420px; margin: 14px 0; }
+.panel .strip { background: #1c2232; color: #cfd6e6; font-weight: 600; font-size: 12px; letter-spacing: .02em; padding: 4px 12px; border-bottom: 1px solid #2a2f3d; display: flex; align-items: center; justify-content: space-between; }
+.strip .ticks { display: flex; align-items: center; gap: 8px; }
+.strip .ticks .isl, .strip .ticks .sl { width: 150px; flex: none; }
+.panel .body { padding: 6px 12px 8px; }
+.row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.row label { width: 66px; color: #aab; flex: none; }
+.row .val { min-width: 150px; display: flex; justify-content: flex-end; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; font-size: 12px; letter-spacing: -0.02em; color: #cde; flex: none; white-space: nowrap; }
+.bar { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.row .val .dim { color: #667; }
+.hint { color: #889; font-size: 11px; }
+.help { color: #99a; font-size: 12px; line-height: 1.6; max-width: 640px; }
+.help kbd { background: #1b2030; border: 1px solid #333a4d; border-radius: 3px; padding: 0 4px; font: 11px ui-monospace, Menlo, monospace; color: #cde; }
+.tab { white-space: nowrap; background: #161a26; color: #aab; border: 1px solid #2a2f3d; border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; line-height: 1.4; }
+.tab:hover { color: #fff; }
+#log { font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #9ab; white-space: pre; height: 120px; overflow: auto; background: #0e1118; border: 1px solid #2a2f3d; border-radius: 6px; padding: 6px 8px; user-select: text; -webkit-user-select: text; }
+.wide { width: 720px; }
+
+/* the viewer's compact slider, verbatim (apps/viewer/src/style.css) for side-by-side comparison */
+.sl { flex: 1; min-width: 0; height: 14px; background: #222631; border-radius: 3px; position: relative; cursor: pointer; }
+.sl:hover, .sl.locked { background: #282e3e; }
+.sl.null, .sl.null:hover { background: #161a22; cursor: cell; }
+.sl.onhandle, .sl.locked { cursor: ew-resize; }
+.sl .fill { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: #3b82f6; border-radius: 1px; pointer-events: none; }
+.sl.locked .fill { background: #60a5fa; }
+.sl.hover .fill { background: #93c5fd; }
+.sl.null .fill { display: none; }
+.sl .was { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: repeating-linear-gradient(to bottom, #3b82f6 0 2px, transparent 2px 4px); pointer-events: none; display: none; }
+@media (min-resolution: 2dppx) { .sl .was { width: 1.5px; margin-left: -0.75px; } }
+
+/* interval slider */
+.isl { flex: 1; min-width: 0; height: 14px; background: #222631; border-radius: 3px; position: relative; cursor: pointer; }
+.isl:hover, .isl.locked { background: #282e3e; }
+.isl.null, .isl.null:hover { background: #161a22; cursor: cell; }
+.isl.onhandle, .isl.locked.m-lo, .isl.locked.m-hi, .isl.locked.m-scale { cursor: ew-resize; }
+.isl.onband { cursor: grab; }
+.isl.locked.m-band { cursor: grabbing; }
+.isl > div { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+.isl .band { background: rgba(59,130,246,.28); }
+.isl.locked .band { background: rgba(96,165,250,.34); }
+.isl.hover .band { background: rgba(147,197,253,.34); }
+.isl .lo, .isl .hi { width: 3px; margin-left: -1.5px; background: #3b82f6; border-radius: 1px; }
+.isl.locked .lo, .isl.locked .hi { background: #60a5fa; }
+.isl.hover .lo, .isl.hover .hi { background: #93c5fd; }
+.isl .mid { top: 4px; bottom: 4px; width: 1px; margin-left: -.5px; background: rgba(147,197,253,.55); }
+.isl.narrow .mid { display: none; }
+.isl .was { width: 3px; margin-left: -1.5px; background: repeating-linear-gradient(to bottom, #3b82f6 0 2px, transparent 2px 4px); display: none; }
+@media (min-resolution: 2dppx) { .isl .was { width: 1.5px; margin-left: -0.75px; } }
+.isl.null > div { display: none; }

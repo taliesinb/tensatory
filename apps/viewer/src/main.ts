@@ -7,6 +7,8 @@ import {
   Codomain,
   DenseGrid,
   DenseVectorFieldData,
+  computeStats,
+  defaultStatsGrid,
   formatReal,
   SymbolicScalarFieldData,
   SymbolicVectorFieldData,
@@ -30,7 +32,7 @@ import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
-import { GpuRenderer, packPolylines, packStreamlines, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
+import { GpuRenderer, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -202,19 +204,47 @@ const streamVector = (): VectorUse | undefined => (streamsOn() ? useVector(state
 /* per-use value ranges (for colormaps and the value slider) */
 
 const rangeCache = new Map<string, [number, number]>();
+const rangePending = new Set<string>();
+function rangeFrom(f: ScalarUse, st: { min: number; max: number }, posMin: () => number): [number, number] {
+  const cd = f.codomain;
+  let lo = Math.max(st.min, cd.min), hi = Math.min(st.max, cd.max);
+  if (cd.log && !(lo > 0)) { const m = posMin(); lo = Number.isFinite(m) ? m : 1e-9; }
+  if (!(hi > lo)) hi = lo + 1e-9;
+  return [lo, hi];
+}
+/**
+ * Value range of a use (for colormaps and the value slider). Sampled data uses core's stats
+ * (cheap, often precomputed). Symbolic data on the GPU: a provisional range from a coarse CPU
+ * grid is returned at once and replaced by a GPU reduction over the default grid when it lands.
+ */
 function rangeOf(f: ScalarUse): [number, number] {
   let r = rangeCache.get(f.id);
   if (r) return r;
-  const st = f.data.stats(), cd = f.codomain;
-  let lo = Math.max(st.min, cd.min), hi = Math.min(st.max, cd.max);
-  if (cd.log && !(lo > 0)) {
+  if (f.data.kind === "symbolic" && modes.compute === "gpu" && sampler.gpu) {
+    const coarse = new DenseGrid([24, 24], f.data.box);
+    const vals = f.data.sampleOn(coarse);
+    r = rangeFrom(f, computeStats(vals), () => { let m = Infinity; for (const v of vals) if (v > 0 && v < m) m = v; return m; });
+    rangeCache.set(f.id, r);
+    if (!rangePending.has(f.id)) {
+      rangePending.add(f.id);
+      const gpu = sampler.gpu, id = f.id, grid = defaultStatsGrid(f.data.box);
+      const resident = fused ? fused.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid);
+      gpuStats(gpu, resident).then((st) => {
+        if (!Number.isFinite(st.min)) return;
+        rangeCache.set(id, rangeFrom(f, st, () => st.posMin));
+        updateInfo(); isoCache = undefined; state.dirty = true;
+      }).catch((e) => console.warn("GPU stats failed:", e)).finally(() => { rangePending.delete(id); if (!fused) resident.destroy(); });
+    }
+    return r;
+  }
+  const st = f.data.stats();
+  r = rangeFrom(f, st, () => {
     const g = f.data.samplePoints ?? new DenseGrid([64, 64], f.data.box);
     let m = Infinity;
     for (const v of f.data.sampleOn(g)) if (v > 0 && v < m) m = v;
-    lo = Number.isFinite(m) ? m : 1e-9;
-  }
-  if (!(hi > lo)) hi = lo + 1e-9;
-  rangeCache.set(f.id, (r = [lo, hi]));
+    return m;
+  });
+  rangeCache.set(f.id, r);
   return r;
 }
 const paramOf = (f: ScalarUse) => { const [lo, hi] = rangeOf(f); const cd = f.codomain; return (v: number) => (Number.isNaN(v) ? NaN : cd.toParam(Math.min(hi, Math.max(lo, v)), lo, hi)); };
@@ -456,7 +486,7 @@ function render(): void {
     scene.raster = { key: `${c.id}|${grid.size.join("x")}|${viewBoxKey}|${state.maps[c.id] ?? 0}`, grid, values, toParam: paramOf(c), lut: lut(mapOf(c)), smooth: ui.smooth.checked };
   }
   // fused GPU frames compute isolines / streamlines in renderGpu; otherwise (CPU compute, or GPU compute read back) here
-  const iso = fusedCompute && num("metric") === null ? undefined : isolines(grid);
+  const iso = fusedCompute ? undefined : isolines(grid);
   const isoField = slotScalar("iv");
   if (iso && !gpuDraw) {
     const alpha = num("isoAlpha") ?? 1;
@@ -519,14 +549,19 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
   const alpha = num("isoAlpha") ?? 1;
   if (ui.showIso.checked && f) {
     const colour = (ic ? { map: valueMap(ic), lut: lutRGBA(state.maps[ic.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
-    if (fusedCompute && num("metric") === null) {
-      const values = F.grid(gridKey(f, grid), f.data, grid);
+    if (fusedCompute) {
+      const metric = num("metric"), line = num("line") ?? 0;
+      const raw = F.grid(gridKey(f, grid), f.data, grid);
+      const values = metric === null ? raw : F.blur(gridKey(f, grid), raw, metric);
+      const exact = f.data.kind === "symbolic" && metric === null;
       const [lo, hi] = rangeOf(f);
       const tol = 0.25 * renderer.worldPerPixel;
-      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}`;
+      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}`;
       isoLevelParams().forEach((t, k) => {
         const level = f.codomain.fromParam(t, lo, hi);
-        const segs = F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, ic?.data, level, tol);
+        const segs = !exact && line > 0
+          ? F.smoothedIsolines(kernelKey, `${kernelKey}|${k}`, values, ic?.data, level, line)
+          : F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, ic?.data, level, tol, exact);
         gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
       });
     } else if (iso) {
