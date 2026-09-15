@@ -940,7 +940,7 @@ let lastT = performance.now();
 function frame(now: number): void {
   const dt = state.paused ? 0 : Math.min(0.1, (now - lastT) / 1000);
   lastT = now;
-  if (ui.anim.checked && !state.paused && stream) { state.animClock += dt; state.dirty = true; }
+  if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += dt; state.dirty = true; }
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
     ui.isoValue.value = String((((+ui.isoValue.value! + (state.dir.iso * dt) / cycle) % 1) + 1) % 1);
