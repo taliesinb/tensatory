@@ -1,0 +1,16 @@
+{
+  "name": "@tensatory/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Runtime for Tensatory bundles: parsing, arrays, symbolic fields, sampling, isocontours",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tensatory/schema": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

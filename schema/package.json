@@ -1,0 +1,11 @@
+{
+  "name": "@tensatory/schema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Type-level description of a Tensatory data bundle (JSON schema as TypeScript types)",
+  "exports": { ".": "./index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

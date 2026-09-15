@@ -1,0 +1,14 @@
+[
+  {
+    "file": "symbolic.json",
+    "name": "symbolic playground"
+  },
+  {
+    "file": "dense.json",
+    "name": "dense sampled landscape"
+  },
+  {
+    "file": "arrays.json",
+    "name": "array-defined fields"
+  }
+]

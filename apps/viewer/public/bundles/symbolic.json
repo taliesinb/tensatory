@@ -1,0 +1,401 @@
+{
+  "tensatory": "0.1",
+  "name": "symbolic playground",
+  "description": "Fields defined by expressions only: bowl, Rosenbrock, Gaussian mixture, and their gradients.",
+  "manifolds": {
+    "plane": {
+      "numDims": 2,
+      "dimNames": [
+        "x",
+        "y"
+      ]
+    }
+  },
+  "fields": {
+    "bowl": {
+      "kind": "scalar",
+      "name": "x\u00b2 + y\u00b2",
+      "codomain": "norm",
+      "exactGradient": "bowlGrad",
+      "data": {
+        "type": "symbolic",
+        "box": [
+          [
+            -2,
+            2
+          ],
+          [
+            -2,
+            2
+          ]
+        ],
+        "expr": {
+          "op": "add",
+          "vals": [
+            {
+              "op": "square",
+              "val": {
+                "op": "coord",
+                "index": 0
+              }
+            },
+            {
+              "op": "square",
+              "val": {
+                "op": "coord",
+                "index": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    "bowlGrad": {
+      "kind": "vector",
+      "name": "\u2207(x\u00b2 + y\u00b2)",
+      "data": {
+        "type": "symbolicv",
+        "box": [
+          [
+            -2,
+            2
+          ],
+          [
+            -2,
+            2
+          ]
+        ],
+        "expr": {
+          "op": "compv",
+          "coeffs": [
+            {
+              "op": "mul",
+              "vals": [
+                2,
+                {
+                  "op": "coord",
+                  "index": 0
+                }
+              ]
+            },
+            {
+              "op": "mul",
+              "vals": [
+                2,
+                {
+                  "op": "coord",
+                  "index": 1
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "rosenbrock": {
+      "kind": "scalar",
+      "name": "Rosenbrock",
+      "codomain": "log",
+      "description": "(a - x)\u00b2 + b (y - x\u00b2)\u00b2, a = 1, b = 100; log-scaled codomain",
+      "data": {
+        "type": "symbolic",
+        "box": [
+          [
+            -2,
+            2
+          ],
+          [
+            -1,
+            3
+          ]
+        ],
+        "consts": {
+          "a": 1,
+          "b": 100
+        },
+        "expr": {
+          "op": "add",
+          "vals": [
+            {
+              "op": "square",
+              "val": {
+                "op": "sub",
+                "vals": [
+                  "a",
+                  {
+                    "op": "coord",
+                    "index": 0
+                  }
+                ]
+              }
+            },
+            {
+              "op": "mul",
+              "vals": [
+                "b",
+                {
+                  "op": "square",
+                  "val": {
+                    "op": "sub",
+                    "vals": [
+                      {
+                        "op": "coord",
+                        "index": 1
+                      },
+                      {
+                        "op": "square",
+                        "val": {
+                          "op": "coord",
+                          "index": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "rosenbrockGrad": {
+      "kind": "vector",
+      "name": "\u2207 Rosenbrock (symbolic grad)",
+      "data": {
+        "type": "pointwisev",
+        "expr": {
+          "op": "grad",
+          "val": "f"
+        },
+        "scalars": {
+          "f": "rosenbrock"
+        }
+      }
+    },
+    "mixture": {
+      "kind": "scalar",
+      "name": "Gaussian mixture",
+      "codomain": "p",
+      "data": {
+        "type": "symbolic",
+        "box": [
+          [
+            -3,
+            3
+          ],
+          [
+            -3,
+            3
+          ]
+        ],
+        "expr": {
+          "op": "clamp",
+          "min": 0,
+          "max": 1,
+          "val": {
+            "op": "add",
+            "vals": [
+              {
+                "op": "gaussKernel",
+                "val": {
+                  "op": "norm",
+                  "vec": {
+                    "op": "subv",
+                    "vecs": [
+                      {
+                        "op": "coordv"
+                      },
+                      {
+                        "op": "constv",
+                        "value": [
+                          -1,
+                          -0.5
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "mu": 0,
+                "sigma": 0.7
+              },
+              {
+                "op": "mul",
+                "vals": [
+                  0.6,
+                  {
+                    "op": "gaussKernel",
+                    "val": {
+                      "op": "norm",
+                      "vec": {
+                        "op": "subv",
+                        "vecs": [
+                          {
+                            "op": "coordv"
+                          },
+                          {
+                            "op": "constv",
+                            "value": [
+                              1.2,
+                              1
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "mu": 0,
+                    "sigma": 0.5
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "vals": [
+                  0.4,
+                  {
+                    "op": "gaussKernel",
+                    "val": {
+                      "op": "norm",
+                      "vec": {
+                        "op": "subv",
+                        "vecs": [
+                          {
+                            "op": "coordv"
+                          },
+                          {
+                            "op": "constv",
+                            "value": [
+                              0.5,
+                              -1.8
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "mu": 0,
+                    "sigma": 0.4
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "mixtureGradNorm": {
+      "kind": "scalar",
+      "name": "|\u2207 mixture|",
+      "codomain": "norm",
+      "data": {
+        "type": "pointwise",
+        "expr": {
+          "op": "norm",
+          "vec": {
+            "op": "grad",
+            "val": "m"
+          }
+        },
+        "scalars": {
+          "m": "mixture"
+        }
+      }
+    },
+    "waves": {
+      "kind": "scalar",
+      "name": "sin(3x) cos(2y)",
+      "codomain": "similarity",
+      "data": {
+        "type": "symbolic",
+        "box": [
+          [
+            -3.14159,
+            3.14159
+          ],
+          [
+            -3.14159,
+            3.14159
+          ]
+        ],
+        "expr": {
+          "op": "mul",
+          "vals": [
+            {
+              "op": "sin",
+              "val": {
+                "op": "mul",
+                "vals": [
+                  3,
+                  {
+                    "op": "coord",
+                    "index": 0
+                  }
+                ]
+              }
+            },
+            {
+              "op": "cos",
+              "val": {
+                "op": "mul",
+                "vals": [
+                  2,
+                  {
+                    "op": "coord",
+                    "index": 1
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "wavesGrad": {
+      "kind": "vector",
+      "name": "\u2207 waves",
+      "data": {
+        "type": "pointwisev",
+        "expr": {
+          "op": "grad",
+          "val": "w"
+        },
+        "scalars": {
+          "w": "waves"
+        }
+      }
+    }
+  },
+  "pointSets": {
+    "minima": {
+      "points": [
+        [
+          1,
+          1
+        ]
+      ],
+      "labels": [
+        "Rosenbrock min"
+      ]
+    },
+    "centres": {
+      "points": [
+        [
+          -1,
+          -0.5
+        ],
+        [
+          1.2,
+          1
+        ],
+        [
+          0.5,
+          -1.8
+        ]
+      ],
+      "labels": [
+        "A",
+        "B",
+        "C"
+      ],
+      "ordered": true
+    }
+  }
+}
