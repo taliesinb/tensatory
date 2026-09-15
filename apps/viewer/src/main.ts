@@ -502,7 +502,8 @@ function render(): void {
     const sc = slotScalar("sc");
     if (st.colours && sc) { layer.values = st.colours; layer.cmap = mapOf(sc); }
     // particles are always drawn at the current phase; ▶ only advances the clock (as in the 3D prototype)
-    layer.particles = { lengths: st.lines.map((l) => l.length), phases: st.lines.map((l) => l.phase), step: st.step, tail: (num("tail") ?? 5) * st.cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * st.cell };
+    const tail = num("tail");
+    if (tail !== null) layer.particles = { lengths: st.lines.map((l) => l.length), phases: st.lines.map((l) => l.phase), step: st.step, tail: tail * st.cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * st.cell };
     scene.lines.push(layer);
   }
   if (modes.render === "gpu" && fused && gpuRenderer) renderGpu(grid, box, scene, iso, st);
@@ -576,7 +577,8 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
     const sc = slotScalar("sc");
     const colour = (sc ? { map: valueMap(sc), lut: lutRGBA(state.maps[sc.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
     const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
-    const particles = { tail: (num("tail") ?? 5) * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell };
+    const tail = num("tail");
+    const particles = tail === null ? undefined : { tail: tail * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell };
     if (fusedCompute) {
       const vbox = v.data.box.intersect(grid.box) ?? v.data.box;
       const size = [0, 1].map((d) => Math.max(2, Math.round(vbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
