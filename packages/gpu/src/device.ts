@@ -3,6 +3,23 @@
 
 import type { GpuProgram } from "./program";
 
+export type BufferRole = "r" | "rw";
+export interface KernelBuffer {
+  role: BufferRole;
+  /** upload (required for "r") */
+  data?: Float32Array | Uint32Array | Int32Array;
+  /** byte size for outputs without data */
+  size?: number;
+  /** read the buffer back after the dispatch */
+  readback?: boolean;
+}
+export interface Kernel {
+  /** complete WGSL with an entry point `main` using @workgroup_size(64) and global_invocation_id.x */
+  code: string;
+  invocations: number;
+  buffers: KernelBuffer[];
+}
+
 async function findGpu(): Promise<GPU | undefined> {
   const nav = (globalThis as { navigator?: { gpu?: GPU } }).navigator;
   if (nav?.gpu) return nav.gpu;
@@ -39,59 +56,83 @@ export class GpuBackend {
     return new GpuBackend(gpu, adapter, device, [info?.vendor, info?.architecture, info?.device].filter(Boolean).join(" "));
   }
 
-  private layout: GPUBindGroupLayout | undefined;
-  /** explicit layout: binding 0 = output, binding 1 = packed input data. (An "auto" layout drops
-   *  binding 1 when a shader does not read `data`, and the bind group then fails validation.) */
-  private bindGroupLayout(): GPUBindGroupLayout {
-    return (this.layout ??= this.device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      ],
-    }));
+  private readonly layouts = new Map<string, GPUBindGroupLayout>();
+
+  /** explicit layout for a buffer-role signature such as "rw,r,r" ("auto" layouts drop unused bindings and then fail validation) */
+  private layoutFor(roles: BufferRole[]): GPUBindGroupLayout {
+    const key = roles.join(",");
+    let l = this.layouts.get(key);
+    if (!l) {
+      l = this.device.createBindGroupLayout({
+        entries: roles.map((role, binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: role === "rw" ? "storage" : "read-only-storage" } })),
+      });
+      this.layouts.set(key, l);
+    }
+    return l;
   }
 
-  private pipeline(code: string): GPUComputePipeline {
-    let p = this.pipelines.get(code);
+  private pipeline(code: string, roles: BufferRole[]): GPUComputePipeline {
+    const key = `${roles.join(",")}\n${code}`;
+    let p = this.pipelines.get(key);
     if (!p) {
       const module = this.device.createShaderModule({ code });
-      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout()] });
+      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutFor(roles)] });
       p = this.device.createComputePipeline({ layout, compute: { module, entryPoint: "main" } });
-      this.pipelines.set(code, p);
+      this.pipelines.set(key, p);
     }
     return p;
   }
 
-  /** run a sampling program and read the result back */
-  async run(program: GpuProgram): Promise<Float32Array> {
+  /**
+   * Run a compute kernel. Buffers are bound at group 0 in order; "r" buffers
+   * are uploaded from `data`, "rw" buffers are zero-initialized outputs of
+   * `size` bytes (or uploaded when `data` is given) and are read back when
+   * `readback` is set. Returns the read-back buffers in binding order.
+   */
+  async runKernel(kernel: Kernel): Promise<ArrayBuffer[]> {
     const dev = this.device;
-    const n = program.sampleCount * program.channels;
-    const outSize = Math.max(16, n * 4);
-    const out = dev.createBuffer({ size: outSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const read = dev.createBuffer({ size: outSize, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    const input = dev.createBuffer({ size: program.data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    dev.queue.writeBuffer(input, 0, program.data as unknown as BufferSource);
+    const roles = kernel.buffers.map((b) => b.role);
     dev.pushErrorScope("validation");
-    const pipeline = this.pipeline(program.code);
-    const bindGroup = dev.createBindGroup({
-      layout: this.bindGroupLayout(),
-      entries: [{ binding: 0, resource: { buffer: out } }, { binding: 1, resource: { buffer: input } }],
+    const pipeline = this.pipeline(kernel.code, roles);
+    const gpuBuffers = kernel.buffers.map((b) => {
+      const size = Math.max(16, Math.ceil((b.data ? b.data.byteLength : b.size ?? 0) / 4) * 4);
+      const usage = (b.role === "rw" ? GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC : GPUBufferUsage.STORAGE) | GPUBufferUsage.COPY_DST;
+      const buf = dev.createBuffer({ size, usage });
+      if (b.data) dev.queue.writeBuffer(buf, 0, b.data as unknown as BufferSource);
+      return { buf, size };
     });
+    const bindGroup = dev.createBindGroup({ layout: this.layoutFor(roles), entries: gpuBuffers.map(({ buf }, binding) => ({ binding, resource: { buffer: buf } })) });
+    const reads = kernel.buffers.map((b, i) => (b.readback ? { i, buf: dev.createBuffer({ size: gpuBuffers[i]!.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }) } : undefined));
     const enc = dev.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.ceil(program.sampleCount / 64));
+    pass.dispatchWorkgroups(Math.ceil(kernel.invocations / 64));
     pass.end();
-    enc.copyBufferToBuffer(out, 0, read, 0, outSize);
+    for (const r of reads) if (r) enc.copyBufferToBuffer(gpuBuffers[r.i]!.buf, 0, r.buf, 0, gpuBuffers[r.i]!.size);
     dev.queue.submit([enc.finish()]);
     const err = await dev.popErrorScope();
     if (err) throw new Error(`WebGPU validation: ${err.message}`);
-    await read.mapAsync(GPUMapMode.READ);
-    const result = new Float32Array(read.getMappedRange().slice(0, n * 4));
-    read.unmap();
-    out.destroy(); read.destroy(); input.destroy();
-    return result;
+    const out: ArrayBuffer[] = [];
+    for (const r of reads) {
+      if (!r) continue;
+      await r.buf.mapAsync(GPUMapMode.READ);
+      out.push(r.buf.getMappedRange().slice(0));
+      r.buf.unmap(); r.buf.destroy();
+    }
+    for (const { buf } of gpuBuffers) buf.destroy();
+    return out;
+  }
+
+  /** run a sampling program and read the result back */
+  async run(program: GpuProgram): Promise<Float32Array> {
+    const n = program.sampleCount * program.channels;
+    const [out] = await this.runKernel({
+      code: program.code,
+      invocations: program.sampleCount,
+      buffers: [{ role: "rw", size: n * 4, readback: true }, { role: "r", data: program.data }],
+    });
+    return new Float32Array(out!, 0, n);
   }
 
   /** release the device (call at the end of a test run; Dawn dislikes being torn down implicitly) */

@@ -116,11 +116,14 @@ profiling test.
   packed into ONE storage buffer (8-buffer limit); explicit bind-group layout;
   the `GPU` instance must be retained for the device's lifetime under Dawn or
   the process segfaults. See `notes/gpu.md`.
-* The viewer samples fields through `sampler.ts` (GPU when available, else
-  CPU; `?backend=cpu|gpu`, `?check=1` logs CPU/GPU agreement). GPU results are
-  asynchronous: a layer whose values are pending is skipped for that frame and
-  re-rendered when they land.
-* Performance (rendering is Canvas 2D; contouring / integration CPU): the compiler does
+* The viewer samples fields through `sampler.ts` and computes exact isolines
+  and streamlines through `gpuGeometry.ts` (GPU when available, else CPU;
+  `?backend=cpu|gpu`, `?geometry=cpu`, `?check=1` logs CPU/GPU agreement).
+  GPU results are asynchronous: pending layers are skipped (or the previous /
+  rough result shown) for that frame and re-rendered when they land.
+* WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
+  by Metal's fast-math.
+* Performance (rendering is Canvas 2D): the compiler does
   common-subexpression elimination with per-point memoization; streamlines of
   symbolic vector fields are integrated through a sampled copy on the current
   grid; isolines fall back to marching squares while a level is moving and

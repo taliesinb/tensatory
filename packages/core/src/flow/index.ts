@@ -1,2 +1,2 @@
-export { integrateStreamlines, lcg } from "./streamlines";
-export type { StreamlineOptions, Streamline } from "./streamlines";
+export { integrateStreamlines, integrateFromSeeds, streamlineSeeds, lcg } from "./streamlines";
+export type { StreamlineOptions, Streamline, StreamlineSeeds } from "./streamlines";

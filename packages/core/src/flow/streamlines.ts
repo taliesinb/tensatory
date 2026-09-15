@@ -29,18 +29,50 @@ export interface Streamline {
   phase: number;
 }
 
-/** deterministic LCG in [0, 1) */
+/** deterministic LCG in [0, 1); exact 32-bit arithmetic (Math.imul) so other implementations (WGSL) reproduce it bit for bit */
 export function lcg(seed: number): () => number {
   let s = seed >>> 0;
-  return () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  return () => ((s = (Math.imul(s, 1103515245) + 12345) & 0x7fffffff) / 0x7fffffff);
+}
+
+export interface StreamlineSeeds {
+  /** flat [x0, y0, x1, y1, ...] seed points */
+  points: Float64Array;
+  /** per-line phase in [0, 1) */
+  phases: Float64Array;
+}
+
+/** jittered seeds: ≈`count` cells as close to cubes as possible filling the box, one random point per cell */
+export function streamlineSeeds(box: Box, count: number, seed = 12345): StreamlineSeeds {
+  const D = box.dimCount;
+  const rand = lcg(seed);
+  const size = box.size;
+  const vol = size.reduce((a, b) => a * (b || 1), 1);
+  const side = Math.pow(vol / Math.max(1, count), 1 / D);
+  const cnt = size.map((sz) => Math.max(1, Math.round((sz || side) / side)));
+  const total = cnt.reduce((a, b) => a * b, 1);
+  const points = new Float64Array(total * D), phases = new Float64Array(total);
+  const idx = new Array<number>(D).fill(0);
+  for (let c = 0; c < total; c++) {
+    let rem = c;
+    for (let d = D - 1; d >= 0; d--) { idx[d] = rem % cnt[d]!; rem = Math.floor(rem / cnt[d]!); }
+    for (let d = 0; d < D; d++) points[c * D + d] = box.a[d]! + ((idx[d]! + rand()) / cnt[d]!) * size[d]!;
+    phases[c] = rand();
+  }
+  return { points, phases };
 }
 
 export function integrateStreamlines(field: VectorFieldData, opts: StreamlineOptions): Streamline[] {
+  const box = opts.box ?? field.box;
+  return integrateFromSeeds(field, streamlineSeeds(box, opts.count, opts.seed), opts);
+}
+
+/** integrate one streamline per seed (both directions), see `integrateStreamlines` */
+export function integrateFromSeeds(field: VectorFieldData, seeds: StreamlineSeeds, opts: Pick<StreamlineOptions, "maxSteps" | "step" | "sign" | "box">): Streamline[] {
   const D = field.dimCount;
   const box = opts.box ?? field.box;
   const sgn = opts.sign ?? 1;
   const h = opts.step;
-  const rand = lcg(opts.seed ?? 12345);
   const tmp = new Float64Array(D), q = new Float64Array(D);
 
   /** unit direction at q (into out); false where the field vanishes / is undefined / outside */
@@ -73,19 +105,11 @@ export function integrateStreamlines(field: VectorFieldData, opts: StreamlineOpt
     return pts;
   };
 
-  // seed grid: cells as close to cubes as possible, `count` of them overall
-  const size = box.size;
-  const vol = size.reduce((a, b) => a * (b || 1), 1);
-  const side = Math.pow(vol / Math.max(1, opts.count), 1 / D);
-  const cnt = size.map((sz) => Math.max(1, Math.round((sz || side) / side)));
-  const total = cnt.reduce((a, b) => a * b, 1);
-  const idx = new Array<number>(D).fill(0);
+  const total = seeds.phases.length;
   const lines: Streamline[] = [];
   const seed = new Float64Array(D);
   for (let c = 0; c < total; c++) {
-    let rem = c;
-    for (let d = D - 1; d >= 0; d--) { idx[d] = rem % cnt[d]!; rem = Math.floor(rem / cnt[d]!); }
-    for (let d = 0; d < D; d++) seed[d] = box.a[d]! + ((idx[d]! + rand()) / cnt[d]!) * size[d]!;
+    for (let d = 0; d < D; d++) seed[d] = seeds.points[c * D + d]!;
     const back = integrate(seed, -1), fwd = integrate(seed, 1);
     const n = back.length / D + 1 + fwd.length / D;
     if (n < 2) continue;
@@ -95,7 +119,7 @@ export function integrateStreamlines(field: VectorFieldData, opts: StreamlineOpt
     for (let i = back.length / D - 1; i >= 0; i--) for (let d = 0; d < D; d++) pts[o++] = back[i * D + d]!;
     for (let d = 0; d < D; d++) pts[o++] = seed[d]!;
     for (let i = 0; i < fwd.length; i++) pts[o++] = fwd[i]!;
-    lines.push({ points: pts, length: (n - 1) * h, phase: rand() });
+    lines.push({ points: pts, length: (n - 1) * h, phase: seeds.phases[c]! });
   }
   return lines;
 }

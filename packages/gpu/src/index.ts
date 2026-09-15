@@ -4,3 +4,8 @@ export type { GpuProgram } from "./program";
 export { gpuSampleOn } from "./sample";
 export { FunctionEmitter, PRELUDE, expandGrad, f32, keyOf, vecType } from "./wgsl";
 export type { ArgBindings } from "./wgsl";
+export { gpuMarchingSquaresSegments, gpuProjector, gpuExactIsoContours } from "./isolines";
+export type { GpuProjector } from "./isolines";
+export { gpuIntegrateFromSeeds } from "./flow";
+export type { GpuStreamlineOptions } from "./flow";
+export type { Kernel, KernelBuffer, BufferRole } from "./device";

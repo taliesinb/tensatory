@@ -59,6 +59,9 @@ seed, stopping where the field vanishes or the box is left. `sign = −1` flows
 against the field (descent for a gradient). Each line carries its arc length
 and a random phase for particle animation.
 
+Both isolines (exact projection) and streamline integration also exist as GPU
+kernels with agreement tests — see [gpu.md](gpu.md).
+
 The viewer never integrates a symbolic vector field pointwise: it samples the
 field once on a grid at the current resolution (over the in-view part of its
 box) and integrates through the bilinear interpolant, as the 3D prototype did

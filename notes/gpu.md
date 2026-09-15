@@ -63,16 +63,51 @@ gradient of `|∇ mixture|` takes 0.48 s on the GPU vs 2.3 s on the CPU;
 `|∇ mixture|` 49 vs 357 ms. For trivial fields the CPU wins (GPU time is
 mostly shader compilation + readback, ~50–120 ms).
 
+## Stage 3 (done): geometry kernels
+
+`packages/gpu/src/isolines.ts` and `flow.ts`, driven by a generic
+`GpuBackend.runKernel({code, invocations, buffers})` (buffers with roles
+`r`/`rw`, explicit layouts per role signature, selective readback).
+
+* **Marching squares** — one invocation per cell, up to two segments written
+  to fixed slots plus a per-cell count; the CPU compacts in cell order, so the
+  segment list equals core's exactly (tested as a canonical multiset,
+  including NaN holes).
+* **Projection** — `gpuProjector(field, grid)` transpiles `f`, `∂f/∂x`,
+  `∂f/∂y` once; each dispatch projects a batch of `[x, y, maxDist]` vertices
+  with the same damped Newton + bisection fallback and box-face locking as
+  core, at f32 tolerances.
+* **Exact isolines** — `gpuExactIsoContours`: GPU marching squares → CPU
+  `joinSegments` (with an f32-scale join tolerance: shared vertices computed
+  in two cells differ by ~1e-7) → one projection dispatch for all seed
+  vertices → refinement rounds, each projecting the midpoints of every
+  still-marked chord in one dispatch and splitting where they deviate. Same
+  topology and chords as core within tolerance; residuals ~1e-6 (f32) instead
+  of ~1e-11.
+* **Streamlines** — `gpuIntegrateFromSeeds`: one invocation per seed, RK4 on
+  the unit field both ways into fixed slots; seeds and phases come from core's
+  `streamlineSeeds` (its LCG now uses `Math.imul`, so it is reproducible bit
+  for bit). Trajectories match core's until f32 drift near separatrices;
+  constant fields match exactly.
+
+Two shader pitfalls found here: **`v != v` is optimized away under Metal's
+fast-math**, so NaN tests use bit patterns (`isnan_` / `isfinite_` in the
+prelude); and `switch` on `u32` needs `u` suffixes on every case.
+
+In the viewer (`apps/viewer/src/gpuGeometry.ts`) both run asynchronously:
+exact isolines for symbolic fields are requested per level and the cheap CPU
+marching-squares lines stand in until they land; streamline sets stay on
+screen until the new integration arrives. `?geometry=cpu` keeps the CPU
+geometry with GPU sampling. Timings in Chrome: `|∇ mixture|` at 128², ~25 ms
+per level with all levels concurrent and the main thread free; 1k streamlines
+8–50 ms.
+
 ## Next stages
 
-1. Marching squares (then cubes) as compute passes; Newton projection of
-   contour vertices on the GPU; streamline integration as a compute pass over
-   the sampled vector grid. With those, an animation frame for a symbolic
-   field is fully GPU-side.
-2. A WebGPU renderer: raster as a texture sampled with the colormap LUT,
+1. A WebGPU renderer: raster as a texture sampled with the colormap LUT,
    isolines and streamlines as instanced line geometry with per-vertex colour
    and the particle window evaluated in the fragment shader (as the 3D
-   prototype did in GLSL). Keeping the raster on the GPU also removes the
-   readback for the colorfield.
-3. Statistics (min/max for slider ranges) as a reduction pass, so derived
-   fields never touch the CPU.
+   prototype did in GLSL). Removes the raster readback and is the base for 3D.
+2. Statistics (min/max for slider ranges) as a reduction pass.
+3. Keep grids resident on the GPU between passes (sample → contour → render)
+   instead of round-tripping through the CPU.

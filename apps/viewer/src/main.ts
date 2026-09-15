@@ -13,9 +13,11 @@ import {
   TensatoryError,
   boxBlur,
   contourField,
-  integrateStreamlines,
+  integrateFromSeeds,
   isoContours,
+  streamlineSeeds,
   taubinSmooth,
+  type ContourResult,
   type Polyline,
   type ScalarFieldData,
   type Streamline,
@@ -26,6 +28,7 @@ import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
+import { GpuGeometry } from "./gpuGeometry";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -117,6 +120,7 @@ const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), locke
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
+let geometry: GpuGeometry | undefined; // set after the sampler finds a GPU
 let usable = { scalars: [] as string[], vectors: [] as string[] };
 
 /*******************************************************/
@@ -269,8 +273,10 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const metric = num("metric"), line = num("line") ?? 0;
   const tol = 0.25 * renderer.worldPerPixel;
   const ic = slotScalar("ic");
-  const rough = isoMoving() && f.data.kind === "symbolic" && metric === null;
-  const key = [f.id, grid.size.join("x"), viewBoxKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|");
+  const exactWanted = f.data.kind === "symbolic" && metric === null;
+  let rough = isoMoving() && exactWanted;
+  const gridKey = `${grid.size.join("x")}|${viewBoxKey}`;
+  const key = [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|");
   if (isoCache?.key === key) return isoCache.result;
   const raw = sampleUse(f, grid);
   if (!raw) return undefined; // still sampling
@@ -279,10 +285,24 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const [lo, hi] = rangeOf(f);
   const lines: Polyline[] = [];
   let method = "linear", vertices = 0, maxRes = 0;
-  for (const t of isoLevelParams()) {
-    const level = f.codomain.fromParam(t, lo, hi);
+  const levels = isoLevelParams().map((t) => f.codomain.fromParam(t, lo, hi));
+  // exact lines on the GPU: request every level; while any is still computing, show rough lines this frame
+  let gpuResults: ContourResult[] | undefined;
+  if (exactWanted && !rough && geometry) {
+    gpuResults = [];
+    for (const level of levels) {
+      const r = geometry.contours(`${f.id}|${gridKey}|${level}|${tol.toExponential(2)}`, `${f.id}|${gridKey}`, f.data, grid, values, level, tol);
+      if (!r) { gpuResults = undefined; rough = true; break; }
+      gpuResults.push(r);
+    }
+  }
+  for (const [k, level] of levels.entries()) {
     let ls: Polyline[];
-    if (rough) {
+    if (gpuResults) {
+      const r = gpuResults[k]!;
+      method = r.method; ls = r.lines;
+      if (r.maxResidual > maxRes) maxRes = r.maxResidual;
+    } else if (rough) {
       ls = isoContours(grid, values, level);
     } else if (metric === null) {
       const r = contourField(f.data, grid, values, level, { tolerance: tol });
@@ -306,9 +326,10 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
     });
   }
   const ms = (performance.now() - t0).toFixed(1);
-  const info = method === "exact" ? `exact: ${vertices} vertices, max |f − c| = ${maxRes.toExponential(1)}, ${ms} ms` : `marching squares on ${grid.size.join("×")}: ${vertices} vertices, ${ms} ms`;
+  const info = method === "exact" ? `exact${gpuResults ? " (GPU)" : ""}: ${vertices} vertices, max |f − c| = ${maxRes.toExponential(1)}, ${ms} ms` : `marching squares on ${grid.size.join("×")}: ${vertices} vertices, ${ms} ms`;
   const result: IsoResult = { lines, values: colours, info, rough };
-  isoCache = { key, result };
+  // a rough result standing in for pending GPU lines is keyed as rough so the exact one replaces it when it lands
+  isoCache = { key: [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|"), result };
   return result;
 }
 
@@ -356,12 +377,19 @@ function streamlines(grid: DenseGrid): StreamSet | undefined {
   const key = [v.id, count, maxSteps, sign, step.toExponential(4), box.intervals.flat().join(",")].join("|");
   let set = STREAM_CACHE.get(key);
   if (!set) {
-    const t0 = performance.now();
-    const lines = integrateStreamlines(field, { count, maxSteps, step, sign, seed: 12345, box });
+    const seeds = streamlineSeeds(box, count, 12345);
+    let lines: Streamline[] | undefined;
+    if (geometry) {
+      lines = geometry.streamlines(key, field, seeds, { maxSteps, step, sign, box });
+      if (!lines) return stream; // still integrating: keep showing the previous set
+    } else {
+      const t0 = performance.now();
+      lines = integrateFromSeeds(field, seeds, { maxSteps, step, sign, box });
+      console.log(`streamlines: ${lines.length} lines in ${(performance.now() - t0).toFixed(1)} ms`);
+    }
     set = { lines, step, cell, colourKey: "" };
     STREAM_CACHE.set(key, set);
     if (STREAM_CACHE.size > 16) STREAM_CACHE.delete(STREAM_CACHE.keys().next().value!);
-    console.log(`streamlines: ${lines.length} lines in ${(performance.now() - t0).toFixed(1)} ms`);
   }
   const s = slotScalar("sc");
   const ck = s?.id ?? "";
@@ -639,7 +667,7 @@ function loadOpts(): boolean {
 
 function setBundle(bundle: Bundle, file: string): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
   const errors = bundle.buildAll();
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !errors.has(id) && bundle.scalarField(id).domain.numDims === 2),
@@ -785,7 +813,7 @@ function frame(now: number): void {
     ui.isoValue.value = String((((+ui.isoValue.value! + (state.dir.iso * dt) / cycle) % 1) + 1) % 1);
     state.dirty = true;
   }
-  if (isoCache?.result.rough && !isoMoving()) state.dirty = true; // settled: replace rough lines with exact ones
+  if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
   if (state.dirty) {
     try { render(); } catch (e) { showError(e); state.dirty = false; }
   }
@@ -800,6 +828,7 @@ function frame(now: number): void {
   const prefer = params.get("backend");
   await sampler.init(prefer === "cpu" || prefer === "gpu" ? prefer : "auto");
   sampler.check = params.get("check") === "1";
+  if (sampler.gpu && params.get("geometry") !== "cpu") geometry = new GpuGeometry(sampler.gpu, () => { state.dirty = true; });
   $("pickCompute").textContent = sampler.label + (sampler.check ? " — agreement check on (see L)" : "");
   try {
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;

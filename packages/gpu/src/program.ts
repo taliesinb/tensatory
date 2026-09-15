@@ -177,6 +177,14 @@ export class ProgramBuilder {
     });
   }
 
+  /** everything emitted so far (prelude + field functions) and the packed data, for kernels that add their own entry point */
+  library(): { code: string; data: Float32Array } {
+    const data = new Float32Array(Math.max(4, this.dataLength));
+    let o = 0;
+    for (const c of this.chunks) { data.set(c, o); o += c.length; }
+    return { code: [PRELUDE, "@group(0) @binding(1) var<storage, read> data: array<f32>;", ...this.fns].join("\n\n"), data };
+  }
+
   /** the complete program sampling `field` on the dispatch grid */
   build(field: ScalarFieldData | VectorFieldData): GpuProgram {
     const D = this.D, grid = this.grid;
@@ -194,7 +202,6 @@ export class ProgramBuilder {
     const p = D === 1 ? comps[0]! : `${vecType(D)}(${comps.join(", ")})`;
     const write = channels === 1 ? `  out[i] = ${entry}(p, pos);` : `  let v = ${entry}(p, pos);\n${Array.from({ length: D }, (_, d) => `  out[i * ${D} + ${d}] = v[${d}];`).join("\n")}`;
     const main = `@group(0) @binding(0) var<storage, read_write> out: array<f32>;
-@group(0) @binding(1) var<storage, read> data: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i: i32 = i32(id.x);
   if (i >= ${grid.sampleCount}) { return; }
@@ -203,10 +210,8 @@ ${idx.join("\n")}
   let pos: i32 = ${direct ? "i" : "-1"};
 ${write}
 }`;
-    const data = new Float32Array(Math.max(4, this.dataLength));
-    let o = 0;
-    for (const c of this.chunks) { data.set(c, o); o += c.length; }
-    return { code: [PRELUDE, ...this.fns, main].join("\n\n"), data, channels, sampleCount: grid.sampleCount };
+    const lib = this.library();
+    return { code: `${lib.code}\n\n${main}`, data: lib.data, channels, sampleCount: grid.sampleCount };
   }
 }
 

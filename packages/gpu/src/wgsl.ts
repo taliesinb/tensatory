@@ -56,6 +56,9 @@ const INV_LN2: f32 = 1.4426950408889634;
 const SQRT_2PI: f32 = 2.5066282746310002;
 var<private> zero_: f32 = 0.0;
 fn nan_() -> f32 { return zero_ / zero_; }
+// NaN test by bit pattern: (v != v) is optimized away under fast-math (Metal)
+fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+fn isfinite_(v: f32) -> bool { return (bitcast<u32>(v) & 0x7f800000u) != 0x7f800000u; }
 fn erf_(x: f32) -> f32 {
   let s = sign(x); let a = abs(x); let t = 1.0 / (1.0 + 0.3275911 * a);
   let y = 1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
