@@ -7,12 +7,12 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-<h1>interval slider <small>apps/ui-proto — nothing here is used by the viewer</small></h1>
+<h1>interval slider <small>apps/ui-proto — <b>interval slider</b> · <a href="colormap.html">colormap interval</a></small></h1>
 <div class="help">
-  press a <b>handle</b>: move that end · press the <b>band</b>: move the whole interval · press <b>outside</b>: centre jumps there, then drags ·
-  <kbd>alt</kbd>-press: symmetric resize about the centre · <kbd>shift</kbd>-hover: preview the centre under the pointer ·
-  wheel: translate, <kbd>alt</kbd>-wheel: resize · <kbd>←</kbd> <kbd>→</kbd>: nudge 10 %, <kbd>alt</kbd>+arrows: narrow / widen ·
-  <kbd>esc</kbd>: cancel drag · nullable: quick click on the band or <kbd>⌫</kbd> unsets, click the empty bar to bring it back
+  <b>full</b> — press a handle: move that end (off the bar's end: destroy it); <i>click</i> a handle: destroy it · press the band: move the whole interval · press outside: centre jumps there ·
+  <kbd>alt</kbd>-press: symmetric resize · <kbd>shift</kbd>-hover: preview the centre · wheel / <kbd>alt</kbd>-wheel: translate / resize · <kbd>←</kbd> <kbd>→</kbd> nudge 10 %, <kbd>alt</kbd>+arrows narrow / widen<br>
+  <b>half</b> — drag anywhere: move the existing end (off either side: clears) · <i>click</i> the filled part: the other end appears there · <i>click</i> the handle: destroy it · <kbd>shift</kbd>-hover previews the end<br>
+  <b>none</b> — drag: a new interval spanning the dragged range; release past an end of the bar for a half interval · <kbd>esc</kbd> cancels any drag · <kbd>⌫</kbd> clears
 </div>
 
 <div class="panel">
@@ -21,8 +21,10 @@
     <div class="row"><label>slider</label><div class="sl" id="plain" data-min="0" data-max="1" data-step="0.001" data-value="0.5"></div><span class="val" id="plainv"></span></div>
     <div class="row"><label>interval</label><div class="isl" id="basic" data-min="0" data-max="1" data-step="0.001" data-lo="0.25" data-hi="0.6"></div><span class="val" id="basicv"></span></div>
     <div class="row"><label>stepped</label><div class="isl" id="stepped" data-min="0" data-max="100" data-step="5" data-lo="20" data-hi="45"></div><span class="val" id="steppedv"></span></div>
-    <div class="row"><label>nullable</label><div class="isl" id="nullable" data-min="-1" data-max="1" data-step="0.01" data-lo="-0.5" data-hi="0.5" data-nullable></div><span class="val" id="nullablev"></span></div>
-    <div class="row"><label>unset</label><div class="isl" id="unset" data-min="0" data-max="10" data-step="0.1" data-lo="null" data-hi="6" data-nullable></div><span class="val" id="unsetv"></span></div>
+    <div class="row"><label>symmetric</label><div class="isl" id="symmetric" data-min="-1" data-max="1" data-step="0.01" data-lo="-0.5" data-hi="0.5"></div><span class="val" id="symmetricv"></span></div>
+    <div class="row"><label>half lo</label><div class="isl" id="halflo" data-min="0" data-max="10" data-step="0.1" data-lo="3" data-hi="null"></div><span class="val" id="halflov"></span></div>
+    <div class="row"><label>half hi</label><div class="isl" id="halfhi" data-min="0" data-max="10" data-step="0.1" data-lo="null" data-hi="6"></div><span class="val" id="halfhiv"></span></div>
+    <div class="row"><label>none</label><div class="isl" id="none" data-min="0" data-max="1" data-step="0.001" data-lo="null" data-hi="null"></div><span class="val" id="nonev"></span></div>
     <div class="row"><label>point</label><div class="isl" id="point" data-min="0" data-max="1" data-step="0.001" data-lo="0.5" data-hi="0.5"></div><span class="val" id="pointv"></span></div>
     <div class="row"><label>full</label><div class="isl" id="full" data-min="0" data-max="1" data-step="0.001"></div><span class="val" id="fullv"></span></div>
   </div>

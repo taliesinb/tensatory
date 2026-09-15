@@ -48,6 +48,9 @@ Slots: **C** colorfield, **I_V** isoline value, **I_C** isoline colour,
 every scalar *and* vector field of the bundle. A slot resolves its field to a
 "use": a vector slot given a scalar uses its gradient (∇ glyph), a scalar
 slot given a vector uses its norm (|·| glyph), otherwise the field itself.
+Derived norms get a log-scaled codomain (`{min: 0, log: "10"}`): gradient
+norms are heavy-tailed — thousands in the corners of the Rosenbrock box,
+vanishing at the minimum — and a linear range hides everything but the corners.
 Defaults: C = I_V = first scalar field, colour slots none (a colour slot equal
 to C would paint lines the raster's own colour and hide them), S_∇ = the
 field's `exactGradient` if any, else the field (→ its gradient). Column

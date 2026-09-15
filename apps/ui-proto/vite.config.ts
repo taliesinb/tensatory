@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 
 // Fixed port, distinct from the viewer's 5180.
 export const PORT = 5181;
+const PAGE = process.env.PAGE ?? "index";
 
 /** Inline every emitted JS chunk and CSS asset into index.html so dist/index.html is one self-contained file
  *  that opens via file:// (module scripts loaded from separate files do not, because of CORS). */
@@ -35,6 +36,12 @@ export default defineConfig({
   base: "./",
   server: { port: PORT, strictPort: true, host: "127.0.0.1" },
   preview: { port: PORT, strictPort: true, host: "127.0.0.1" },
-  build: { target: "es2022", sourcemap: false, modulePreload: false, cssCodeSplit: false, assetsInlineLimit: 1e9 },
+  build: {
+    target: "es2022", sourcemap: false, modulePreload: false, cssCodeSplit: false, assetsInlineLimit: 1e9,
+    // one page per build (PAGE=index|colormap) so shared modules are duplicated into each page instead of split
+    // into a chunk that a single self-contained HTML file could not load; only the first build empties dist/
+    rollupOptions: { input: `${PAGE}.html` },
+    emptyOutDir: PAGE === "index",
+  },
   plugins: [singleFile()],
 });

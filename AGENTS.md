@@ -98,8 +98,9 @@ profiling test.
   cursor pane + legend bottom-right. The matrix assigns fields to slots C,
   I_V, I_C, S_∇, S_C; rows are every scalar AND vector field; a vector slot
   given a scalar uses its gradient (∇ glyph), a scalar slot given a vector uses
-  its norm (|·| glyph). Column headers toggle their panel; disabled columns
-  dim. Streamline flow direction is the ▶/◀ play direction (◀ = against the
+  its norm (|·| glyph; log-scaled codomain, since gradient norms span orders
+  of magnitude and vanish at critical points). Column headers toggle their
+  panel; disabled columns dim. Streamline flow direction is the ▶/◀ play direction (◀ = against the
   field = descent); shift-click a ▶ reverses, plain click only toggles play,
   space starts both animations when none is playing else pauses. Colormaps
   are per field: one legend bar per coloured field listing its slots, black

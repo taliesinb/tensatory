@@ -172,7 +172,8 @@ function useScalar(id: string | null | undefined): ScalarUse | undefined {
   let u = useCache.get(key) as ScalarUse | undefined;
   if (!u) {
     const v = b.vectorField(id);
-    u = { id: key, name: `|${v.name}|`, codomain: new Codomain("norm"), data: new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, 2, { scalars: {}, vectors: { v: v.data } }) };
+    // vector norms are heavy-tailed (gradient norms span orders of magnitude and vanish at critical points): log scale
+    u = { id: key, name: `|${v.name}|`, codomain: new Codomain({ min: 0, log: "10" }), data: new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, 2, { scalars: {}, vectors: { v: v.data } }) };
     useCache.set(key, u);
   }
   return u;
