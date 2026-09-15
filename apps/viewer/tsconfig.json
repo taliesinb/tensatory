@@ -4,7 +4,8 @@
     "noEmit": true,
     "rootDir": "../..",
     "types": [
-      "vite/client"
+      "vite/client",
+      "@webgpu/types"
     ],
     "lib": [
       "ES2022",

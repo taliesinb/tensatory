@@ -43,15 +43,36 @@ rules, both encoded in the package:
 The build script of `webgpu` must be allowed (`onlyBuiltDependencies` in
 `pnpm-workspace.yaml`). Tests skip themselves when no adapter is available.
 
+## Stage 2 (done): the viewer samples on the GPU
+
+`apps/viewer/src/sampler.ts` is a sampling service in front of both backends.
+`sampler.request(key, field, grid)` returns cached values, or — on the GPU —
+starts the computation and returns `undefined`; the frame skips that layer and
+a re-render is scheduled when the result lands. CPU sampling stays
+synchronous, so a CPU-only session behaves exactly as before. It feeds the
+colorfield raster, the isoline seed values and the streamline vector-field
+grid; core still computes statistics (slider ranges), exact isoline
+projection and streamline integration on the CPU. NaN masking outside a
+field's box is applied uniformly on the viewer side.
+
+The bundle panel shows the backend (`GPU (apple metal-3)` / `CPU`);
+`?backend=cpu|gpu` overrides, `?check=1` computes every GPU sample on the CPU
+too and logs the deviation (`agreement <key>: worst 0.12× tolerance …`) —
+the test suite's guarantee, live. Measured in Chrome (M-series): at 512² the
+gradient of `|∇ mixture|` takes 0.48 s on the GPU vs 2.3 s on the CPU;
+`|∇ mixture|` 49 vs 357 ms. For trivial fields the CPU wins (GPU time is
+mostly shader compilation + readback, ~50–120 ms).
+
 ## Next stages
 
-1. Viewer integration: a backend switch (GPU when available) for grid sampling
-   and the streamline vector-field sampling, with an agreement check surfaced
-   in the log; the render path has to become async-aware for that.
-2. Marching squares (then cubes) as compute passes; Newton projection of
+1. Marching squares (then cubes) as compute passes; Newton projection of
    contour vertices on the GPU; streamline integration as a compute pass over
-   the sampled vector grid.
-3. A WebGPU renderer: raster as a texture sampled with the colormap LUT,
+   the sampled vector grid. With those, an animation frame for a symbolic
+   field is fully GPU-side.
+2. A WebGPU renderer: raster as a texture sampled with the colormap LUT,
    isolines and streamlines as instanced line geometry with per-vertex colour
    and the particle window evaluated in the fragment shader (as the 3D
-   prototype did in GLSL).
+   prototype did in GLSL). Keeping the raster on the GPU also removes the
+   readback for the colorfield.
+3. Statistics (min/max for slider ranges) as a reduction pass, so derived
+   fields never touch the CPU.

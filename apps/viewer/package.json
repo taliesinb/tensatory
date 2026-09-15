@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@tensatory/core": "workspace:*",
-    "@tensatory/schema": "workspace:*"
+    "@tensatory/schema": "workspace:*",
+    "@tensatory/gpu": "workspace:*"
   },
   "devDependencies": {
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "@webgpu/types": "^0.1.60"
   }
 }

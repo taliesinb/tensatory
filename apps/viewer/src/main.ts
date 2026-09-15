@@ -25,6 +25,7 @@ import { MAPS, cmap, cssGradient, lut } from "./colormap";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import { Renderer2D, type LineLayer, type Scene } from "./render2d";
+import { Sampler, type Values } from "./sampler";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -115,6 +116,7 @@ const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
 const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
+const sampler = new Sampler(() => { state.dirty = true; });
 let usable = { scalars: [] as string[], vectors: [] as string[] };
 
 /*******************************************************/
@@ -237,23 +239,9 @@ function currentGrid(box: Box): DenseGrid {
   return squareGrid(box, res);
 }
 
-/** field values on the grid, NaN outside the field's own box */
-const sampleCache = new Map<string, Float64Array>();
-function sampleUse(u: ScalarUse, grid: DenseGrid): Float64Array {
-  const key = `${u.id}|${grid.size.join("x")}|${grid.box.intervals.flat().join(",")}`;
-  let v = sampleCache.get(key);
-  if (v) return v;
-  const data = u.data;
-  if (data.box.contains(grid.box.a, 1e-12) && data.box.contains(grid.box.b, 1e-12)) v = data.sampleOn(grid);
-  else {
-    v = new Float64Array(grid.sampleCount);
-    const p = new Float64Array(2);
-    const usePos = data.samplePoints?.equals(grid) ?? false;
-    for (let i = 0; i < v.length; i++) { grid.pointInto(i, p); v[i] = data.box.contains(p, 1e-12) ? data.fn(p, usePos ? i : -1) : NaN; }
-  }
-  if (sampleCache.size > 32) sampleCache.delete(sampleCache.keys().next().value!);
-  sampleCache.set(key, v);
-  return v;
+/** field values on the grid (NaN outside the field's own box); undefined while the GPU is still computing */
+function sampleUse(u: ScalarUse, grid: DenseGrid): Values | undefined {
+  return sampler.request(`${u.id}|${grid.size.join("x")}|${grid.box.intervals.flat().join(",")}`, u.data, grid);
 }
 
 /*******************************************************/
@@ -284,8 +272,9 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const rough = isoMoving() && f.data.kind === "symbolic" && metric === null;
   const key = [f.id, grid.size.join("x"), viewBoxKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|");
   if (isoCache?.key === key) return isoCache.result;
-  const t0 = performance.now();
   const raw = sampleUse(f, grid);
+  if (!raw) return undefined; // still sampling
+  const t0 = performance.now();
   const values = metric === null ? raw : boxBlur(grid, raw, metric);
   const [lo, hi] = rangeOf(f);
   const lines: Polyline[] = [];
@@ -335,22 +324,23 @@ const STREAM_CACHE = new Map<string, StreamSet>();
  * O(grid) evaluations instead of O(lines × steps × 4), as the 3D prototype did with its gradient grid.
  */
 const SAMPLED_VECTORS = new Map<string, DenseVectorFieldData>();
-function integrableVector(v: VectorUse, grid: DenseGrid): VectorFieldData {
+function integrableVector(v: VectorUse, grid: DenseGrid): VectorFieldData | undefined {
   if (v.data.kind === "sampled") return v.data;
   const box = v.data.box.intersect(grid.box) ?? v.data.box;
   const size = [0, 1].map((d) => Math.max(2, Math.round(box.size[d]! / (grid.spacing[d]! || 1)) + 1));
   const key = `${v.id}|${size.join("x")}|${box.intervals.flat().join(",")}`;
   let dense = SAMPLED_VECTORS.get(key);
   if (!dense) {
-    const t0 = performance.now();
     const g = new DenseGrid(size, box);
-    dense = new DenseVectorFieldData(g, v.data.sampleOn(g));
+    const values = sampler.request(`vec:${key}`, v.data, g);
+    if (!values) return undefined; // still sampling
+    dense = new DenseVectorFieldData(g, values);
     SAMPLED_VECTORS.set(key, dense);
     if (SAMPLED_VECTORS.size > 8) SAMPLED_VECTORS.delete(SAMPLED_VECTORS.keys().next().value!);
-    console.log(`sampled ${v.name} on ${size.join("×")} in ${(performance.now() - t0).toFixed(1)} ms`);
   }
   return dense;
 }
+
 let stream: StreamSet | undefined;
 function streamlines(grid: DenseGrid): StreamSet | undefined {
   const v = streamVector();
@@ -361,6 +351,7 @@ function streamlines(grid: DenseGrid): StreamSet | undefined {
   const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
   const step = 0.5 * cell;
   const field = integrableVector(v, grid);
+  if (!field) { stream = undefined; return undefined; } // still sampling
   const box = field.box.intersect(grid.box) ?? field.box;
   const key = [v.id, count, maxSteps, sign, step.toExponential(4), box.intervals.flat().join(",")].join("|");
   let set = STREAM_CACHE.get(key);
@@ -403,8 +394,9 @@ function render(): void {
     pointSets: ui.showPoints.checked ? [...state.bundle.pointSets.values()].filter((ps) => ps.domain.numDims === 2) : [],
   };
   const c = slotScalar("c");
-  if (ui.showScalar.checked && c) {
-    const values = sampleUse(c, grid);
+  const cValues = ui.showScalar.checked && c ? sampleUse(c, grid) : undefined;
+  if (c && cValues) {
+    const values = cValues;
     scene.raster = { key: `${c.id}|${grid.size.join("x")}|${viewBoxKey}|${state.maps[c.id] ?? 0}`, grid, values, toParam: paramOf(c), lut: lut(mapOf(c)), smooth: ui.smooth.checked };
   }
   const iso = isolines(grid);
@@ -647,7 +639,7 @@ function loadOpts(): boolean {
 
 function setBundle(bundle: Bundle, file: string): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampleCache.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
+  rangeCache.clear(); sampler.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
   const errors = bundle.buildAll();
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !errors.has(id) && bundle.scalarField(id).domain.numDims === 2),
@@ -805,6 +797,10 @@ function frame(now: number): void {
 
 (async () => {
   const params = new URLSearchParams(location.search);
+  const prefer = params.get("backend");
+  await sampler.init(prefer === "cpu" || prefer === "gpu" ? prefer : "auto");
+  sampler.check = params.get("check") === "1";
+  $("pickCompute").textContent = sampler.label + (sampler.check ? " — agreement check on (see L)" : "");
   try {
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }

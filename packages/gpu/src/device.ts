@@ -7,8 +7,9 @@ async function findGpu(): Promise<GPU | undefined> {
   const nav = (globalThis as { navigator?: { gpu?: GPU } }).navigator;
   if (nav?.gpu) return nav.gpu;
   try {
-    // node: Dawn bindings. Dynamic import so browsers never see it.
-    const mod = (await import("webgpu")) as { create: (flags: string[]) => GPU; globals: Record<string, unknown> };
+    // node: Dawn bindings. The module name is a variable so bundlers (Vite) do not try to resolve it for browsers.
+    const name = "webgpu";
+    const mod = (await import(/* @vite-ignore */ name)) as { create: (flags: string[]) => GPU; globals: Record<string, unknown> };
     Object.assign(globalThis, mod.globals); // GPUBufferUsage, GPUMapMode, ...
     return mod.create([]);
   } catch {
