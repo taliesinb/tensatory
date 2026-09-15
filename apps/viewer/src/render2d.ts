@@ -21,9 +21,10 @@ export interface RasterLayer {
   key: string; // cache key: re-rasterize only when it changes
   grid: DenseGrid;
   values: ArrayLike<number>;
-  /** value -> colormap parameter in [0, 1] (NaN -> transparent) */
+  /** value -> codomain parameter in [0, 1] (NaN -> transparent) */
   toParam: (v: number) => number;
-  lut: Uint8ClampedArray;
+  /** 256 RGBA entries over the parameter; alpha 0 = not drawn (see cmapInterval.ts lutFor) */
+  lut: Uint8Array;
   smooth: boolean;
 }
 
@@ -42,9 +43,11 @@ export interface Particles {
 
 export interface LineLayer {
   lines: Polyline[];
-  /** per-line, per-vertex colormap parameters (same count as vertices), or undefined for a solid colour */
+  /** per-line, per-vertex codomain parameters (same count as vertices), or undefined for a solid colour */
   values?: (Float64Array | undefined)[];
   cmap?: Colormap;
+  /** codomain parameter -> colormap parameter (a colormap interval selection); NaN = the segment is not drawn */
+  select?: (t: number) => number;
   color: RGB;
   width: number;
   alpha: number;
@@ -169,7 +172,7 @@ export class Renderer2D {
       this.off.width = nx; this.off.height = ny;
       const octx = this.off.getContext("2d")!;
       const img = octx.createImageData(nx, ny), px = img.data;
-      const sx = r.grid.strides[0]!, sy = r.grid.strides[1]!, n = r.lut.length / 3;
+      const sx = r.grid.strides[0]!, sy = r.grid.strides[1]!, n = r.lut.length / 4;
       for (let j = 0; j < ny; j++) {
         const row = ny - 1 - j; // grid y grows upwards; image row 0 is the top
         for (let i = 0; i < nx; i++) {
@@ -177,8 +180,8 @@ export class Renderer2D {
           const o = (row * nx + i) * 4;
           const t = r.toParam(v);
           if (Number.isNaN(t)) { px[o + 3] = 0; continue; }
-          const k = Math.max(0, Math.min(n - 1, Math.round(t * (n - 1)))) * 3;
-          px[o] = r.lut[k]!; px[o + 1] = r.lut[k + 1]!; px[o + 2] = r.lut[k + 2]!; px[o + 3] = 255;
+          const k = Math.max(0, Math.min(n - 1, Math.round(t * (n - 1)))) * 4;
+          px[o] = r.lut[k]!; px[o + 1] = r.lut[k + 1]!; px[o + 2] = r.lut[k + 2]!; px[o + 3] = r.lut[k + 3]!;
         }
       }
       octx.putImageData(img, 0, 0);
@@ -230,8 +233,15 @@ export class Renderer2D {
       const period = P && P.split <= 1 ? len + k : len;
       const t = P && period > 0 ? (((P.travel + phase * period) % period) + period) % period : 0;
       /** draw the part of segment i between arc parameters u0..u1 (0..1 along the segment) */
+      const sel = l.select;
       const emit = (i: number, u0: number, u1: number, bright: number) => {
-        const cbin = vals ? Math.max(0, Math.min(COLOR_BINS - 1, Math.round(0.5 * (vals[i]! + vals[i + 1]!) * (COLOR_BINS - 1)))) : 0;
+        let cbin = 0;
+        if (vals) {
+          let ta = vals[i]!, tb = vals[i + 1]!;
+          if (sel) { ta = sel(ta); tb = sel(tb); }
+          if (Number.isNaN(ta) || Number.isNaN(tb)) return; // no colour (outside the colour field) or masked: not drawn
+          cbin = Math.max(0, Math.min(COLOR_BINS - 1, Math.round(0.5 * (ta + tb) * (COLOR_BINS - 1))));
+        }
         const bbin = Math.max(0, Math.min(ALPHA_BINS - 1, Math.round(bright * (ALPHA_BINS - 1))));
         const kk = cbin * ALPHA_BINS + bbin;
         let path = paths.get(kk);

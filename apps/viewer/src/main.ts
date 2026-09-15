@@ -25,7 +25,9 @@ import {
   type Streamline,
   type VectorFieldData,
 } from "@tensatory/core";
-import { MAPS, cmap, cssGradient, lut, lutRGBA } from "./colormap";
+import { MAPS, cmap, type Colormap } from "./colormap";
+import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lutFor, makeCmapInterval, selectParam, selectionKey } from "./cmapInterval";
+import { makeIntervalSlider } from "./interval";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import { Renderer2D, type LineLayer, type Scene } from "./render2d";
@@ -113,6 +115,8 @@ interface State {
   lockedSel: Sel;
   /** colormap index per scalar use id */
   maps: Record<string, number>;
+  /** colormap interval selection per scalar use id (codomain parameter space); absent = everything */
+  intervals: Record<string, Selection>;
   dirty: boolean;
   paused: boolean;
   animClock: number;
@@ -121,7 +125,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
+const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -252,6 +256,18 @@ const paramOf = (f: ScalarUse) => { const [lo, hi] = rangeOf(f); const cd = f.co
 const mapOf = (f: ScalarUse) => cmap(state.maps[f.id] ?? 0);
 
 /*******************************************************/
+/* colormap interval selections (see cmapInterval.ts): per use, in codomain parameter space */
+
+const selOf = (f: ScalarUse): Selection => state.intervals[f.id] ?? NO_SELECTION;
+/** a use not mapped to any colour slot has a fixed-mask bar: excluded regions are always masked, no clip / stretch */
+const fixedMaskOf = (f: ScalarUse): boolean => !colourSlots().some(([, u]) => u.id === f.id);
+const selKeyOf = (f: ScalarUse): string => selectionKey(selOf(f), fixedMaskOf(f));
+/** the colormap LUT of a colour use, with its selection baked in (alpha 0 = not drawn) */
+const lutOf = (f: ScalarUse): Uint8Array => lutFor(mapOf(f), selOf(f), fixedMaskOf(f));
+/** codomain parameter -> colormap parameter for a colour use (NaN = not drawn), for the canvas line renderer */
+const selectOf = (f: ScalarUse): ((t: number) => number) => { const s = selOf(f), fm = fixedMaskOf(f); return (t) => selectParam(s, t, fm); };
+
+/*******************************************************/
 /* the view box and sampling grid */
 
 function selectedUses(): { scalars: ScalarUse[]; vector: VectorUse | undefined } {
@@ -308,13 +324,16 @@ function sampleUse(u: ScalarUse, grid: DenseGrid): Values | undefined {
 /*******************************************************/
 /* isolines */
 
-/** `split` levels evenly spaced and centred on `value` (codomain parameter space), wrapping past min/max */
+/** `split` levels evenly spaced and centred on `value` (codomain parameter space), wrapping past min/max;
+ *  levels inside a masked range of the I_V field's interval selection are not contoured at all */
 function isoLevelParams(): number[] {
   const c = +ui.isoValue.value!;
   const split = num("split");
-  if (split === null) return [c];
-  const out: number[] = [];
-  for (let k = 0; k < split; k++) { let l = c - 0.5 + (k + 0.5) / split; l = ((l % 1) + 1) % 1; out.push(l); }
+  let out: number[] = [];
+  if (split === null) out = [c];
+  else for (let k = 0; k < split; k++) { let l = c - 0.5 + (k + 0.5) / split; l = ((l % 1) + 1) % 1; out.push(l); }
+  const iv = slotScalar("iv");
+  if (iv) { const s = selOf(iv); if (!isNoSelection(s)) { const fm = fixedMaskOf(iv); out = out.filter((t) => !isMasked(s, t, fm)); } }
   return out;
 }
 
@@ -333,7 +352,7 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const exactWanted = f.data.kind === "symbolic" && metric === null;
   let rough = isoMoving() && exactWanted;
   const gridKey = `${grid.size.join("x")}|${viewBoxKey}`;
-  const key = [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|");
+  const key = [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), selKeyOf(f), tol.toExponential(2), ic?.id ?? "", rough].join("|");
   if (isoCache?.key === key) return isoCache.result;
   const raw = sampleUse(f, grid);
   if (!raw) return undefined; // still sampling
@@ -378,7 +397,7 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
     const toParam = paramOf(ic);
     colours = lines.map((l) => {
       const out = new Float64Array(l.length / 2);
-      for (let i = 0; i < out.length; i++) { const v = ic.data.value([l[2 * i]!, l[2 * i + 1]!]); out[i] = v === undefined ? 0 : toParam(v); }
+      for (let i = 0; i < out.length; i++) { const v = ic.data.value([l[2 * i]!, l[2 * i + 1]!]); out[i] = v === undefined ? NaN : toParam(v); } // NaN (outside the colour field): not drawn
       return out;
     });
   }
@@ -386,7 +405,7 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const info = method === "exact" ? `exact${gpuResults ? " (GPU)" : ""}: ${vertices} vertices, max |f − c| = ${maxRes.toExponential(1)}, ${ms} ms` : `marching squares on ${grid.size.join("×")}: ${vertices} vertices, ${ms} ms`;
   const result: IsoResult = { lines, values: colours, info, rough };
   // a rough result standing in for pending GPU lines is keyed as rough so the exact one replaces it when it lands
-  isoCache = { key: [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), tol.toExponential(2), ic?.id ?? "", rough].join("|"), result };
+  isoCache = { key: [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), selKeyOf(f), tol.toExponential(2), ic?.id ?? "", rough].join("|"), result };
   return result;
 }
 
@@ -457,7 +476,7 @@ function streamlines(grid: DenseGrid): StreamSet | undefined {
       const toParam = paramOf(s);
       set.colours = set.lines.map((l) => {
         const out = new Float64Array(l.points.length / 2);
-        for (let i = 0; i < out.length; i++) { const val = s.data.value([l.points[2 * i]!, l.points[2 * i + 1]!]); out[i] = val === undefined ? 0 : toParam(val); }
+        for (let i = 0; i < out.length; i++) { const val = s.data.value([l.points[2 * i]!, l.points[2 * i + 1]!]); out[i] = val === undefined ? NaN : toParam(val); }
         return out;
       });
     }
@@ -484,7 +503,7 @@ function render(): void {
   const cValues = ui.showScalar.checked && c && !fusedCompute ? sampleUse(c, grid) : undefined;
   if (c && cValues && !gpuDraw) {
     const values = cValues;
-    scene.raster = { key: `${c.id}|${grid.size.join("x")}|${viewBoxKey}|${state.maps[c.id] ?? 0}`, grid, values, toParam: paramOf(c), lut: lut(mapOf(c)), smooth: ui.smooth.checked };
+    scene.raster = { key: `${c.id}|${grid.size.join("x")}|${viewBoxKey}|${state.maps[c.id] ?? 0}|${selKeyOf(c)}`, grid, values, toParam: paramOf(c), lut: lutOf(c), smooth: ui.smooth.checked };
   }
   // fused GPU frames compute isolines / streamlines in renderGpu; otherwise (CPU compute, or GPU compute read back) here
   const iso = fusedCompute ? undefined : isolines(grid);
@@ -493,14 +512,14 @@ function render(): void {
     const alpha = num("isoAlpha") ?? 1;
     const layer: LineLayer = { lines: iso.lines, color: [0.92, 0.92, 0.92], width: 2, alpha };
     const ic = slotScalar("ic");
-    if (iso.values && ic) { layer.values = iso.values; layer.cmap = mapOf(ic); }
+    if (iso.values && ic) { layer.values = iso.values; layer.cmap = mapOf(ic); layer.select = selectOf(ic); }
     scene.lines.push(layer);
   }
   const st = fusedCompute ? undefined : streamlines(grid);
   if (st && !gpuDraw) {
     const layer: LineLayer = { lines: st.lines.map((l) => l.points), color: [1, 1, 1], width: 1.5, alpha: num("sAlpha") ?? 1 };
     const sc = slotScalar("sc");
-    if (st.colours && sc) { layer.values = st.colours; layer.cmap = mapOf(sc); }
+    if (st.colours && sc) { layer.values = st.colours; layer.cmap = mapOf(sc); layer.select = selectOf(sc); }
     // particles are always drawn at the current phase; ▶ only advances the clock (as in the 3D prototype)
     const tail = num("tail");
     if (tail !== null) layer.particles = { lengths: st.lines.map((l) => l.length), phases: st.lines.map((l) => l.phase), step: st.step, tail: tail * st.cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * st.cell };
@@ -544,13 +563,13 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
   if (ui.showScalar.checked && c) {
     const key = gridKey(c, grid);
     const values = fusedCompute ? F.grid(key, c.data, grid) : (() => { const v = sampleUse(c, grid); return v ? F.uploadGrid(`cpu:${key}`, grid, v, 1) : undefined; })();
-    if (values) gs.raster = { values, box: c.data.box, map: valueMap(c), lut: lutRGBA(state.maps[c.id] ?? 0), smooth: ui.smooth.checked };
+    if (values) gs.raster = { values, box: c.data.box, map: valueMap(c), lut: lutOf(c), smooth: ui.smooth.checked };
   }
   // isolines
   const f = slotScalar("iv"), ic = slotScalar("ic");
   const alpha = num("isoAlpha") ?? 1;
   if (ui.showIso.checked && f) {
-    const colour = (ic ? { map: valueMap(ic), lut: lutRGBA(state.maps[ic.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
+    const colour = (ic ? { map: valueMap(ic), lut: lutOf(ic) } : {}) as Partial<GpuLineLayer>;
     if (fusedCompute) {
       const metric = num("metric"), line = num("line") ?? 0;
       const raw = F.grid(gridKey(f, grid), f.data, grid);
@@ -558,7 +577,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       const exact = f.data.kind === "symbolic" && metric === null;
       const [lo, hi] = rangeOf(f);
       const tol = 0.25 * renderer.worldPerPixel;
-      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}`;
+      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}|${selKeyOf(f)}`;
       isoLevelParams().forEach((t, k) => {
         const level = f.codomain.fromParam(t, lo, hi);
         const segs = !exact && line > 0
@@ -575,7 +594,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
   const v = streamVector(), count = num("lines");
   if (v && count !== null) {
     const sc = slotScalar("sc");
-    const colour = (sc ? { map: valueMap(sc), lut: lutRGBA(state.maps[sc.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
+    const colour = (sc ? { map: valueMap(sc), lut: lutOf(sc) } : {}) as Partial<GpuLineLayer>;
     const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
     const tail = num("tail");
     const particles = tail === null ? undefined : { tail: tail * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell };
@@ -604,6 +623,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
 /* legend (#info): one bar per distinct coloured field, listing the slots that use it */
 
 const fmt3 = (v: number) => formatReal(v, 3);
+const BLACK: Colormap = () => [0, 0, 0]; // the "colormap" of bars whose field is not used for colour
 function centerPoint(): number[] | undefined {
   const ps = state.bundle && [...state.bundle.pointSets.values()].find((p) => p.points.length === 1 && p.domain.numDims === 2);
   return ps?.points[0];
@@ -644,16 +664,30 @@ function updateInfo(): void {
     const detent = at === undefined ? "" : `<span class="detent" style="left:${(cd.toParam(Math.min(hi, Math.max(lo, at)), lo, hi) * 100).toFixed(1)}%" title="at ${c!.map(fmt3).join(", ")}: ${cd.format(at)}"></span>`;
     const [l, r] = cd.flip ? [hi, lo] : [lo, hi];
     const map = state.maps[f.id] ?? 0;
-    const bg = coloured ? cssGradient(map) : "#000";
-    const title = coloured ? `${MAPS[map % MAPS.length]}${cd.log ? `, log${cd.log}` : ""} — click to cycle colormap` : `not used for colour${cd.log ? ` (log${cd.log})` : ""}`;
+    // the bar is a colormap interval control (cmapInterval.ts); bars of fields used only for shape are fixed-mask,
+    // and a bar used only as the S_∇ source (no colour, no isolines) has nothing to select
+    const interval = slots.some((k) => k !== "sg");
+    const title = coloured
+      ? `${MAPS[map % MAPS.length]}${cd.log ? `, log${cd.log}` : ""} — drag on the bar to select the drawn interval; click the name to cycle the colormap`
+      : `not used for colour${cd.log ? ` (log${cd.log})` : ""}${interval ? " — drag on the bar: isolines are only drawn at levels inside the selection" : ""}`;
     const order: Slot[] = ["c", "iv", "ic", "sg", "sc"];
     const slotHtml = order.filter((k) => slots.includes(k)).map((k) => SLOT_HTML[k]).join(" ");
-    rows.push(`<div class="lrow" data-use="${f.id}"><span class="lname" title="${f.name}"><span class="slot">${slotHtml}</span>${f.name}</span><span class="lval">${cd.format(l)}</span><span class="bar${coloured ? "" : " plain"}" data-use="${f.id}" style="background:${bg}${coloured ? ";cursor:pointer" : ""}" title="${title}"><span class="notches"></span>${detent}<span class="pip" data-pip="${f.id}"></span></span><span class="lval">${cd.format(r)}</span></div>`);
+    const barCls = `bar${coloured ? "" : " plain"}${interval ? " isl cmap" : ""}`;
+    const barAttrs = interval ? ` data-min="0" data-max="1" data-step="0.001"${coloured ? "" : " data-notoggle"}` : "";
+    rows.push(`<div class="lrow" data-use="${f.id}"><span class="lname${coloured ? " cycle" : ""}" title="${f.name}${coloured ? " — click to cycle the colormap" : ""}"><span class="slot">${slotHtml}</span>${f.name}</span><span class="lval">${cd.format(l)}</span><div class="${barCls}" data-use="${f.id}"${barAttrs} style="background:#000" title="${title}"><span class="notches"></span>${detent}<span class="pip" data-pip="${f.id}"></span></div><span class="lval">${cd.format(r)}</span></div>`);
   }
   const info = $("info");
   info.innerHTML = rows.join("");
   info.style.display = rows.length ? "" : "none";
-  for (const el of info.querySelectorAll<HTMLElement>(".bar:not(.plain)")) el.onclick = () => { const id = el.dataset.use!; state.maps[id] = ((state.maps[id] ?? 0) + 1) % MAPS.length; updateInfo(); state.dirty = true; saveOptsSoon(); };
+  for (const el of info.querySelectorAll<HTMLElement>(".lname.cycle")) el.onclick = () => { const id = el.closest<HTMLElement>(".lrow")!.dataset.use!; state.maps[id] = ((state.maps[id] ?? 0) + 1) % MAPS.length; updateInfo(); state.dirty = true; saveOptsSoon(); };
+  for (const bar of info.querySelectorAll<HTMLElement>(".bar.isl")) {
+    const id = bar.dataset.use!, f = legendUses.get(id)!;
+    const w = makeCmapInterval(makeIntervalSlider(bar), bar.classList.contains("plain") ? BLACK : mapOf(f), selOf(f));
+    const apply = () => { const sel = w.shown; if (isNoSelection(sel) && sel.span === "stretch" && sel.low === "clip" && sel.high === "clip") delete state.intervals[id]; else state.intervals[id] = sel; state.dirty = true; };
+    w.addEventListener("input", apply);
+    w.addEventListener("change", () => { apply(); saveOptsSoon(); });
+  }
+  notchKey = ""; // the bars were rebuilt: the notches must be re-created even if the levels did not change
   updateIsoNotches();
   placeCursorPane();
 }
@@ -772,7 +806,7 @@ function saveOpts(): void {
   const key = optsKey(); if (!key || loadingOpts) return;
   const o = {
     ui: Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.map((id) => [id, ui[id].value])]),
-    sel: state.lockedSel, maps: state.maps, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir,
+    sel: state.lockedSel, maps: state.maps, intervals: state.intervals, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir,
   };
   localStorage.setItem(key, JSON.stringify(o));
 }
@@ -780,7 +814,7 @@ const saveOptsSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(sav
 const isUsable = (id: string) => usable.scalars.includes(id) || usable.vectors.includes(id);
 function loadOpts(): boolean {
   const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return false;
-  let o: { ui?: Record<string, unknown>; sel?: Sel; maps?: Record<string, number>; view?: Partial<typeof renderer.view>; dir?: State["dir"] };
+  let o: { ui?: Record<string, unknown>; sel?: Sel; maps?: Record<string, number>; intervals?: Record<string, unknown>; view?: Partial<typeof renderer.view>; dir?: State["dir"] };
   try { o = JSON.parse(raw); } catch { return false; }
   loadingOpts = true;
   try {
@@ -790,6 +824,7 @@ function loadOpts(): boolean {
     }
     syncTicks(); syncIsoRate();
     if (o.maps) state.maps = { ...o.maps };
+    if (o.intervals) { state.intervals = {}; for (const [id, v] of Object.entries(o.intervals)) { const s = asSelection(v); if (!isNoSelection(s)) state.intervals[id] = s; } }
     if (o.sel) for (const k of SLOTS) { const id = o.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
     if (o.view) { renderer.view = { ...renderer.view, ...o.view }; viewCustom = o.view.scale !== undefined; }
     if (o.dir) state.dir = { iso: o.dir.iso === -1 ? -1 : 1, stream: o.dir.stream === -1 ? -1 : 1 };
@@ -803,7 +838,7 @@ function loadOpts(): boolean {
 
 function setBundle(bundle: Bundle, file: string): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
   const errors = bundle.buildAll();
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !errors.has(id) && bundle.scalarField(id).domain.numDims === 2),

@@ -99,6 +99,7 @@ fn readVal(i: i32, j: i32) -> f32 { return vals[(i * u.gridN.z + j * u.gridN.w) 
   if (isnan_(value)) { discard; }
   let t = param(value, u.view.map);
   let c = textureSample(lut, lutSampler, vec2<f32>(t, 0.5));
+  if (c.a < 0.5) { discard; } // LUT alpha 0 = masked by the colormap interval selection
   return vec4<f32>(c.rgb * u.misc.w, u.misc.w);
 }`;
 
@@ -155,7 +156,12 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
     alpha = alpha * bright;
   }
   var rgb = u.color.rgb;
-  if (u.style.z > 0.5) { rgb = textureSample(lut, lutSampler, vec2<f32>(param(in.value, u.view.map), 0.5)).rgb; }
+  if (u.style.z > 0.5) {
+    if (isnan_(in.value)) { discard; } // no colour value here (outside the colour field): not drawn
+    let c = textureSample(lut, lutSampler, vec2<f32>(param(in.value, u.view.map), 0.5));
+    if (c.a < 0.5) { discard; } // masked by the colormap interval selection: this stretch of the line is not drawn
+    rgb = c.rgb;
+  }
   return vec4<f32>(rgb * alpha, alpha);
 }`;
 

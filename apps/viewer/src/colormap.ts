@@ -1,4 +1,5 @@
 // Colormaps (matplotlib polynomial fits, OKLCH hue sweep, turbo), as in the prototype.
+// LUTs are built through the colormap interval selection in cmapInterval.ts (lutFor).
 
 export type RGB = [number, number, number];
 export type Colormap = (t: number) => RGB;
@@ -61,29 +62,3 @@ export const cmap = (id: number): Colormap => COLORMAPS[MAPS[((id % MAPS.length)
 
 export const toCss = ([r, g, b]: RGB, a = 1): string =>
   `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${a})`;
-
-export function cssGradient(id: number): string {
-  const f = cmap(id), stops: string[] = [];
-  for (let i = 0; i <= 24; i++) stops.push(toCss(f(i / 24)));
-  return `linear-gradient(90deg, ${stops.join(",")})`;
-}
-
-/** a lookup table of n colours for fast per-pixel mapping */
-export function lut(f: Colormap, n = 256): Uint8ClampedArray {
-  const out = new Uint8ClampedArray(n * 3);
-  for (let i = 0; i < n; i++) { const [r, g, b] = f(i / (n - 1)); out[3 * i] = r * 255; out[3 * i + 1] = g * 255; out[3 * i + 2] = b * 255; }
-  return out;
-}
-
-const RGBA_LUTS = new Map<number, Uint8Array>();
-/** 256-entry RGBA LUT (cached per colormap id) for GPU textures */
-export function lutRGBA(id: number): Uint8Array {
-  let t = RGBA_LUTS.get(id);
-  if (!t) {
-    const f = cmap(id);
-    t = new Uint8Array(256 * 4);
-    for (let i = 0; i < 256; i++) { const [r, g, b] = f(i / 255); t[4 * i] = Math.round(r * 255); t[4 * i + 1] = Math.round(g * 255); t[4 * i + 2] = Math.round(b * 255); t[4 * i + 3] = 255; }
-    RGBA_LUTS.set(id, t);
-  }
-  return t;
-}

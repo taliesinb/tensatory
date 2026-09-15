@@ -103,9 +103,16 @@ profiling test.
   panel; disabled columns dim. Streamline flow direction is the ▶/◀ play direction (◀ = against the
   field = descent); shift-click a ▶ reverses, plain click only toggles play,
   space starts both animations when none is playing else pauses. Colormaps
-  are per field: one legend bar per coloured field listing its slots, black
-  bars for shape-only fields (I_V, S_∇ source), red θ* detent, white isoline
-  notches and cursor pip. Per-bundle options in localStorage
+  are per field: one legend bar per coloured field listing its slots (click
+  the name to cycle), black bars for shape-only fields (I_V, S_∇ source), red
+  θ* detent, white isoline notches and cursor pip. Every bar is a colormap
+  interval selection (`apps/viewer/src/interval.ts`, `cmapInterval.ts`; see
+  `notes/viewer.md`): a bracket in codomain parameter space with nullable
+  ends; excluded regions clip or mask (barber-pole = not drawn: transparent
+  raster, undrawn line stretches, I_V levels not contoured), the included
+  region stretches the colormap or keeps it; shape-only bars are fixed-mask.
+  Prototypes of new widgets go in `apps/ui-proto` (static single-file pages,
+  never imported by production code). Per-bundle options in localStorage
   (`tensatory.opts.<file>`), only user-panned/zoomed views are persisted;
   any control id / slot key can be overridden from the URL.
 * Isolines (`core/src/iso`): `contourField` always uses the best available

@@ -15,7 +15,9 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 | `src/gpuGeometry.ts` | GPU compute + canvas render: exact isolines and streamlines computed on the GPU and read back asynchronously |
 | `src/gpuFused.ts` | GPU render: resident grids, fused isoline / streamline kernels appending into resident segment sets, uploaded CPU geometry |
 | `src/main.ts` | state, slots and "uses", sampling cache, isolines / streamlines pipelines, legend, cursor pane, persistence, URL overrides, interaction, frame loop |
-| `src/colormap.ts` | viridis / plasma / gray / okhue / turbo (polynomial fits), CSS gradients, LUTs |
+| `src/colormap.ts` | viridis / plasma / gray / okhue / turbo (polynomial fits) |
+| `src/interval.ts` | the interval slider: two nullable ends, full / half / none kinds, drag / click / wheel / keyboard gestures, `cmap` variant drawn as a bracket |
+| `src/cmapInterval.ts` | colormap interval selection: `Selection` (+ stretch / full, clip / mask modes), `selectParam`, `lutFor` (RGBA LUTs with masked alpha), the legend control `makeCmapInterval` |
 | `src/log.ts` | console capture, the L (log) modal, `status()` and red error display |
 
 ## Compute and render modes
@@ -81,18 +83,57 @@ box (symbolic fields fall back to 128).
 ## Legend and cursor
 
 Colormaps are per **field use**, so a field mapped to several slots gets one
-bar listing its slots (`C I_C  x² + y²`); clicking cycles its colormap. Fields
-that shape the picture without colouring it (I_V, the scalar behind S_∇) get
-an all-black bar. Bars carry min/max (swapped for flipped codomains), a red
-detent at the value at the bundle's centre point (a single-point set such as
-θ*), white notches at the isoline levels (I_V's bar), and a white pip at the
-cursor value. The cursor pane lists the space coordinates, the S_∇ vector,
-then every legend scalar.
+bar listing its slots (`C I_C  x² + y²`); clicking the field's *name* cycles
+its colormap. Fields that shape the picture without colouring it (I_V, the
+scalar behind S_∇) get an all-black bar. Bars carry min/max (swapped for
+flipped codomains), a red detent at the value at the bundle's centre point (a
+single-point set such as θ*), white notches at the isoline levels (I_V's bar),
+and a white pip at the cursor value. The cursor pane lists the space
+coordinates, the S_∇ vector, then every legend scalar.
+
+### Colormap interval selection
+
+Every bar (except one used only as the S_∇ source) is an **interval slider**
+(`src/interval.ts`, a two-ended sibling of the compact slider; prototyped in
+`apps/ui-proto`) dressed as a colormap control (`src/cmapInterval.ts`). The
+selection is drawn as a bracket `|‾‾‾|` over the bar and lives in the field's
+codomain *parameter* space (0..1 along the bar), with independently nullable
+ends: full `(lo, hi)`, half `(lo, ·)` / `(·, hi)`, none = everything.
+
+Gestures: press a handle and drag to move it (clamped so lo ≤ hi); press
+anywhere else and drag to move the whole bracket (a half's only end); click a
+handle, or drag it off the bar, to delete it; on an empty bar drag out a new
+interval (release past an end for a half). Half bars: click the top line to
+add the missing end there. Escape cancels, Backspace clears.
+
+Three **modes** are part of the selection and toggled by single clicks:
+* *included region* (inside the bracket): **stretch** — the colormap is
+  compressed to exactly `[lo, hi]` — or **full** — the ordinary colormap, the
+  interval only masks / clips;
+* *excluded region* (either side, independently): **clip** — saturated to the
+  boundary colour — or **mask** — not drawn at all (barber-pole on the bar).
+
+What "not drawn" means per use: **C** the raster is transparent there; **I_C**
+/ **S_C** that stretch of a line is not drawn (GPU: per fragment, canvas: per
+segment); **I_V** levels inside a masked range are not contoured at all
+(notches disappear with them). Bars whose field has no colour use (I_V-only,
+S_∇ source) are *fixed-mask*: clip / stretch mean nothing there, excluded
+regions always mask, clicks toggle nothing. Colour values outside the colour
+field's box (`undefined` / NaN) are likewise not drawn.
+
+Implementation: `selectParam(sel, t)` is the whole semantics (parameter →
+colormap parameter, NaN = masked); `lutFor(colormap, sel)` bakes it into a
+256-entry RGBA LUT (α = 0 where masked) shared by the canvas raster, the GPU
+raster and the GPU lines (shaders discard α < ½); canvas lines apply
+`selectParam` per vertex. Selections are stored per use in
+`state.intervals` and persisted with the other options; the legend is
+rebuilt from that state (widgets are re-created on each `updateInfo`).
 
 ## Persistence and URLs
 
 Per bundle in `localStorage["tensatory.opts.<file>"]`: every control, locked
-slot selections, colormaps, animation directions, and the view — but a
+slot selections, colormaps, colormap interval selections, animation
+directions, and the view — but a
 *fitted* view is never saved (only flips/rotation), so it always re-fits to
 the current layout; only user-panned/zoomed views are restored. Collapsed
 panels are global. Query parameters override anything after load:
