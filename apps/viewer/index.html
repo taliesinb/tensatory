@@ -14,6 +14,7 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
+<canvas id="gpu"></canvas>
 <canvas id="gl"></canvas>
 
 <div id="left">
@@ -24,7 +25,9 @@
     <div class="psep"></div>
     <div class="prow"><label>about</label><div class="pval" id="pickAbout"></div></div>
     <div class="prow"><label>space</label><div class="pval" id="pickSpace"></div></div>
-    <div class="prow"><label data-tip="Where field values are sampled: WebGPU when available, else the CPU. Override with ?backend=cpu|gpu; ?check=1 computes both and logs their agreement.">compute</label><div class="pval" id="pickCompute"></div></div>
+    <div class="prow"><label data-tip="Where fields are sampled and geometry (isolines, streamlines) is computed. GPU results are asynchronous when rendered by the canvas, fully resident when rendered by the GPU. ?compute=cpu|gpu; ?check=1 logs CPU/GPU agreement.">compute</label><div id="computeBar" class="bar"></div></div>
+    <div class="prow"><label data-tip="canvas: Canvas 2D. gpu: WebGPU raster and lines (points and labels stay on a canvas overlay). ?render=canvas|gpu">render</label><div id="renderBar" class="bar"></div></div>
+    <div class="prow"><label>device</label><div class="pval" id="pickCompute"></div></div>
     <div class="prow" id="pickErrRow" style="display:none"><label>errors</label><div class="pval err" id="pickErr"></div></div>
   </div>
 </div>

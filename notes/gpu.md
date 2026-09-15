@@ -102,12 +102,54 @@ geometry with GPU sampling. Timings in Chrome: `|∇ mixture|` at 128², ~25 ms
 per level with all levels concurrent and the main thread free; 1k streamlines
 8–50 ms.
 
+## Stage 4 (done): the fused path and the WebGPU renderer
+
+The viewer now has two independent switches (bundle panel, `?compute=cpu|gpu`,
+`?render=canvas|gpu`, remembered in `tensatory.modes`; default gpu/gpu when an
+adapter exists):
+
+| compute \ render | canvas (2D) | gpu (WebGPU) |
+|---|---|---|
+| **cpu** | the original path | CPU values and polylines uploaded (`uploadGrid`, `packPolylines` / `packStreamlines`) and drawn by the GPU renderer |
+| **gpu** | sampling + geometry read back asynchronously (`sampler.ts`, `gpuGeometry.ts`); rough lines meanwhile | **fused**: resident grids, fused kernels, `drawIndirect` — nothing crosses back to the CPU |
+
+**One record type for all lines**: `Seg { a, b, ca, cb, arc, len, phase }`
+(`segments.ts`). Fused kernels append records through an atomic counter in an
+indirect-draw buffer (`allocSegments` / `resetSegments`); CPU lines are packed
+into the same layout. **Resident grids** (`resident.ts`): the sampling kernel
+keeps its output buffer (`sampleResidentSync`), read by the raster pass and the
+fused kernels; `readGrid` only when a CPU consumer needs values.
+
+**Fused kernels** (`fused.ts`): `fusedIsolines` does, per cell, marching
+squares → Newton projection of both endpoints → in-thread adaptive midpoint
+refinement (up to 16 pieces per seed segment, 4 rounds) → colour-field
+evaluation per vertex → append; sampled fields skip projection.
+`fusedStreamlines` integrates each seed both ways into scratch slots, then
+appends segments with arc / length / phase and colour. Both have `run`
+(awaited, for tests) and `dispatch` (fire-and-forget) forms; the GPU queue
+orders a dispatch before the frame's render pass, so a fused frame is
+completely synchronous from the CPU's point of view — no `await`, no readback,
+no rough fallback: exact isolines every animation frame.
+
+**Renderer** (`render.ts`, `GpuRenderer`): a raster pipeline (world-space quad
+over the grid, bilinear or nearest read of the resident grid, NaN discard,
+codomain mapping `lo/hi/log/flip` in the shader, 256×1 LUT texture per
+colormap) and a line pipeline (vertex-pulled `Seg` instances, six vertices per
+segment extruded to a screen-space width with butt caps, per-fragment particle
+window — so tails fade continuously instead of in bins — LUT or solid colour,
+premultiplied blending). Points, labels and the box outline stay on a
+transparent Canvas 2D overlay (`Renderer2D.render(scene, overlay = true)`)
+sharing the same camera (`viewLinear`).
+
+Measured in Chrome (M-series): all four combinations hold ~60 fps with both
+animations on `|∇ mixture|` at 128²; in the fused combination the isolines
+are exact (projected) in every frame.
+
 ## Next stages
 
-1. A WebGPU renderer: raster as a texture sampled with the colormap LUT,
-   isolines and streamlines as instanced line geometry with per-vertex colour
-   and the particle window evaluated in the fragment shader (as the 3D
-   prototype did in GLSL). Removes the raster readback and is the base for 3D.
-2. Statistics (min/max for slider ranges) as a reduction pass.
-3. Keep grids resident on the GPU between passes (sample → contour → render)
-   instead of round-tripping through the CPU.
+1. Statistics (min/max for slider ranges) as a reduction pass, so derived
+   fields never touch the CPU even once.
+2. Blur (`metric`) as a compute pass so the fused path covers every isoline
+   option; Taubin smoothing likewise.
+3. 3D: marching cubes as a fused kernel appending triangles, a mesh pipeline
+   with OIT — the same resident-grid / indirect-draw structure.

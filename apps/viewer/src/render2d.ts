@@ -109,6 +109,11 @@ export class Renderer2D {
     return [this.view.cx + dx, this.view.cy + dy];
   }
   get worldPerPixel(): number { return 1 / this.view.scale; }
+  /** css-pixel size and the world->screen map, for other renderers sharing this camera */
+  get gpuView(): { width: number; height: number; a: number; b: number; c: number; d: number; cx: number; cy: number } {
+    const [a, b, c, d] = viewLinear(this.view);
+    return { width: this.canvas.clientWidth, height: this.canvas.clientHeight, a, b, c, d, cx: this.view.cx, cy: this.view.cy };
+  }
 
   /** pan by screen pixels */
   pan(dx: number, dy: number): void {
@@ -131,20 +136,24 @@ export class Renderer2D {
     return [Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)]; // quarter turns keep the rect axis-aligned
   }
 
-  render(s: Scene): void {
+  /** `overlay`: transparent background, box + points only (raster and lines are drawn by the GPU renderer underneath) */
+  render(s: Scene, overlay = false): void {
     const { canvas, ctx } = this;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.w = canvas.clientWidth; this.h = canvas.clientHeight;
     const W = Math.round(this.w * dpr), H = Math.round(this.h * dpr);
     if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#0b0d12"; ctx.fillRect(0, 0, this.w, this.h);
+    if (overlay) ctx.clearRect(0, 0, this.w, this.h);
+    else { ctx.fillStyle = "#0b0d12"; ctx.fillRect(0, 0, this.w, this.h); }
 
     const rect = this.cropRect(s);
     ctx.save();
     ctx.beginPath(); ctx.rect(...rect); ctx.clip();
-    if (s.raster) this.drawRaster(s.raster, s.box);
-    for (const l of s.lines) this.drawLines(l);
+    if (!overlay) {
+      if (s.raster) this.drawRaster(s.raster, s.box);
+      for (const l of s.lines) this.drawLines(l);
+    }
     this.drawPointSets(s.pointSets);
     ctx.restore();
     if (s.showBox) {

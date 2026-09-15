@@ -67,7 +67,7 @@ fn integrate(seed: vec2<f32>, s: f32, base: i32, stepDir: i32) -> u32 {
   counts[i * 2] = integrate(seed, -1.0, base, -1);
   counts[i * 2 + 1] = integrate(seed, 1.0, base, 1);
 }`;
-  const [ptsBuf, cntBuf] = await backend.runKernel({
+  const { read: [ptsBuf, cntBuf] } = await backend.runKernel({
     code,
     invocations: lines,
     buffers: [

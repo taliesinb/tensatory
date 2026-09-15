@@ -42,9 +42,11 @@ packages/core/     @tensatory/core    - runtime: zod parsing, NdArray, symbolic
                                         registry, isolines, streamlines.
                                         Isomorphic; no DOM. Tests in test/.
 packages/gpu/      @tensatory/gpu     - WebGPU backend beside core: WGSL
-                                        transpiler + compute-shader sampling;
-                                        tests assert CPU/GPU agreement (Dawn
-                                        node bindings, `webgpu` package).
+                                        transpiler, compute-shader sampling,
+                                        geometry kernels (marching squares,
+                                        projection, fused isolines/streamlines),
+                                        WebGPU renderer; tests assert CPU/GPU
+                                        agreement (Dawn node bindings).
 apps/viewer/       @tensatory/viewer  - Vite + vanilla TS 2D viewer (canvas 2D),
                                         example bundles in public/bundles/.
 notes/             architecture notes (start with notes/README.md)
@@ -116,14 +118,15 @@ profiling test.
   packed into ONE storage buffer (8-buffer limit); explicit bind-group layout;
   the `GPU` instance must be retained for the device's lifetime under Dawn or
   the process segfaults. See `notes/gpu.md`.
-* The viewer samples fields through `sampler.ts` and computes exact isolines
-  and streamlines through `gpuGeometry.ts` (GPU when available, else CPU;
-  `?backend=cpu|gpu`, `?geometry=cpu`, `?check=1` logs CPU/GPU agreement).
-  GPU results are asynchronous: pending layers are skipped (or the previous /
-  rough result shown) for that frame and re-rendered when they land.
+* Viewer modes: `compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (bundle
+  panel, `?compute=`, `?render=`, `tensatory.modes`; default gpu/gpu). gpu/gpu
+  is fused: resident grids, fused kernels appending `Seg` records, drawIndirect,
+  no readback, exact isolines every frame. gpu/canvas reads back asynchronously
+  (pending layers skipped or rough lines shown until results land). cpu/gpu
+  uploads CPU values and polylines. `?check=1` logs CPU/GPU agreement.
 * WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
   by Metal's fast-math.
-* Performance (rendering is Canvas 2D): the compiler does
+* Performance: the compiler does
   common-subexpression elimination with per-point memoization; streamlines of
   symbolic vector fields are integrated through a sampled copy on the current
   grid; isolines fall back to marching squares while a level is moving and

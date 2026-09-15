@@ -10,10 +10,22 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 | `index.html` | the panels; controls are plain `<div>`s configured by `data-` attributes |
 | `src/widgets.ts` | tooltips (0.25 s), collapsible panels (state in `tensatory.collapsed`), tick glyphs over hidden checkboxes, the compact slider (drag scrub, shift-hover preview, nullable click/Backspace, wheel "document", arrow nudges, Escape cancels), the discrete slider (one step per wheel gesture), tab bars |
 | `src/metrics.ts` | the mappings matrix: one SVG, hit-testing from pointer coordinates, shift-preview, click-to-lock, wheel/arrows, header clicks toggle panels, dimmed disabled columns, ∇ / \|·\| use glyphs |
-| `src/render2d.ts` | camera (centre, scale, flips, quarter turns as one linear map), cached colormap raster drawn through an affine transform, line layers binned by colour/alpha into `Path2D`s, particle tails (alpha fade, butt caps), point sets, box, crop clip |
+| `src/render2d.ts` | camera (centre, scale, flips, quarter turns as one linear map), cached colormap raster drawn through an affine transform, line layers binned by colour/alpha into `Path2D`s, particle tails (alpha fade, butt caps), point sets, box, crop clip; `overlay` mode draws only box + points over the WebGPU canvas |
+| `src/sampler.ts` | field values on grids: GPU (async, read back) or CPU, cached, NaN outside the field box, optional agreement check |
+| `src/gpuGeometry.ts` | GPU compute + canvas render: exact isolines and streamlines computed on the GPU and read back asynchronously |
+| `src/gpuFused.ts` | GPU render: resident grids, fused isoline / streamline kernels appending into resident segment sets, uploaded CPU geometry |
 | `src/main.ts` | state, slots and "uses", sampling cache, isolines / streamlines pipelines, legend, cursor pane, persistence, URL overrides, interaction, frame loop |
 | `src/colormap.ts` | viridis / plasma / gray / okhue / turbo (polynomial fits), CSS gradients, LUTs |
 | `src/log.ts` | console capture, the L (log) modal, `status()` and red error display |
+
+## Compute and render modes
+
+`compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (bundle panel; `?compute=`,
+`?render=`; stored in `tensatory.modes`; default gpu/gpu when WebGPU exists).
+GPU/gpu is the fused path: `renderGpu()` in `main.ts` builds a `GpuScene`
+from resident grids and segment sets; the other combinations reuse the CPU
+pipelines and either draw with Canvas 2D or upload their results. See
+[gpu.md](gpu.md).
 
 ## Layout
 

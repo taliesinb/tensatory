@@ -23,12 +23,14 @@ import {
   type Streamline,
   type VectorFieldData,
 } from "@tensatory/core";
-import { MAPS, cmap, cssGradient, lut } from "./colormap";
+import { MAPS, cmap, cssGradient, lut, lutRGBA } from "./colormap";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
+import { FusedGeometry } from "./gpuFused";
+import { GpuRenderer, packPolylines, packStreamlines, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -37,6 +39,7 @@ import {
   makeDiscreteSlider,
   makeSlider,
   syncTicks,
+  tabBar,
   wheelStepper,
   type ValueControl,
 } from "./widgets";
@@ -120,7 +123,30 @@ const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), locke
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
-let geometry: GpuGeometry | undefined; // set after the sampler finds a GPU
+let geometry: GpuGeometry | undefined; // GPU compute with canvas rendering: asynchronous, read back
+let fused: FusedGeometry | undefined; // GPU rendering: resident grids and segment sets
+let gpuRenderer: GpuRenderer | undefined;
+type Compute = "cpu" | "gpu"; type Render = "canvas" | "gpu";
+const modes: { compute: Compute; render: Render } = { compute: "cpu", render: "canvas" };
+
+/** apply the compute / render modes: services, canvases, persistence */
+function applyModes(): void {
+  const gpu = sampler.gpu;
+  if (!gpu) { modes.compute = "cpu"; modes.render = "canvas"; }
+  sampler.backend = modes.compute === "gpu" && gpu ? "gpu" : "cpu";
+  geometry = gpu && modes.compute === "gpu" && modes.render === "canvas" ? (geometry ?? new GpuGeometry(gpu, () => { state.dirty = true; })) : undefined;
+  if (gpu && modes.render === "gpu") {
+    fused ??= new FusedGeometry(gpu);
+    gpuRenderer ??= new GpuRenderer(gpu, $<HTMLCanvasElement>("gpu"));
+  } else { fused?.clear(); fused = undefined; }
+  document.body.classList.toggle("gpu-render", modes.render === "gpu");
+  localStorage.setItem("tensatory.modes", JSON.stringify(modes));
+  tabBar($("computeBar"), [{ value: "cpu", label: "cpu" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], modes.compute, (v) => { modes.compute = v as Compute; applyModes(); });
+  tabBar($("renderBar"), [{ value: "canvas", label: "canvas" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], modes.render, (v) => { modes.render = v as Render; applyModes(); });
+  $("pickCompute").textContent = `${sampler.label}${sampler.check ? " — agreement check on (see L)" : ""}`;
+  STREAM_CACHE.clear(); isoCache = undefined; // geometry produced by the other backend
+  state.dirty = true;
+}
 let usable = { scalars: [] as string[], vectors: [] as string[] };
 
 /*******************************************************/
@@ -421,23 +447,26 @@ function render(): void {
     box, crop: [1, 1], showBox: ui.showBox.checked, lines: [],
     pointSets: ui.showPoints.checked ? [...state.bundle.pointSets.values()].filter((ps) => ps.domain.numDims === 2) : [],
   };
+  const gpuDraw = modes.render === "gpu" && !!fused && !!gpuRenderer;
+  const fusedCompute = gpuDraw && modes.compute === "gpu";
   const c = slotScalar("c");
-  const cValues = ui.showScalar.checked && c ? sampleUse(c, grid) : undefined;
-  if (c && cValues) {
+  const cValues = ui.showScalar.checked && c && !fusedCompute ? sampleUse(c, grid) : undefined;
+  if (c && cValues && !gpuDraw) {
     const values = cValues;
     scene.raster = { key: `${c.id}|${grid.size.join("x")}|${viewBoxKey}|${state.maps[c.id] ?? 0}`, grid, values, toParam: paramOf(c), lut: lut(mapOf(c)), smooth: ui.smooth.checked };
   }
-  const iso = isolines(grid);
+  // fused GPU frames compute isolines / streamlines in renderGpu; otherwise (CPU compute, or GPU compute read back) here
+  const iso = fusedCompute && num("metric") === null ? undefined : isolines(grid);
   const isoField = slotScalar("iv");
-  if (iso) {
+  if (iso && !gpuDraw) {
     const alpha = num("isoAlpha") ?? 1;
     const layer: LineLayer = { lines: iso.lines, color: [0.92, 0.92, 0.92], width: 2, alpha };
     const ic = slotScalar("ic");
     if (iso.values && ic) { layer.values = iso.values; layer.cmap = mapOf(ic); }
     scene.lines.push(layer);
   }
-  const st = streamlines(grid);
-  if (st) {
+  const st = fusedCompute ? undefined : streamlines(grid);
+  if (st && !gpuDraw) {
     const layer: LineLayer = { lines: st.lines.map((l) => l.points), color: [1, 1, 1], width: 1.5, alpha: num("sAlpha") ?? 1 };
     const sc = slotScalar("sc");
     if (st.colours && sc) { layer.values = st.colours; layer.cmap = mapOf(sc); }
@@ -445,7 +474,8 @@ function render(): void {
     layer.particles = { lengths: st.lines.map((l) => l.length), phases: st.lines.map((l) => l.phase), step: st.step, tail: (num("tail") ?? 5) * st.cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * st.cell };
     scene.lines.push(layer);
   }
-  renderer.render(scene);
+  if (modes.render === "gpu" && fused && gpuRenderer) renderGpu(grid, box, scene, iso, st);
+  else renderer.render(scene);
   updateIsoNotches();
 
   // labels
@@ -462,6 +492,74 @@ function render(): void {
   $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
   $("tailv").textContent = ui.tail.value ?? "";
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
+}
+
+/*******************************************************/
+/* GPU rendering: resident raster and segment sets (fused when compute is GPU too), canvas overlay for box / points */
+
+function valueMap(u: ScalarUse): ValueMap {
+  const [lo, hi] = rangeOf(u);
+  return { lo, hi, log: !!u.codomain.log, flip: u.codomain.flip };
+}
+function gridKey(u: { id: string }, grid: DenseGrid): string { return `${u.id}|${grid.size.join("x")}|${grid.box.intervals.flat().join(",")}`; }
+
+function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | undefined, st: StreamSet | undefined): void {
+  const F = fused!, R = gpuRenderer!;
+  const gs: GpuScene = { view: renderer.gpuView, clip: box, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], lines: [] };
+  const fusedCompute = modes.compute === "gpu";
+  // raster
+  const c = slotScalar("c");
+  if (ui.showScalar.checked && c) {
+    const key = gridKey(c, grid);
+    const values = fusedCompute ? F.grid(key, c.data, grid) : (() => { const v = sampleUse(c, grid); return v ? F.uploadGrid(`cpu:${key}`, grid, v, 1) : undefined; })();
+    if (values) gs.raster = { values, box: c.data.box, map: valueMap(c), lut: lutRGBA(state.maps[c.id] ?? 0), smooth: ui.smooth.checked };
+  }
+  // isolines
+  const f = slotScalar("iv"), ic = slotScalar("ic");
+  const alpha = num("isoAlpha") ?? 1;
+  if (ui.showIso.checked && f) {
+    const colour = (ic ? { map: valueMap(ic), lut: lutRGBA(state.maps[ic.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
+    if (fusedCompute && num("metric") === null) {
+      const values = F.grid(gridKey(f, grid), f.data, grid);
+      const [lo, hi] = rangeOf(f);
+      const tol = 0.25 * renderer.worldPerPixel;
+      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}`;
+      isoLevelParams().forEach((t, k) => {
+        const level = f.codomain.fromParam(t, lo, hi);
+        const segs = F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, ic?.data, level, tol);
+        gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
+      });
+    } else if (iso) {
+      const segs = F.uploadedSegments(`iso|${isoCache?.key ?? ""}`, () => packPolylines(iso.lines, iso.values), false);
+      gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...(iso.values ? colour : {}) });
+    }
+  }
+  // streamlines
+  const v = streamVector(), count = num("lines");
+  if (v && count !== null) {
+    const sc = slotScalar("sc");
+    const colour = (sc ? { map: valueMap(sc), lut: lutRGBA(state.maps[sc.id] ?? 0) } : {}) as Partial<GpuLineLayer>;
+    const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
+    const particles = { tail: (num("tail") ?? 5) * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell };
+    if (fusedCompute) {
+      const vbox = v.data.box.intersect(grid.box) ?? v.data.box;
+      const size = [0, 1].map((d) => Math.max(2, Math.round(vbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
+      const vgrid = new DenseGrid(size, vbox);
+      const vectors = F.grid(`vec:${gridKey(v, vgrid)}`, v.data, vgrid);
+      const maxSteps = num("slen")!, step = 0.5 * cell, sign = state.dir.stream;
+      const seeds = streamlineSeeds(vbox, count, 12345);
+      const key = [v.id, gridKey(v, vgrid), count, maxSteps, sign, step.toExponential(4), sc?.id ?? ""].join("|");
+      const segs = F.streamlines(key, vectors, seeds, { maxSteps, step, sign, box: vbox }, sc?.data);
+      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles, ...colour });
+    } else if (st) {
+      const key = `stream|${v.id}|${st.lines.length}|${st.step}|${st.colourKey}|${st.lines[0]?.points[0] ?? 0}|${st.lines.length && st.lines[st.lines.length - 1]!.points.length}`;
+      const segs = F.uploadedSegments(key, () => packStreamlines(st.lines, st.step, st.colours), true);
+      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles, ...(st.colours ? colour : {}) });
+    }
+  }
+  R.resize();
+  R.render(gs);
+  renderer.render(scene2d, true); // box, points, labels on the transparent overlay
 }
 
 /*******************************************************/
@@ -667,7 +765,7 @@ function loadOpts(): boolean {
 
 function setBundle(bundle: Bundle, file: string): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {};
   const errors = bundle.buildAll();
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !errors.has(id) && bundle.scalarField(id).domain.numDims === 2),
@@ -825,11 +923,14 @@ function frame(now: number): void {
 
 (async () => {
   const params = new URLSearchParams(location.search);
-  const prefer = params.get("backend");
-  await sampler.init(prefer === "cpu" || prefer === "gpu" ? prefer : "auto");
+  await sampler.init("auto");
   sampler.check = params.get("check") === "1";
-  if (sampler.gpu && params.get("geometry") !== "cpu") geometry = new GpuGeometry(sampler.gpu, () => { state.dirty = true; });
-  $("pickCompute").textContent = sampler.label + (sampler.check ? " — agreement check on (see L)" : "");
+  try { Object.assign(modes, JSON.parse(localStorage.getItem("tensatory.modes") ?? "{}")); } catch { /* ignore */ }
+  if (!localStorage.getItem("tensatory.modes") && sampler.gpu) { modes.compute = "gpu"; modes.render = "gpu"; } // default: fused when possible
+  const wantCompute = params.get("compute") ?? params.get("backend"), wantRender = params.get("render");
+  if (wantCompute === "cpu" || wantCompute === "gpu") modes.compute = wantCompute;
+  if (wantRender === "canvas" || wantRender === "gpu") modes.render = wantRender;
+  applyModes();
   try {
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }

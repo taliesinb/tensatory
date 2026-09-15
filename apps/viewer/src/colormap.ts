@@ -74,3 +74,16 @@ export function lut(f: Colormap, n = 256): Uint8ClampedArray {
   for (let i = 0; i < n; i++) { const [r, g, b] = f(i / (n - 1)); out[3 * i] = r * 255; out[3 * i + 1] = g * 255; out[3 * i + 2] = b * 255; }
   return out;
 }
+
+const RGBA_LUTS = new Map<number, Uint8Array>();
+/** 256-entry RGBA LUT (cached per colormap id) for GPU textures */
+export function lutRGBA(id: number): Uint8Array {
+  let t = RGBA_LUTS.get(id);
+  if (!t) {
+    const f = cmap(id);
+    t = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) { const [r, g, b] = f(i / 255); t[4 * i] = Math.round(r * 255); t[4 * i + 1] = Math.round(g * 255); t[4 * i + 2] = Math.round(b * 255); t[4 * i + 3] = 255; }
+    RGBA_LUTS.set(id, t);
+  }
+  return t;
+}

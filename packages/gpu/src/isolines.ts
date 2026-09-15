@@ -17,29 +17,28 @@ import { f32 } from "./wgsl";
 /*******************************************************/
 /* marching squares */
 
-function marchingSquaresCode(grid: DenseGrid): string {
+/**
+ * WGSL for `fn cellSegments(c: i32, level: f32) -> CellSegs` — marching squares
+ * of one cell of `grid` reading `vals` (bound as array<f32>): up to two
+ * segments (a0-b0, a1-b1) and their count (0 for empty / NaN cells).
+ * Needs `isnan_` in scope.
+ */
+export function marchingSquaresWgsl(grid: DenseGrid): string {
   const [nx, ny] = grid.size as [number, number];
   const sx = grid.strides[0]!, sy = grid.strides[1]!;
   return `
-@group(0) @binding(0) var<storage, read_write> segs: array<f32>;
-@group(0) @binding(1) var<storage, read_write> counts: array<u32>;
-@group(0) @binding(2) var<storage, read> vals: array<f32>;
-@group(0) @binding(3) var<storage, read> lvl: array<f32>;
-const NX: i32 = ${nx}; const NY: i32 = ${ny};
+struct CellSegs { a0: vec2<f32>, b0: vec2<f32>, a1: vec2<f32>, b1: vec2<f32>, n: u32 }
+const NX: i32 = ${nx}; const NY: i32 = ${ny}; const CELLS: i32 = ${(nx - 1) * (ny - 1)};
 fn t_(v0: f32, v1: f32, level: f32) -> f32 { return select((level - v0) / (v1 - v0), 0.5, v0 == v1); }
-fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
-@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let c = i32(id.x);
-  if (c >= (NX - 1) * (NY - 1)) { return; }
+fn cellSegments(c: i32, level: f32) -> CellSegs {
+  var r: CellSegs; r.n = 0u;
   let i = c / (NY - 1); let j = c % (NY - 1);
-  let level = lvl[0];
   let v00 = vals[i * ${sx} + j * ${sy}]; let v10 = vals[(i + 1) * ${sx} + j * ${sy}];
   let v11 = vals[(i + 1) * ${sx} + (j + 1) * ${sy}]; let v01 = vals[i * ${sx} + (j + 1) * ${sy}];
-  counts[c] = 0u;
-  if (isnan_(v00) || isnan_(v10) || isnan_(v11) || isnan_(v01)) { return; }
+  if (isnan_(v00) || isnan_(v10) || isnan_(v11) || isnan_(v01)) { return r; }
   var code: u32 = 0u;
   if (v00 >= level) { code |= 1u; } if (v10 >= level) { code |= 2u; } if (v11 >= level) { code |= 4u; } if (v01 >= level) { code |= 8u; }
-  if (code == 0u || code == 15u) { return; }
+  if (code == 0u || code == 15u) { return r; }
   let x0 = ${f32(grid.box.a[0]!)} + f32(i) * ${f32(grid.spacing[0]!)};
   let y0 = ${f32(grid.box.a[1]!)} + f32(j) * ${f32(grid.spacing[1]!)};
   let hx = ${f32(grid.spacing[0]!)}; let hy = ${f32(grid.spacing[1]!)};
@@ -47,31 +46,50 @@ fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) ==
   let R = vec2<f32>(x0 + hx, y0 + t_(v10, v11, level) * hy);
   let T = vec2<f32>(x0 + t_(v01, v11, level) * hx, y0 + hy);
   let L = vec2<f32>(x0, y0 + t_(v00, v01, level) * hy);
-  var a0: vec2<f32>; var b0: vec2<f32>; var a1: vec2<f32>; var b1: vec2<f32>; var n: u32 = 1u;
+  r.n = 1u;
   switch (code) {
-    case 1u, 14u: { a0 = L; b0 = B; }
-    case 2u, 13u: { a0 = B; b0 = R; }
-    case 3u, 12u: { a0 = L; b0 = R; }
-    case 4u, 11u: { a0 = R; b0 = T; }
-    case 6u, 9u:  { a0 = B; b0 = T; }
-    case 7u, 8u:  { a0 = L; b0 = T; }
+    case 1u, 14u: { r.a0 = L; r.b0 = B; }
+    case 2u, 13u: { r.a0 = B; r.b0 = R; }
+    case 3u, 12u: { r.a0 = L; r.b0 = R; }
+    case 4u, 11u: { r.a0 = R; r.b0 = T; }
+    case 6u, 9u:  { r.a0 = B; r.b0 = T; }
+    case 7u, 8u:  { r.a0 = L; r.b0 = T; }
     default: {
       let centreHigh = 0.25 * (v00 + v10 + v11 + v01) >= level;
-      n = 2u;
-      if ((code == 5u) == centreHigh) { a0 = L; b0 = T; a1 = B; b1 = R; } else { a0 = L; b0 = B; a1 = R; b1 = T; }
+      r.n = 2u;
+      if ((code == 5u) == centreHigh) { r.a0 = L; r.b0 = T; r.a1 = B; r.b1 = R; } else { r.a0 = L; r.b0 = B; r.a1 = R; r.b1 = T; }
     }
   }
+  return r;
+}`;
+}
+
+const ISNAN_WGSL = `fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }`;
+
+function marchingSquaresCode(grid: DenseGrid): string {
+  return `
+@group(0) @binding(0) var<storage, read_write> segs: array<f32>;
+@group(0) @binding(1) var<storage, read_write> counts: array<u32>;
+@group(0) @binding(2) var<storage, read> vals: array<f32>;
+@group(0) @binding(3) var<storage, read> lvl: array<f32>;
+${ISNAN_WGSL}
+${marchingSquaresWgsl(grid)}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = i32(id.x);
+  if (c >= CELLS) { return; }
+  let r = cellSegments(c, lvl[0]);
+  counts[c] = r.n;
+  if (r.n == 0u) { return; }
   let o = c * 8;
-  segs[o] = a0.x; segs[o + 1] = a0.y; segs[o + 2] = b0.x; segs[o + 3] = b0.y;
-  if (n == 2u) { segs[o + 4] = a1.x; segs[o + 5] = a1.y; segs[o + 6] = b1.x; segs[o + 7] = b1.y; }
-  counts[c] = n;
+  segs[o] = r.a0.x; segs[o + 1] = r.a0.y; segs[o + 2] = r.b0.x; segs[o + 3] = r.b0.y;
+  if (r.n == 2u) { segs[o + 4] = r.a1.x; segs[o + 5] = r.a1.y; segs[o + 6] = r.b1.x; segs[o + 7] = r.b1.y; }
 }`;
 }
 
 /** GPU counterpart of core's `marchingSquaresSegments`: segments in the same cell order */
 export async function gpuMarchingSquaresSegments(backend: GpuBackend, grid: DenseGrid, values: ArrayLike<number>, level: number): Promise<Float32Array> {
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
-  const [segBuf, cntBuf] = await backend.runKernel({
+  const { read: [segBuf, cntBuf] } = await backend.runKernel({
     code: marchingSquaresCode(grid),
     invocations: cells,
     buffers: [
@@ -104,43 +122,34 @@ export interface GpuProjector {
  * the same damped Newton + bisection fallback as core's `projectToLevel`
  * (f32 tolerances).
  */
-export function gpuProjector(backend: GpuBackend, field: ScalarFieldData, grid: DenseGrid): GpuProjector {
-  const b = new ProgramBuilder(grid);
-  const fn = b.scalar(field), dx = b.scalar(field, [0]), dy = b.scalar(field, [1]);
-  const lib = b.library();
-  const { a, b: bb } = field.box;
-  const eps = 1e-6 * Math.max(field.box.size[0]!, field.box.size[1]!);
-  const code = `${lib.code}
-@group(0) @binding(0) var<storage, read_write> out: array<f32>;
-@group(0) @binding(2) var<storage, read> verts: array<f32>;
-@group(0) @binding(3) var<storage, read> lvl: array<f32>;
-const A: vec2<f32> = vec2<f32>(${f32(a[0]!)}, ${f32(a[1]!)});
-const B: vec2<f32> = vec2<f32>(${f32(bb[0]!)}, ${f32(bb[1]!)});
-const EPS: f32 = ${f32(eps)};
-fn inBox(q: vec2<f32>) -> bool { return q.x >= A.x - EPS && q.x <= B.x + EPS && q.y >= A.y - EPS && q.y <= B.y + EPS; }
-fn resid(q: vec2<f32>, level: f32) -> f32 { return ${fn}(q, -1) - level; }
-fn grad(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, -1), ${dy}(q, -1)) * lock; }
-@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let i = i32(id.x);
-  if (i >= i32(arrayLength(&verts)) / 3) { return; }
-  let p = vec2<f32>(verts[i * 3], verts[i * 3 + 1]);
-  let maxDist = verts[i * 3 + 2];
-  let level = lvl[0];
+/**
+ * WGSL for `fn project_(p: vec2<f32>, maxDist: f32, level: f32) -> vec3<f32>` (x, y, ok):
+ * damped Newton along the gradient with a bracketing + bisection fallback and
+ * coordinates on box faces locked — core's `projectToLevel` at f32 tolerances.
+ */
+export function projectionWgsl(fn: string, dx: string, dy: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
+  const eps = 1e-6 * Math.max(box.size[0]!, box.size[1]!);
+  return `
+const PA: vec2<f32> = vec2<f32>(${f32(box.a[0]!)}, ${f32(box.a[1]!)});
+const PB: vec2<f32> = vec2<f32>(${f32(box.b[0]!)}, ${f32(box.b[1]!)});
+const PEPS: f32 = ${f32(eps)};
+fn inBox_(q: vec2<f32>) -> bool { return q.x >= PA.x - PEPS && q.x <= PB.x + PEPS && q.y >= PA.y - PEPS && q.y <= PB.y + PEPS; }
+fn resid_(q: vec2<f32>, level: f32) -> f32 { return ${fn}(q, -1) - level; }
+fn grad_(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, -1), ${dy}(q, -1)) * lock; }
+fn project_(p: vec2<f32>, maxDist: f32, level: f32) -> vec3<f32> {
   let scale = max(1.0, abs(level));
   let tolF = 1e-6 * scale;
-  // coordinates on box faces stay locked there
-  let lock = vec2<f32>(select(1.0, 0.0, abs(p.x - A.x) < EPS || abs(p.x - B.x) < EPS), select(1.0, 0.0, abs(p.y - A.y) < EPS || abs(p.y - B.y) < EPS));
+  let lock = vec2<f32>(select(1.0, 0.0, abs(p.x - PA.x) < PEPS || abs(p.x - PB.x) < PEPS), select(1.0, 0.0, abs(p.y - PA.y) < PEPS || abs(p.y - PB.y) < PEPS));
   var q = p;
-  var r = resid(q, level);
+  var r = resid_(q, level);
   var ok = 0.0;
-  let g0 = grad(q, lock);
+  let g0 = grad_(q, lock);
   let g02 = dot(g0, g0);
-  if (!isfinite_(r) || !(g02 > 1e-24)) { out[i * 3] = p.x; out[i * 3 + 1] = p.y; out[i * 3 + 2] = 0.0; return; }
+  if (!isfinite_(r) || !(g02 > 1e-24)) { return vec3<f32>(p, 0.0); }
   let r0 = r;
-  // 1. damped Newton
   for (var it = 0; it < 12; it++) {
     if (abs(r) < tolF) { break; }
-    let g = grad(q, lock);
+    let g = grad_(q, lock);
     let g2 = dot(g, g);
     if (!(g2 > 1e-24)) { break; }
     var k = r / g2;
@@ -148,8 +157,8 @@ fn grad(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, 
     for (var damp = 0; damp < 5; damp++) {
       let trial = q - k * g;
       let d = trial - p;
-      if (inBox(trial) && dot(d, d) <= maxDist * maxDist) {
-        let rt = resid(trial, level);
+      if (inBox_(trial) && dot(d, d) <= maxDist * maxDist) {
+        let rt = resid_(trial, level);
         if (isfinite_(rt) && abs(rt) < abs(r)) { q = trial; r = rt; accepted = true; break; }
       }
       k = k * 0.5;
@@ -158,13 +167,12 @@ fn grad(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, 
   }
   if (abs(r) < tolF || abs(r) < 1e-5 * scale) { ok = 1.0; }
   else {
-    // 2. bracket a sign change along the initial gradient line, then bisect
     let dir = -sign(r0) * g0 / sqrt(g02);
     var lo = 0.0; var hi = maxDist / 64.0; var found = false;
     for (var n = 0; n < 12; n++) {
       let t = p + hi * dir;
-      if (!inBox(t)) { break; }
-      let rh = resid(t, level);
+      if (!inBox_(t)) { break; }
+      let rh = resid_(t, level);
       if (!isfinite_(rh)) { break; }
       if (sign(rh) != sign(r0)) { found = true; break; }
       lo = hi; hi = hi * 2.0;
@@ -173,23 +181,43 @@ fn grad(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, 
     if (found) {
       for (var it = 0; it < 40; it++) {
         let mid = 0.5 * (lo + hi);
-        let rm = resid(p + mid * dir, level);
+        let rm = resid_(p + mid * dir, level);
         if (abs(rm) < tolF) { lo = mid; hi = mid; break; }
         if (sign(rm) == sign(r0)) { lo = mid; } else { hi = mid; }
       }
       q = p + 0.5 * (lo + hi) * dir; ok = 1.0;
     }
   }
-  // snap locked coordinates exactly onto the boundary
-  if (lock.x == 0.0) { q.x = select(B.x, A.x, abs(q.x - A.x) < abs(q.x - B.x)); }
-  if (lock.y == 0.0) { q.y = select(B.y, A.y, abs(q.y - A.y) < abs(q.y - B.y)); }
-  out[i * 3] = q.x; out[i * 3 + 1] = q.y; out[i * 3 + 2] = ok;
+  if (lock.x == 0.0) { q.x = select(PB.x, PA.x, abs(q.x - PA.x) < abs(q.x - PB.x)); }
+  if (lock.y == 0.0) { q.y = select(PB.y, PA.y, abs(q.y - PA.y) < abs(q.y - PB.y)); }
+  return vec3<f32>(q, ok);
+}`;
+}
+
+/**
+ * Builds the projection kernel for a symbolic field: `f` and its two partials
+ * are transpiled once, and every dispatch projects a batch of vertices.
+ */
+export function gpuProjector(backend: GpuBackend, field: ScalarFieldData, grid: DenseGrid): GpuProjector {
+  const b = new ProgramBuilder(grid);
+  const fn = b.scalar(field), dx = b.scalar(field, [0]), dy = b.scalar(field, [1]);
+  const lib = b.library();
+  const code = `${lib.code}
+${projectionWgsl(fn, dx, dy, field.box)}
+@group(0) @binding(0) var<storage, read_write> out: array<f32>;
+@group(0) @binding(2) var<storage, read> verts: array<f32>;
+@group(0) @binding(3) var<storage, read> lvl: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = i32(id.x);
+  if (i >= i32(arrayLength(&verts)) / 3) { return; }
+  let r = project_(vec2<f32>(verts[i * 3], verts[i * 3 + 1]), verts[i * 3 + 2], lvl[0]);
+  out[i * 3] = r.x; out[i * 3 + 1] = r.y; out[i * 3 + 2] = r.z;
 }`;
   return {
     async project(vertices, level) {
       const n = vertices.length / 3;
       if (n === 0) return new Float32Array(0);
-      const [out] = await backend.runKernel({
+      const { read: [out] } = await backend.runKernel({
         code,
         invocations: n,
         buffers: [
