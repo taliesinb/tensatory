@@ -11,6 +11,7 @@ the short summary; when a decision changes, update both.
 | [isolines.md](isolines.md) | marching squares, exact projected isolines, streamline integration, smoothing |
 | [viewer.md](viewer.md) | the 2D viewer: panels, slots and the mappings matrix, legend, rendering, persistence, URL overrides |
 | [performance.md](performance.md) | where time goes, what was done about it, and what is left |
+| [gpu.md](gpu.md) | the WebGPU backend: WGSL transpilation, compute-shader sampling, CPU/GPU agreement tests, Dawn-in-node pitfalls |
 | [roadmap.md](roadmap.md) | what comes next (array backends, quadtree seeding, 3D, GPU, server) |
 
 ## The one-paragraph version

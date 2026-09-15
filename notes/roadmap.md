@@ -26,7 +26,8 @@ Rough order; each item is independent enough to be picked up alone.
    demand (e.g. a Torch script sampling a new grid), with the same
    `FieldDataSpec` vocabulary; and client-side computation via third-party JS
    (WebGPU training).
-7. **GPU path**: transpile the expression language to WGSL for sampling and
-   contouring; textures / storage buffers for grids.
+7. **GPU path** (stage 1 done: `packages/gpu`, see [gpu.md](gpu.md)):
+   next, contouring and integration as compute passes, then a WebGPU
+   renderer.
 8. **Workers** for contouring and integration; **CSE improvements** in
    `diff`.

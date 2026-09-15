@@ -41,6 +41,10 @@ packages/core/     @tensatory/core    - runtime: zod parsing, NdArray, symbolic
                                         field data, stats, codomains, Bundle
                                         registry, isolines, streamlines.
                                         Isomorphic; no DOM. Tests in test/.
+packages/gpu/      @tensatory/gpu     - WebGPU backend beside core: WGSL
+                                        transpiler + compute-shader sampling;
+                                        tests assert CPU/GPU agreement (Dawn
+                                        node bindings, `webgpu` package).
 apps/viewer/       @tensatory/viewer  - Vite + vanilla TS 2D viewer (canvas 2D),
                                         example bundles in public/bundles/.
 notes/             architecture notes (start with notes/README.md)
@@ -108,7 +112,11 @@ profiling test.
   faces locked) and chords are refined adaptively to a world-space tolerance
   (the viewer passes ¼ pixel). Known limitation: topology still comes from the
   seed grid — planned fix is an interval-arithmetic quadtree seed.
-* Performance (all CPU / Canvas 2D; no GPU yet): the compiler does
+* GPU backend (`packages/gpu`): same semantics as core, f32; every upload
+  packed into ONE storage buffer (8-buffer limit); explicit bind-group layout;
+  the `GPU` instance must be retained for the device's lifetime under Dawn or
+  the process segfaults. See `notes/gpu.md`.
+* Performance (viewer is CPU / Canvas 2D so far): the compiler does
   common-subexpression elimination with per-point memoization; streamlines of
   symbolic vector fields are integrated through a sampled copy on the current
   grid; isolines fall back to marching squares while a level is moving and

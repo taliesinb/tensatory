@@ -342,7 +342,7 @@ export class SymbolicScalarFieldData extends ScalarFieldData {
    * @param ast normalized expression (may refer to `args`)
    * @param box explicit box (symbolic fields without args default to the unit box)
    */
-  private readonly explicitBox: Box | undefined;
+  readonly explicitBox: Box | undefined;
 
   constructor(
     readonly ast: SExpr,
@@ -375,7 +375,7 @@ export class SymbolicVectorFieldData extends VectorFieldData {
   readonly samplePoints: DenseGrid | undefined;
   readonly fn: VectorFn;
   private readonly ctx: CompileContext;
-  private readonly explicitBox: Box | undefined;
+  readonly explicitBox: Box | undefined;
 
   constructor(
     readonly ast: VExpr,
@@ -403,7 +403,7 @@ export class SymbolicVectorFieldData extends VectorFieldData {
 /* pullbacks: translate / scale the domain */
 
 /** an affine, axis-aligned reparametrization q = origin + (p - shift - origin) / factors */
-class AxisMap {
+export class AxisMap {
   constructor(
     readonly shift: readonly number[],
     readonly origin: readonly number[],
@@ -433,7 +433,7 @@ export class PulledBackScalarFieldData extends ScalarFieldData {
   readonly samplePoints: DenseGrid | undefined;
   readonly fn: ScalarFn;
 
-  constructor(readonly inner: ScalarFieldData, private readonly map: AxisMap) {
+  constructor(readonly inner: ScalarFieldData, readonly map: AxisMap) {
     super();
     this.kind = inner.kind;
     this.dimCount = inner.dimCount;
@@ -459,7 +459,7 @@ export class PulledBackVectorFieldData extends VectorFieldData {
   readonly samplePoints: DenseGrid | undefined;
   readonly fn: VectorFn;
 
-  constructor(readonly inner: VectorFieldData, private readonly map: AxisMap) {
+  constructor(readonly inner: VectorFieldData, readonly map: AxisMap) {
     super();
     this.kind = inner.kind;
     this.dimCount = inner.dimCount;

@@ -2,3 +2,8 @@ packages:
   - schema
   - packages/*
   - apps/*
+allowBuilds:
+  webgpu: set this to true or false
+
+onlyBuiltDependencies:
+  - webgpu
