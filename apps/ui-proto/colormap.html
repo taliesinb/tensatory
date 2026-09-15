@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tensatory UI prototypes — colormap interval</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+<h1>colormap interval <small>apps/ui-proto — <a href="index.html">interval slider</a> · <b>colormap interval</b></small></h1>
+<div class="help">
+  The interval is a <b>bracket</b> |‾‾‾| over the colormap. Handles move only by <b>dragging</b>; press anywhere else — inside, on the top line, or outside — and drag: the whole box (or a half's only end) moves along;
+  <i>click</i> a handle or drag it off the bar: delete it. Single clicks elsewhere toggle modes:
+  <b>excluded</b> region (either side): <b>clip</b> (saturated boundary colour) ⇄ <b>mask</b> (grey barber-pole: not drawn) ·
+  <b>included</b> region: <b>stretch</b> (colormap compressed to exactly the interval) ⇄ <b>full</b> (ordinary colormap; the interval only masks / clips) ·
+  <b>half</b> interval: <i>click</i> the top line: the missing end appears there; inside toggles stretch / full · none: drag to create.
+  Click a row's <i>name</i> to cycle its colormap.
+</div>
+
+<div class="panel">
+  <div class="strip"><span class="title">legend size (160 × 12)</span></div>
+  <div class="body">
+    <div class="lrow"><span class="lname" data-cycle="v1"><span class="slot">C</span>viridis</span><div class="isl cmap" id="v1" data-map="viridis" data-min="0" data-max="1" data-step="0.001" data-lo="0.3" data-hi="0.7"></div><span class="val" id="v1v"></span></div>
+    <div class="lrow"><span class="lname" data-cycle="v2"><span class="slot">C I<sub>C</sub></span>plasma</span><div class="isl cmap" id="v2" data-map="plasma" data-min="0" data-max="1" data-step="0.001" data-lo="0.4" data-hi="null" data-low="mask"></div><span class="val" id="v2v"></span></div>
+    <div class="lrow"><span class="lname" data-cycle="v3"><span class="slot">S<sub>C</sub></span>gray</span><div class="isl cmap" id="v3" data-map="gray" data-min="0" data-max="1" data-step="0.001" data-lo="null" data-hi="0.5" data-span="full"></div><span class="val" id="v3v"></span></div>
+    <div class="lrow"><span class="lname" data-cycle="v4"><span class="slot">C</span>okhue</span><div class="isl cmap" id="v4" data-map="okhue" data-min="0" data-max="1" data-step="0.001" data-lo="null" data-hi="null"></div><span class="val" id="v4v"></span></div>
+    <div class="lrow"><span class="lname" data-cycle="v5"><span class="slot">C</span>turbo</span><div class="isl cmap" id="v5" data-map="turbo" data-min="0" data-max="1" data-step="0.001" data-lo="0.5" data-hi="0.5"></div><span class="val" id="v5v"></span></div>
+  </div>
+</div>
+
+<div class="panel wide">
+  <div class="strip"><span class="title">wide, with the effect on a field</span></div>
+  <div class="body">
+    <div class="row"><label data-cycle="w1" style="cursor:pointer">viridis</label><div class="isl cmap" id="w1" data-map="viridis" data-min="-2" data-max="2" data-step="0.01" data-lo="-1" data-hi="1"></div><span class="val" id="w1v"></span></div>
+    <div class="row"><label>x² − y²</label><canvas id="field" width="600" height="160"></canvas></div>
+    <div class="row"><label></label><span class="hint">the raster is coloured through the selection above: clipped values saturate, masked values are not drawn (transparent); shift-hover the bar to preview</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="strip"><span class="title">stepped / log-ish range</span></div>
+  <div class="body">
+    <div class="row"><label data-cycle="s1" style="cursor:pointer">plasma</label><div class="isl cmap" id="s1" data-map="plasma" data-min="0" data-max="100" data-step="5" data-lo="20" data-hi="60" data-span="full" data-low="mask" data-high="mask"></div><span class="val" id="s1v"></span></div>
+    <div class="row"><label data-cycle="s2" style="cursor:pointer">turbo</label><div class="isl cmap" id="s2" data-map="turbo" data-min="1e-5" data-max="1" data-step="1e-5" data-lo="0.001" data-hi="0.5"></div><span class="val" id="s2v"></span></div>
+  </div>
+</div>
+
+<script type="module" src="/src/colormap-page.ts"></script>
+</body>
+</html>
