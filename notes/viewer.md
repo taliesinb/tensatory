@@ -104,3 +104,14 @@ panels are global. Query parameters override anything after load:
 left stack with the same 12 px margin the panels keep from the viewport,
 centred in the limiting dimension; resize re-fits unless the view was
 customised.
+
+## Streamline particles
+
+Each line carries one particle window of `tail` cells (transparent tail →
+full-colour head) sliding along the flow, or `split` windows spaced `len /
+split` apart. Brightness is `(arc − w0) / tail` inside a window `[w0, w0 +
+tail]` and nothing else — no fade-in at the start of a path (that dimmed every
+line beginning at an inflow edge). With one particle the head runs over `len +
+tail`, so it enters the path head-first and its tail slides off the end; the
+Canvas renderer clips each segment to the window and shades the clipped piece,
+matching the per-fragment GPU shader. `tail` deselected = solid full lines.

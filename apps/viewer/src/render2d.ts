@@ -225,27 +225,34 @@ export class Renderer2D {
       const vals = l.values?.[li];
       const n = line.length / 2;
       const len = P ? P.lengths[li]! : 0, phase = P ? P.phases[li]! : 0;
-      const t = P && len > 0 ? (((P.travel + phase * len) % len) + len) % len : 0; // head position along the line
-      for (let i = 0; i + 1 < n; i++) {
-        let bright = 1;
-        if (P) {
-          const arc = (i + 0.5) * P.step, k = P.tail;
-          if (P.split <= 1) {
-            const a = arc - t; if (a < 0 || a > k) continue;
-            bright = a / k; if (bright <= 0.02) continue;
-          } else {
-            const span = len / P.split;
-            const d = (((arc - t) % span) + span) % span; if (d > k) continue;
-            bright = d / k; if (bright <= 0.02) continue;
-          }
-        }
+      const k = P ? P.tail : 0, span = P && P.split > 1 ? len / P.split : Infinity;
+      // head position along the line. One particle: t runs over len + k so it enters head-first and leaves tail-last.
+      const period = P && P.split <= 1 ? len + k : len;
+      const t = P && period > 0 ? (((P.travel + phase * period) % period) + period) % period : 0;
+      /** draw the part of segment i between arc parameters u0..u1 (0..1 along the segment) */
+      const emit = (i: number, u0: number, u1: number, bright: number) => {
         const cbin = vals ? Math.max(0, Math.min(COLOR_BINS - 1, Math.round(0.5 * (vals[i]! + vals[i + 1]!) * (COLOR_BINS - 1)))) : 0;
         const bbin = Math.max(0, Math.min(ALPHA_BINS - 1, Math.round(bright * (ALPHA_BINS - 1))));
         const kk = cbin * ALPHA_BINS + bbin;
         let path = paths.get(kk);
         if (!path) paths.set(kk, (path = new Path2D()));
-        const [x0, y0] = this.toScreen([line[2 * i]!, line[2 * i + 1]!]), [x1, y1] = this.toScreen([line[2 * i + 2]!, line[2 * i + 3]!]);
+        const ax = line[2 * i]!, ay = line[2 * i + 1]!, bx = line[2 * i + 2]!, by = line[2 * i + 3]!;
+        const [x0, y0] = this.toScreen([ax + (bx - ax) * u0, ay + (by - ay) * u0]), [x1, y1] = this.toScreen([ax + (bx - ax) * u1, ay + (by - ay) * u1]);
         path.moveTo(x0, y0); path.lineTo(x1, y1);
+      };
+      for (let i = 0; i + 1 < n; i++) {
+        if (!P) { emit(i, 0, 1, 1); continue; }
+        // windows [w0, w0 + k] in arc; clip the segment [arc0, arc1] to each window that meets it
+        const arc0 = i * P.step, arc1 = (i + 1) * P.step;
+        const windows: number[] = [];
+        if (P.split <= 1) windows.push(t - k);
+        else { const w = t + Math.floor((arc1 - t) / span) * span; windows.push(w, w - span); }
+        for (const w0 of windows) {
+          const lo = Math.max(arc0, w0), hi = Math.min(arc1, w0 + k);
+          if (hi <= lo) continue;
+          const bright = (0.5 * (lo + hi) - w0) / k; if (bright <= 0.02) continue;
+          emit(i, (lo - arc0) / P.step, (hi - arc0) / P.step, bright);
+        }
       }
     });
     for (const [kk, path] of paths) {

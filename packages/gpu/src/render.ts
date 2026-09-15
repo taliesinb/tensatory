@@ -135,13 +135,17 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
   // particles: tail (world), split, travel (world), enabled
   if (u.particles.w > 0.5 && in.len > 0.0) {
     let k = u.particles.x; let split = u.particles.y;
-    let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
     var bright: f32;
     if (split <= 1.0) {
-      let a = in.arc - t;
+      // one particle per line: head at t, tail behind it; t runs over len + k so the particle
+      // enters head-first at the start of the path and its tail slides off the end
+      let period = in.len + k;
+      let t = (u.particles.z + in.phase * period) - floor((u.particles.z + in.phase * period) / period) * period;
+      let a = in.arc - (t - k);
       if (a < 0.0 || a > k) { discard; }
       bright = a / k;
     } else {
+      let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
       let span = in.len / split;
       let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
       if (dd > k) { discard; }
