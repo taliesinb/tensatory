@@ -44,14 +44,15 @@ a { color: #7aa2f7; text-decoration: none; } a:hover { text-decoration: underlin
 .isl.locked.m-band { cursor: grabbing; }
 .isl.onfill { cursor: cell; }
 .isl > div { position: absolute; top: 0; bottom: 0; pointer-events: none; }
-.isl .band { background: rgba(59,130,246,.28); }
-.isl.locked .band { background: rgba(96,165,250,.34); }
-.isl.hover .band { background: rgba(147,197,253,.34); }
+/* the translucent band fill belongs to the plain slider only (:not(.cmap): the colormap variant draws a bracket) */
+.isl:not(.cmap) .band { background: rgba(59,130,246,.28); }
+.isl:not(.cmap).locked .band { background: rgba(96,165,250,.34); }
+.isl:not(.cmap).hover .band { background: rgba(147,197,253,.34); }
 /* half intervals: the band fades out towards its open end; only the existing handle is drawn */
-.isl.half-lo .band { background: linear-gradient(90deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
-.isl.half-hi .band { background: linear-gradient(270deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
-.isl.half-lo.locked .band, .isl.half-lo.hover .band { background: linear-gradient(90deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
-.isl.half-hi.locked .band, .isl.half-hi.hover .band { background: linear-gradient(270deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
+.isl:not(.cmap).half-lo .band { background: linear-gradient(90deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
+.isl:not(.cmap).half-hi .band { background: linear-gradient(270deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
+.isl:not(.cmap).half-lo.locked .band, .isl:not(.cmap).half-lo.hover .band { background: linear-gradient(90deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
+.isl:not(.cmap).half-hi.locked .band, .isl:not(.cmap).half-hi.hover .band { background: linear-gradient(270deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
 .isl.half-lo .hi, .isl.half-hi .lo, .isl.none > div { display: none; }
 .isl .lo, .isl .hi { width: 3px; margin-left: -1.5px; background: #3b82f6; border-radius: 1px; }
 .isl.locked .lo, .isl.locked .hi { background: #60a5fa; }
@@ -59,18 +60,36 @@ a { color: #7aa2f7; text-decoration: none; } a:hover { text-decoration: underlin
 .isl .was { width: 3px; margin-left: -1.5px; background: repeating-linear-gradient(to bottom, #3b82f6 0 2px, transparent 2px 4px); display: none; }
 @media (min-resolution: 2dppx) { .isl .was { width: 1.5px; margin-left: -0.75px; } }
 
-/* colormap interval: the root's background is the stretched colormap (set inline); the band is hidden,
-   handles and ghosts are white with a dark shadow like the legend's notches */
-.isl.cmap .band { display: none; }
-.isl.cmap .lo, .isl.cmap .hi { top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 2px #000; opacity: .85; }
-.isl.cmap.locked .lo, .isl.cmap.locked .hi, .isl.cmap.hover .lo, .isl.cmap.hover .hi, .isl.cmap.onhandle .lo, .isl.cmap.onhandle .hi { opacity: 1; }
-.isl.cmap .was { top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: repeating-linear-gradient(to bottom, #fff 0 2px, transparent 2px 4px); filter: drop-shadow(0 0 1px #000); }
+/* colormap interval: the root's background is the colormap (+ hatch layers, set inline). The interval is a BOX:
+   .band gives the top / bottom frame lines, .lo / .hi the vertical edges; a half's frame fades towards its open end */
+.isl.cmap { cursor: default; }
+/* the bracket overflows the bar, so extend the hit area up over the top line (events on ::before target the bar) */
+.isl.cmap::before { content: ""; position: absolute; left: -2px; right: -2px; top: -6px; bottom: 0; }
+/* the frame is a bracket |‾‾‾‾| : a 2px top line 2px above the bar (overflowing, no extra layout height) and
+   2px edges running from it down to the bar's actual bottom; the band is widened by 1px each side so the top
+   line meets the edges at the corners */
+.isl.cmap .band { top: -4px; bottom: 0; margin-left: -1px; padding: 0 1px; box-sizing: content-box; background: none; border-top: 2px solid #fff; opacity: .85; filter: drop-shadow(0 0 1px #000); }
+.isl.cmap.half-lo .band { mask-image: linear-gradient(90deg, #000 40%, transparent 100%); -webkit-mask-image: linear-gradient(90deg, #000 40%, transparent 100%); }
+.isl.cmap.half-hi .band { mask-image: linear-gradient(270deg, #000 40%, transparent 100%); -webkit-mask-image: linear-gradient(270deg, #000 40%, transparent 100%); }
+.isl.cmap .lo, .isl.cmap .hi { top: -4px; bottom: 0; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 2px #000; opacity: .85; }
+.isl.cmap.locked .band, .isl.cmap.locked .lo, .isl.cmap.locked .hi, .isl.cmap.hover .band, .isl.cmap.hover .lo, .isl.cmap.hover .hi, .isl.cmap.onhandle .lo, .isl.cmap.onhandle .hi { opacity: 1; }
+.isl.cmap .was { top: -4px; bottom: 0; width: 2px; margin-left: -1px; background: repeating-linear-gradient(to bottom, #fff 0 2px, transparent 2px 4px); filter: drop-shadow(0 0 1px #000); }
+/* masked sides: a seamless 8px diagonal-stripe tile, anchored to the bar's left / right end so it never re-phases */
+.isl.cmap .hatch { top: 0; bottom: 0; background-image: linear-gradient(-45deg, #4a5264 25%, #262b36 25%, #262b36 50%, #4a5264 50%, #4a5264 75%, #262b36 75%); background-size: 8px 8px; }
+.isl.cmap .hatch.below { left: 0; background-position: left top; border-radius: 3px 0 0 3px; }
+.isl.cmap .hatch.above { right: 0; background-position: right top; border-radius: 0 3px 3px 0; }
 .isl.cmap.none > div { display: none; }
+.isl.cmap.ontoggle { cursor: pointer; }
+.isl.cmap.onfill { cursor: cell; }
+.isl.cmap.onhandle, .isl.cmap.locked.m-lo, .isl.cmap.locked.m-hi, .isl.cmap.locked.m-create { cursor: ew-resize; }
+.isl.cmap.locked.m-band { cursor: grabbing; }
+.isl.cmap.none { cursor: crosshair; }
+.val .modes { font-size: 11px; letter-spacing: .05em; margin-left: 4px; cursor: help; }
 /* legend-sized rows, as in the viewer's #info */
 .lrow { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 .lrow .lname { color: #aab; width: 85px; flex: none; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .lrow .lname .slot { color: #778; margin-right: 6px; font-size: 11px; }
 .lrow .isl.cmap { width: 160px; height: 12px; flex: none; }
-.lrow .val { width: 110px; display: flex; justify-content: flex-end; font-variant-numeric: tabular-nums; font-size: 12px; color: #cde; flex: none; white-space: nowrap; }
+.lrow .val { width: 150px; display: flex; justify-content: flex-end; font-variant-numeric: tabular-nums; font-size: 12px; color: #cde; flex: none; white-space: nowrap; }
 .lrow .val .dim { color: #667; }
 #field { display: block; border-radius: 3px; width: 600px; height: 160px; image-rendering: pixelated; }

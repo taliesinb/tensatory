@@ -25,6 +25,12 @@
 //   none:  press and drag -> a new full interval spanning the dragged range, live; release commits;
 //          releasing past either end of the bar leaves that side open -> a half interval
 //   any:   Escape cancels the drag (restores the committed ends);  Backspace -> none
+// Colormap variant (class "cmap", drawn as a bracket |‾‾‾| : a top line + the two edges): handles move ONLY by
+// dragging; a press anywhere else drags the interval / the existing end relatively (no jump). Single clicks:
+//   a handle -> destroy it;  the top line of a half -> the missing end appears there;
+//   inside the box -> 'modetoggle' event with detail "span";  outside -> 'modetoggle' with detail "low" / "high".
+//   Dragging the top line translates the whole bracket, like dragging inside it.
+//   The consumer (cmapInterval.ts) owns what those toggles mean.
 // Events: 'input' while the shown interval moves (drag / preview), 'change' when it is committed.
 
 export interface IntervalEl extends HTMLElement {
@@ -42,11 +48,12 @@ export interface IntervalEl extends HTMLElement {
 
 type End = "lo" | "hi";
 type Mode = End | "band" | "scale" | "create";
-type Region = "lo" | "hi" | "band" | "out"; // what was under the pointer at press time
+type Region = "lo" | "hi" | "band" | "frame" | "out"; // what was under the pointer at press time ("frame": a cmap half's top line)
 
 export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   const el = el0 as IntervalEl;
   let min = +el.dataset.min!, max = +el.dataset.max!, step = +(el.dataset.step ?? 0);
+  const cmap = el.classList.contains("cmap");
   const span = () => max - min;
   const quant = (v: number) => { v = Math.min(max, Math.max(min, v)); if (step) v = min + Math.round((v - min) / step) * step; return +v.toFixed(6); };
   const num = (s: string | undefined, dflt: number): number | null => { if (s === "null") return null; const v = s === undefined ? dflt : +s; return Number.isFinite(v) ? quant(v) : dflt; };
@@ -104,14 +111,17 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
     if (nearLo && nearHi) return "band"; // point interval: handles overlap, drag it whole
     if (nearLo) return "lo";
     if (nearHi) return "hi";
-    return x > xOf(sLo ?? min) && x < xOf(sHi ?? max) ? "band" : "out";
+    if (!(x > xOf(sLo ?? min) && x < xOf(sHi ?? max))) return "out";
+    if (cmap && k !== "full" && e.clientY < rect().top + 3) return "frame"; // the top line (2px above the bar, plus a little inside it)
+    return "band";
   };
   const cursor = () => {
     if (!lastEv) return;
     const h = dragging ? null : hit(lastEv), k = kindOf(sLo, sHi);
     el.classList.toggle("onhandle", h === "lo" || h === "hi");
-    el.classList.toggle("onband", h === "band" && k === "full");
-    el.classList.toggle("onfill", h === "band" && k !== "full");
+    el.classList.toggle("onband", h === "band" && k === "full" && !cmap);
+    el.classList.toggle("onfill", h === "frame" || (h === "band" && k !== "full" && !cmap));
+    el.classList.toggle("ontoggle", cmap && (h === "band" || (h === "out" && k !== "none")));
   };
 
   /* public API */
@@ -155,10 +165,16 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
     dragging = false; settled = true; el.classList.remove("locked", ...MODES);
     if (!moved) {
       const k = kindOf(sLo, sHi);
+      const addEnd = () => { if (k === "lo") { lo = sLo; hi = quant(downV); } else { lo = quant(downV); hi = sHi; } commit(); };
       if (region === "lo") { lo = null; hi = sHi; commit(); }                 // click a handle: destroy that end
       else if (region === "hi") { lo = sLo; hi = null; commit(); }
-      else if (region === "band" && k === "lo") { lo = sLo; hi = quant(downV); commit(); } // click the filled part of a half: add the other end
-      else if (region === "band" && k === "hi") { lo = quant(downV); hi = sHi; commit(); }
+      else if (region === "frame") addEnd();                                   // cmap half: click the frame -> the other end appears there
+      else if (region === "band" && k !== "full" && !cmap) addEnd();           // plain half: click the filled part -> likewise
+      else if (cmap && k !== "none") {                                         // cmap: clicks toggle the consumer's modes
+        revert();
+        const what = region === "band" ? "span" : downV < (sLo ?? min) ? "low" : "high";
+        el.dispatchEvent(new CustomEvent("modetoggle", { detail: what }));
+      }
       else revert();
       cursor(); return;
     }
@@ -174,8 +190,8 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
     else if (k === "lo" || k === "hi") { mode = k; downOff = (k === "lo" ? sLo! : sHi!) - downV; } // press anywhere: move the existing end, relatively
     else if (e.altKey) { mode = "scale"; downC = (sLo! + sHi!) / 2; showScaled(downC, Math.abs(downV - downC)); moved = true; }
     else if (region === "lo" || region === "hi") { mode = region; downOff = (region === "lo" ? sLo! : sHi!) - downV; }
-    else if (region === "band") { mode = "band"; downW = sHi! - sLo!; downOff = (sLo! + sHi!) / 2 - downV; }
-    else { mode = "band"; downW = sHi! - sLo!; downOff = 0; showCentred(downV, downW); moved = true; } // press outside: the centre jumps there
+    else if (region === "band" || region === "frame" || cmap) { mode = "band"; downW = sHi! - sLo!; downOff = (sLo! + sHi!) / 2 - downV; } // drag the whole interval (band or frame), relatively
+    else { mode = "band"; downW = sHi! - sLo!; downOff = 0; showCentred(downV, downW); moved = true; } // plain, press outside: the centre jumps there
     try { el.setPointerCapture(e.pointerId); } catch { /* synthetic events have no active pointer */ }
     el.classList.add("locked", `m-${mode}`); cursor();
   });
@@ -205,7 +221,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   });
   el.addEventListener("pointerup", endDrag); el.addEventListener("pointercancel", endDrag);
   el.addEventListener("pointerenter", (e) => { over = true; lastEv = e; cursor(); });
-  el.addEventListener("pointerleave", () => { over = false; settled = false; el.classList.remove("onhandle", "onband", "onfill"); });
+  el.addEventListener("pointerleave", () => { over = false; settled = false; el.classList.remove("onhandle", "onband", "onfill", "ontoggle"); });
   window.addEventListener("keydown", (e) => { if (e.key === "Shift" && over) startPreview(); });
   window.addEventListener("keyup", (e) => { if (e.key === "Shift") endPreview(); });
   window.addEventListener("keydown", (e) => { if (e.key === "Escape") cancelDrag(); });

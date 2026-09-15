@@ -15,9 +15,11 @@ pnpm --filter @tensatory/ui-proto typecheck
   `.value` (`"lo,hi"` with `null` for a missing end; `null` when both are missing), `.center` / `.width`
   (full intervals only), `setRange()`; fires `input` / `change`. The header comment lists every gesture
   for the full / half / none kinds.
-* `src/cmapInterval.ts` — colormap interval selection on top of the same widget (`.isl.cmap`): `stretchedGradient`,
-  `paramOf` (value → colormap parameter, clamped outside the interval), `bindColormap` (repaints the root's
-  background on every `input`). Page: `colormap.html` + `src/colormap-page.ts`.
+* `src/cmapInterval.ts` — colormap interval selection on top of the same widget (`.isl.cmap`, drawn as a box):
+  `makeCmapInterval(el, colormap)` adds the modes that are part of the selection's value — `span`
+  (`stretch` | `full`), `low` / `high` (`clip` | `mask`) — flips them on the widget's `modetoggle` clicks,
+  repaints the bar (`cmapBackground`: hatch layers over masked sides + `colourGradient`) and exposes
+  `paramOf` (value → colormap parameter, `null` where masked). Page: `colormap.html` + `src/colormap-page.ts`.
 * `src/format.ts` — `formatReal` (copied from core) and `formatInterval`.
 * `src/main.ts` — interval-slider demo wiring (`index.html`); `window.proto = { sliders, intervals, logged }` for scripted tests
   (dispatch `PointerEvent`s at fractions of the bar's rect; `setPointerCapture` is guarded so synthetic events work).

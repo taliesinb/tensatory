@@ -232,7 +232,7 @@ export class Renderer2D {
           const arc = (i + 0.5) * P.step, k = P.tail;
           if (P.split <= 1) {
             const a = arc - t; if (a < 0 || a > k) continue;
-            bright = a / k - Math.max(k - t, 0) / k; if (bright <= 0.02) continue;
+            bright = a / k; if (bright <= 0.02) continue;
           } else {
             const span = len / P.split;
             const d = (((arc - t) % span) + span) % span; if (d > k) continue;

@@ -140,7 +140,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
     if (split <= 1.0) {
       let a = in.arc - t;
       if (a < 0.0 || a > k) { discard; }
-      bright = a / k - max(k - t, 0.0) / k;
+      bright = a / k;
     } else {
       let span = in.len / split;
       let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
