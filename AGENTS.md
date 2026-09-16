@@ -44,10 +44,12 @@ packages/core/     @tensatory/core    - runtime: zod parsing, NdArray, symbolic
 packages/gpu/      @tensatory/gpu     - WebGPU backend beside core: WGSL
                                         transpiler, compute-shader sampling,
                                         geometry kernels (marching squares,
-                                        projection, fused isolines/streamlines),
-                                        WebGPU renderer; tests assert CPU/GPU
+                                        projection, fused isolines/streamlines,
+                                        marching tetrahedra), WebGPU 2D and 3D
+                                        renderers; tests assert CPU/GPU
                                         agreement (Dawn node bindings).
-apps/viewer/       @tensatory/viewer  - Vite + vanilla TS 2D viewer (canvas 2D),
+apps/viewer/       @tensatory/viewer  - Vite + vanilla TS viewer: 2D arm (canvas
+                                        2D / WebGPU) and 3D arm (WebGPU),
                                         example bundles in public/bundles/.
 notes/             architecture notes (start with notes/README.md)
 ```
@@ -136,6 +138,20 @@ profiling test.
   (`packages/gpu/src/passes.ts`), so gpu/gpu covers every isoline option;
   symbolic ranges start from a coarse CPU grid and are refined by the GPU
   reduction when it lands.
+* Spaces and 3D (`notes/3d.md`): the bundle panel's `space` picker selects one
+  of the bundle's 2D/3D manifolds (those with buildable fields; `?space=`);
+  fields, point sets, slot selections, view / camera and directions belong to
+  a space (options per bundle with a per-space section). `defaultManifold` is
+  only required when a field / point set omits `domain`. The `space` and
+  `isolines` panels are shared by both arms (titles switch; `.d2` / `.d3`
+  rows), so value / split / opacity / ▶ mean the same for isosurfaces. 3D:
+  marching tetrahedra (`core/src/iso/marchingTets.ts`, tables shared with the
+  fused GPU kernel in `gpu/src/mesh.ts`) into a triangle soup with gradient
+  normals (exact for symbolic fields) pointing towards increasing values;
+  `GpuRenderer3D` = orbit camera, vertex-pulled meshes via drawIndirect,
+  two-sided headlight, weighted-blended OIT for translucent levels; box /
+  points / labels on the Canvas 2D overlay. WebGPU only; compute cpu / gpu as
+  in 2D. Matrix columns absent in a space are hidden (`SlotDef.present`).
 * WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
   by Metal's fast-math.
 * Performance: the compiler does
