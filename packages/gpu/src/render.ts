@@ -148,9 +148,10 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
     } else {
       let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
       let span = in.len / split;
+      let kk = min(k, span); // a line shorter than split × tail still gets a full-brightness head
       let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
-      if (dd > k) { discard; }
-      bright = dd / k;
+      if (dd > kk) { discard; }
+      bright = dd / kk;
     }
     if (bright <= 0.02) { discard; }
     alpha = alpha * bright;

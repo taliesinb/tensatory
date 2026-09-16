@@ -257,10 +257,11 @@ export class Renderer2D {
         const windows: number[] = [];
         if (P.split <= 1) windows.push(t - k);
         else { const w = t + Math.floor((arc1 - t) / span) * span; windows.push(w, w - span); }
+        const kk = Math.min(k, span); // split windows never exceed their span: short lines still get a bright head
         for (const w0 of windows) {
-          const lo = Math.max(arc0, w0), hi = Math.min(arc1, w0 + k);
+          const lo = Math.max(arc0, w0), hi = Math.min(arc1, w0 + kk);
           if (hi <= lo) continue;
-          const bright = (0.5 * (lo + hi) - w0) / k; if (bright <= 0.02) continue;
+          const bright = (0.5 * (lo + hi) - w0) / kk; if (bright <= 0.02) continue;
           emit(i, (lo - arc0) / P.step, (hi - arc0) / P.step, bright);
         }
       }
