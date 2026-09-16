@@ -161,8 +161,9 @@ profiling test.
   two-sided headlight, weighted-blended OIT for translucent levels, depth-
   tested thick lines (box, trajectories, face outlines, streamlines); points /
   labels on the Canvas 2D overlay. Exact vertices via ∇f projection (flag ∇),
-  isolines of I_V on the cropped box faces (`outline`), crop ranges x / y / z
-  as interval sliders that only preview (dotted box) until released, metric
+  isolines of I_V on the cropped box faces (`outline`; fixed per-face passes
+  re-dispatched per depth, so cropping is live), crop ranges x / y / z as
+  interval sliders, metric
   blur and Taubin `surface` smoothing (CPU), 3D streamlines with the 2D
   panel's dir / mode (JL planning is dimension-generic). WebGPU only; compute
   cpu / gpu as in 2D. Matrix columns absent in a space are hidden

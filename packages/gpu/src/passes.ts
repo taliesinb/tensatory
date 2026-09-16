@@ -1,7 +1,7 @@
 // Grid passes on resident data: statistics (reduction), separable box blur,
 // and Taubin-smoothed marching-squares isolines on the edge graph.
 
-import type { DenseGrid, ScalarFieldData } from "@tensatory/core";
+import { DenseGrid, type ScalarFieldData } from "@tensatory/core";
 import { RESIDENT_USAGE, type GpuBackend } from "./device";
 import { marchingSquaresWgsl } from "./isolines";
 import { ProgramBuilder } from "./program";
@@ -106,6 +106,50 @@ export function blurResidentSync(backend: GpuBackend, src: GpuGrid, radius: numb
 }
 
 /*******************************************************/
+/* plane samples of a 3D field / resident grid, built once, dispatched per depth */
+
+export interface PlanePass {
+  /** fill `into` (grid2.sampleCount f32) with the values on the plane `axis = depth`; enqueued */
+  dispatch(depth: number, into: GPUBuffer): void;
+  destroy(): void;
+}
+
+/** evaluate a 3D field exactly on the plane `axis = depth` at the points of `grid2`: one program per (field, axis, grid2) */
+export function planeSampler(backend: GpuBackend, field: ScalarFieldData, axis: number, grid2: DenseGrid): PlanePass {
+  const keep = [0, 1, 2].filter((d) => d !== axis) as [number, number];
+  const b = new ProgramBuilder(new DenseGrid([2, 2, 2], field.box));
+  const fn = b.scalar(field);
+  const lib = b.library();
+  const n = grid2.sampleCount;
+  const c = ["", "", ""]; c[axis] = "params[0]"; c[keep[0]] = "w0"; c[keep[1]] = "w1";
+  const code = `${lib.code}
+@group(0) @binding(0) var<storage, read_write> dst: array<f32>;
+@group(0) @binding(2) var<storage, read> params: array<f32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let v = i32(id.x);
+  if (v >= ${n}) { return; }
+  let u0 = v / ${grid2.strides[0]}; let u1 = v - u0 * ${grid2.strides[0]};
+  let w0 = ${f32(grid2.box.a[0]!)} + f32(u0) * ${f32(grid2.spacing[0]!)};
+  let w1 = ${f32(grid2.box.a[1]!)} + f32(u1) * ${f32(grid2.spacing[1]!)};
+  dst[v] = ${fn}(vec3<f32>(${c.join(", ")}), -1);
+}`;
+  return {
+    dispatch(depth, into) { backend.dispatch({ code, invocations: n, buffers: [{ role: "rw", buffer: into }, { role: "r", data: lib.data }, { role: "r", data: Float32Array.of(depth, 0, 0, 0) }] }); },
+    destroy() { /* nothing resident */ },
+  };
+}
+
+/** trilinear samples of a resident 3D grid on the plane `axis = depth` at the points of `grid2`: one program per (grid, axis, grid2) */
+export function planeSlicer(backend: GpuBackend, src: GpuGrid, axis: number, grid2: DenseGrid): PlanePass {
+  const code = sliceCode(src, axis, grid2, "params[0]");
+  const n = grid2.sampleCount;
+  return {
+    dispatch(depth, into) { backend.dispatch({ code, invocations: n, buffers: [{ role: "rw", buffer: into }, { role: "r", buffer: src.buffer }, { role: "r", data: Float32Array.of(depth, 0, 0, 0) }] }); },
+    destroy() { /* nothing resident */ },
+  };
+}
+
+/*******************************************************/
 /* plane slice of a resident 3D grid */
 
 /**
@@ -113,9 +157,9 @@ export function blurResidentSync(backend: GpuBackend, src: GpuGrid, radius: numb
  * `grid2` (trilinear, like core's interpolation of dense data): the face values of a sampled or
  * blurred volume, so the face outlines match the mesh boundary by construction.
  */
-export function sliceResidentSync(backend: GpuBackend, src: GpuGrid, axis: number, depth: number, grid2: DenseGrid): GpuGrid {
+function sliceCode(src: GpuGrid, axis: number, grid2: DenseGrid, depthExpr: string): string {
   const g = src.grid;
-  if (g.dimCount !== 3 || src.channels !== 1) throw new Error("sliceResidentSync needs a resident 3D scalar grid");
+  if (g.dimCount !== 3 || src.channels !== 1) throw new Error("plane slice needs a resident 3D scalar grid");
   const keep = [0, 1, 2].filter((d) => d !== axis) as [number, number];
   const n = grid2.sampleCount;
   const [n0, n1, n2] = g.size as [number, number, number], [s0, s1, s2] = g.strides as [number, number, number];
@@ -124,9 +168,10 @@ export function sliceResidentSync(backend: GpuBackend, src: GpuGrid, axis: numbe
     const nd = g.size[d]!, a = g.box.a[d]!, sp = g.spacing[d]!;
     return nd > 1 ? `clamp((${expr} - ${f32(a)}) / ${f32(sp)}, 0.0, ${f32(nd - 1)})` : "0.0";
   };
-  const code = `
+  return `
 @group(0) @binding(0) var<storage, read_write> dst: array<f32>;
 @group(0) @binding(1) var<storage, read> src: array<f32>;
+@group(0) @binding(2) var<storage, read> params: array<f32>;
 fn at(i: i32, j: i32, k: i32) -> f32 { return src[min(i, ${n0 - 1}) * ${s0} + min(j, ${n1 - 1}) * ${s1} + min(k, ${n2 - 1}) * ${s2}]; }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let v = i32(id.x);
@@ -135,7 +180,7 @@ fn at(i: i32, j: i32, k: i32) -> f32 { return src[min(i, ${n0 - 1}) * ${s0} + mi
   let w0 = ${f32(grid2.box.a[0]!)} + f32(u0) * ${f32(grid2.spacing[0]!)};
   let w1 = ${f32(grid2.box.a[1]!)} + f32(u1) * ${f32(grid2.spacing[1]!)};
   var gp: vec3<f32>;
-  gp[${axis}] = ${coord(axis, f32(depth))};
+  gp[${axis}] = ${coord(axis, depthExpr)};
   gp[${keep[0]}] = ${coord(keep[0], "w0")};
   gp[${keep[1]}] = ${coord(keep[1], "w1")};
   let i0 = vec3<i32>(floor(gp)); let f = gp - vec3<f32>(i0);
@@ -145,7 +190,16 @@ fn at(i: i32, j: i32, k: i32) -> f32 { return src[min(i, ${n0 - 1}) * ${s0} + mi
   let c11 = mix(at(i0.x, i0.y + 1, i0.z + 1), at(i0.x + 1, i0.y + 1, i0.z + 1), f.x);
   dst[v] = mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
 }`;
-  const [out] = backend.dispatch({ code, invocations: n, buffers: [{ role: "rw", size: Math.max(16, n * 4), keep: true }, { role: "r", buffer: src.buffer }] });
+}
+
+/**
+ * Sample a resident 3D scalar grid on the plane `axis = depth` at the points of the 2D grid
+ * `grid2` (trilinear, like core's interpolation of dense data): the face values of a sampled or
+ * blurred volume, so the face outlines match the mesh boundary by construction.
+ */
+export function sliceResidentSync(backend: GpuBackend, src: GpuGrid, axis: number, depth: number, grid2: DenseGrid): GpuGrid {
+  const n = grid2.sampleCount;
+  const [out] = backend.dispatch({ code: sliceCode(src, axis, grid2, "params[0]"), invocations: n, buffers: [{ role: "rw", size: Math.max(16, n * 4), keep: true }, { role: "r", buffer: src.buffer }, { role: "r", data: Float32Array.of(depth, 0, 0, 0) }] });
   const buffer = out!;
   return { grid: grid2, channels: 1, buffer, destroy: () => buffer.destroy() };
 }

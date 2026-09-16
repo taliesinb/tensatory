@@ -624,13 +624,14 @@ function render(): void {
 const CROP_IDS = ["cropx", "cropy", "cropz"] as const;
 const cropEl = (id: (typeof CROP_IDS)[number]) => ui[id] as unknown as IntervalEl;
 let cropCommitted: CropRange[] = [[null, null], [null, null], [null, null]];
-let cropPreviewing = false;
+const cropPreviewing = false; // the dotted-outline preview path stays available should a gesture become expensive again
 const readCrop = () => { cropCommitted = CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange); };
 const fmtCrop = (r: CropRange) => (r[0] === null && r[1] === null ? "—" : `${r[0] === null ? "" : r[0].toFixed(2)}…${r[1] === null ? "" : r[1].toFixed(2)}`);
 for (const id of CROP_IDS) {
   const el = cropEl(id);
-  el.addEventListener("input", () => { cropPreviewing = true; state.dirty = true; });
-  el.addEventListener("change", () => { cropPreviewing = false; readCrop(); state.dirty = true; saveOptsSoon(); });
+  // live: the face passes are fixed-size and re-dispatched only, so every crop gesture updates the picture directly
+  el.addEventListener("input", () => { readCrop(); state.dirty = true; });
+  el.addEventListener("change", () => { readCrop(); state.dirty = true; saveOptsSoon(); });
 }
 
 let view3d: View3D | undefined;

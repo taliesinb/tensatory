@@ -23,8 +23,8 @@ export const ISO_MAXP = 17; // points per refined seed segment (16 pieces)
 export interface FusedIsolineOptions {
   /** project the vertices onto the level set (default: the field is symbolic) */
   exact?: boolean;
-  /** the values are a 3D field sampled on the plane `axis = depth`: exact projection uses the 3D field restricted to it */
-  slice?: { field: ScalarFieldData; axis: number; depth: number };
+  /** the values are a 3D field sampled on the plane `axis = depth` (depth passed per dispatch): exact projection uses the 3D field restricted to it */
+  slice?: { field: ScalarFieldData; axis: number };
 }
 const sliceBox = (s: { field: ScalarFieldData; axis: number }) => {
   const keep = [0, 1, 2].filter((d) => d !== s.axis);
@@ -33,10 +33,10 @@ const sliceBox = (s: { field: ScalarFieldData; axis: number }) => {
 };
 
 export interface FusedIsolines {
-  /** append the isolines at `level` (world tolerance `tol`) into `segs`; the caller resets the set first when reusing it */
-  run(segs: GpuSegments, level: number, tol: number): Promise<void>;
+  /** append the isolines at `level` (world tolerance `tol`) into `segs`; the caller resets the set first when reusing it. `depth`: the plane of a slice kernel */
+  run(segs: GpuSegments, level: number, tol: number, depth?: number): Promise<void>;
   /** same, enqueued without waiting (queue-ordered before later passes) */
-  dispatch(segs: GpuSegments, level: number, tol: number): void;
+  dispatch(segs: GpuSegments, level: number, tol: number, depth?: number): void;
   /** worst-case segment count for one level */
   readonly capacity: number;
   destroy(): void;
@@ -60,7 +60,7 @@ export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | unde
   if (exact && slice) {
     const keep = [0, 1, 2].filter((d) => d !== slice.axis) as [number, number];
     const f3 = b.scalar(slice.field), d3 = keep.map((d) => b.scalar(slice.field, [d]));
-    const lift = (q: string) => { const c = ["", "", ""]; c[slice.axis] = f32(slice.depth); c[keep[0]] = `${q}.x`; c[keep[1]] = `${q}.y`; return `vec3<f32>(${c.join(", ")})`; };
+    const lift = (q: string) => { const c = ["", "", ""]; c[slice.axis] = "params[2]"; c[keep[0]] = `${q}.x`; c[keep[1]] = `${q}.y`; return `vec3<f32>(${c.join(", ")})`; };
     fn = "sl_f"; dx = "sl_dx"; dy = "sl_dy";
     extra.push(`fn sl_f(q: vec2<f32>, pos: i32) -> f32 { return ${f3}(${lift("q")}, -1); }`);
     extra.push(`fn sl_dx(q: vec2<f32>, pos: i32) -> f32 { return ${d3[0]}(${lift("q")}, -1); }`);
@@ -135,7 +135,7 @@ ${exact ? `
   emit(r.a0, r.b0, level, tol);
   if (r.n == 2u) { emit(r.a1, r.b1, level, tol); }
 }`;
-  const kernel = (segs: GpuSegments, level: number, tol: number) => ({
+  const kernel = (segs: GpuSegments, level: number, tol: number, depth = 0) => ({
     code,
     invocations: cells,
     buffers: [
@@ -143,13 +143,13 @@ ${exact ? `
       { role: "r" as const, data: lib.data },
       { role: "r" as const, buffer: values.buffer },
       { role: "rw" as const, buffer: segs.indirect },
-      { role: "r" as const, data: Float32Array.of(level, tol) },
+      { role: "r" as const, data: Float32Array.of(level, tol, depth, 0) },
     ],
   });
   return {
     capacity,
-    async run(segs, level, tol) { await backend.runKernel(kernel(segs, level, tol)); },
-    dispatch(segs, level, tol) { backend.dispatch(kernel(segs, level, tol)); },
+    async run(segs, level, tol, depth) { await backend.runKernel(kernel(segs, level, tol, depth)); },
+    dispatch(segs, level, tol, depth) { backend.dispatch(kernel(segs, level, tol, depth)); },
     destroy() { /* nothing resident of its own */ },
   };
 }

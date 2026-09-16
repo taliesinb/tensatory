@@ -24,8 +24,10 @@ import {
   project,
   resetMesh,
   resetSegments,
+  planeSampler,
+  planeSlicer,
   sampleResidentSync,
-  sliceResidentSync,
+  uploadGrid,
   uploadMesh,
   uploadSegments,
   uploadSegments3,
@@ -41,6 +43,7 @@ import {
   type GpuSegments,
   type GpuSegments3,
   type Lut,
+  type PlanePass,
   type ValueMap,
 } from "@tensatory/gpu";
 
@@ -102,6 +105,8 @@ export interface View3DContext {
 }
 
 const lru = <V>(m: Map<string, V>, max: number, drop: (v: V) => void) => { while (m.size > max) { const k = m.keys().next().value as string; drop(m.get(k)!); m.delete(k); } };
+interface Face { values: GpuGrid; sampler: PlanePass; kernel: FusedIsolines; depth: number; sets: { segs: GpuSegments; stamp: string }[] }
+const destroyFace = (f: Face) => { f.values.destroy(); f.sampler.destroy(); f.kernel.destroy(); for (const s of f.sets) s.segs.destroy(); };
 const gridKey = (u: { id: string }, g: DenseGrid) => `${u.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`;
 
 export class View3D {
@@ -116,10 +121,8 @@ export class View3D {
   private readonly meshes = new Map<string, { mesh: GpuMesh; stamp: string }>();
   private readonly cpuMeshes = new Map<string, GpuMesh>();
   private readonly cpuValues = new Map<string, Float64Array>();
-  // face isolines: per face a sampled face grid (resident or CPU), the 2D kernel and one segment set per level
-  private readonly faceGrids = new Map<string, GpuGrid>();
-  private readonly faceKernels = new Map<string, FusedIsolines>();
-  private readonly faceSets = new Map<string, { segs: GpuSegments; stamp: string }>();
+  // face isolines (GPU): per face its values buffer, plane pass, 2D kernel and segment sets (see faceLines)
+  private readonly faces = new Map<string, Face>();
   private readonly faceCpu = new Map<string, GpuSegments>();
   private readonly lines3 = new Map<string, GpuSegments3>();
   // streamlines: resident vector grids, sampled copies for CPU planning, fused kernels and their segment sets
@@ -139,9 +142,7 @@ export class View3D {
     for (const k of this.kernels.values()) k.destroy();
     for (const m of this.meshes.values()) m.mesh.destroy();
     for (const m of this.cpuMeshes.values()) m.destroy();
-    for (const g of this.faceGrids.values()) g.destroy();
-    for (const k of this.faceKernels.values()) k.destroy();
-    for (const f of this.faceSets.values()) f.segs.destroy();
+    for (const f of this.faces.values()) destroyFace(f);
     for (const f of this.faceCpu.values()) f.destroy();
     for (const l of this.lines3.values()) l.destroy();
     for (const g of this.vgrids.values()) g.destroy();
@@ -149,7 +150,7 @@ export class View3D {
     for (const l of this.streamSets.values()) l.destroy();
     this.vgrids.clear(); this.vsampled.clear(); this.streamKernels.clear(); this.streamSets.clear();
     this.grids.clear(); this.kernels.clear(); this.meshes.clear(); this.cpuMeshes.clear(); this.cpuValues.clear();
-    this.faceGrids.clear(); this.faceKernels.clear(); this.faceSets.clear(); this.faceCpu.clear(); this.lines3.clear();
+    this.faces.clear(); this.faceCpu.clear(); this.lines3.clear();
     this.boxKey = "";
   }
 
@@ -261,55 +262,59 @@ export class View3D {
 
   /**
    * Isolines of the I_V field on the six faces of the cropped box (the prototype's "outline"): where each
-   * isosurface meets the faces. Each face is sampled on a grid with the volume grid's spacing (so on the
-   * uncropped faces the lines coincide with the mesh boundary), contoured by marching squares, and drawn
-   * as 2D segments embedded on the face plane.
+   * isosurface meets the faces. Every face has ONE grid — the whole box face at the volume grid's spacing, so on
+   * the uncropped faces the lines coincide with the mesh boundary — one values buffer, one 2D marching-squares
+   * kernel and one segment set per level, all built once per (field, grid); moving a crop plane only re-dispatches
+   * the plane sampler and the kernels with the new depth (no shader compiles, no allocations), and the renderer's
+   * crop planes trim the lines to the cropped face. Values: the field sampled exactly on the plane (exact case),
+   * else the (blurred / sampled) volume grid sliced trilinearly.
    */
-  private faceLines(iv: Use3, grid: DenseGrid, cbox: Box, levels: number[], width: number): GpuLineLayer3D[] {
+  private faceLines(iv: Use3, grid: DenseGrid, box: Box, cbox: Box, levels: number[], width: number): GpuLineLayer3D[] {
     const out: GpuLineLayer3D[] = [];
     const gpu = this.c.compute() === "gpu";
+    const exact = this.isExact(iv);
+    const tol = 0.25 * Math.min(...grid.spacing); // world tolerance of the exact chords
+    const source = exact ? "exact" : `lin|blur${this.c.blur() ?? 0}`;
     for (let axis = 0; axis < 3; axis++) for (const hi of [false, true]) {
       const depth = hi ? cbox.b[axis]! : cbox.a[axis]!;
       const oa = [0, 1, 2].filter((d) => d !== axis) as [number, number];
-      const size2 = oa.map((d) => Math.max(2, Math.round(cbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
-      const box2 = new Box(oa.map((d) => cbox.a[d]!), oa.map((d) => cbox.b[d]!));
-      const grid2 = new DenseGrid(size2, box2);
-      // the same points as a degenerate 3D grid (size 1 along the axis): what the field is sampled on
-      const size3 = [0, 0, 0], a3 = [0, 0, 0], b3 = [0, 0, 0];
-      size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
-      oa.forEach((d, i) => { size3[d] = size2[i]!; a3[d] = box2.a[i]!; b3[d] = box2.b[i]!; });
-      const grid3 = new DenseGrid(size3, new Box(a3, b3));
-      const exact = this.isExact(iv);
-      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}|${exact ? "exact" : `lin|blur${this.c.blur() ?? 0}|${grid.size.join("x")}`}`;
+      const grid2 = new DenseGrid(oa.map((d) => grid.size[d]!), new Box(oa.map((d) => box.a[d]!), oa.map((d) => box.b[d]!)));
+      const fkey = `${iv.id}|face${axis}|${grid.size.join("x")}|${box.intervals.flat().join(",")}|${source}`;
+      const side = `${fkey}|${hi ? "+" : "-"}`;
       const embed = { axis, depth };
-      const tol = 0.25 * Math.min(...grid.spacing); // world tolerance of the exact chords
       if (gpu) {
-        let values = this.faceGrids.get(fkey);
-        if (!values) {
-          if (exact) { const v3 = sampleResidentSync(this.c.gpu, iv.data, grid3); values = { grid: grid2, channels: 1, buffer: v3.buffer, destroy: () => v3.destroy() }; }
-          else values = sliceResidentSync(this.c.gpu, this.volumeGpu(iv, grid).values, axis, depth, grid2); // the (blurred) volume's face: matches the mesh boundary
-          this.faceGrids.set(fkey, values); lru(this.faceGrids, 12, (g) => g.destroy());
+        let face = this.faces.get(side);
+        if (!face) {
+          const values = uploadGrid(this.c.gpu, grid2, new Float32Array(grid2.sampleCount), 1);
+          const sampler = exact ? planeSampler(this.c.gpu, iv.data, axis, grid2) : planeSlicer(this.c.gpu, this.volumeGpu(iv, grid).values, axis, grid2);
+          const kernel = fusedIsolines(this.c.gpu, undefined, values, undefined, exact ? { slice: { field: iv.data, axis } } : { exact: false });
+          face = { values, sampler, kernel, depth: NaN, sets: [] };
+          this.faces.set(side, face); lru(this.faces, 12, destroyFace);
         }
-        let kernel = this.faceKernels.get(fkey);
-        if (!kernel) { this.faceKernels.set(fkey, (kernel = fusedIsolines(this.c.gpu, undefined, values, undefined, exact ? { slice: { field: iv.data, axis, depth } } : { exact: false }))); lru(this.faceKernels, 12, (k) => k.destroy()); }
-        const capacity = Math.min(kernel.capacity, Math.max(4096, (size2[0]! - 1) * (size2[1]! - 1) * (exact ? 8 : 2)));
+        if (face.depth !== depth) { face.sampler.dispatch(depth, face.values.buffer); face.depth = depth; for (const st of face.sets) st.stamp = ""; }
+        const capacity = Math.min(face.kernel.capacity, Math.max(4096, (grid2.size[0]! - 1) * (grid2.size[1]! - 1) * (exact ? 8 : 2)));
         levels.forEach((level, k) => {
-          const sk = `${fkey}|${k}`;
-          let set = this.faceSets.get(sk);
-          if (set && set.segs.capacity !== capacity) { set.segs.destroy(); this.faceSets.delete(sk); set = undefined; }
-          if (!set) { this.faceSets.set(sk, (set = { segs: allocSegments(this.c.gpu, capacity, false), stamp: "" })); lru(this.faceSets, 96, (v) => v.segs.destroy()); }
-          const stamp = `${fkey}|${level}`;
-          if (set.stamp !== stamp) { resetSegments(this.c.gpu, set.segs); kernel!.dispatch(set.segs, level, tol); set.stamp = stamp; }
+          let set = face!.sets[k];
+          if (set && set.segs.capacity !== capacity) { set.segs.destroy(); set = undefined; }
+          if (!set) face!.sets[k] = set = { segs: allocSegments(this.c.gpu, capacity, false), stamp: "" };
+          const stamp = `${level}`;
+          if (set.stamp !== stamp) { resetSegments(this.c.gpu, set.segs); face!.kernel.dispatch(set.segs, level, tol, depth); set.stamp = stamp; }
           out.push({ segs: set.segs, embed, width, color: [0.92, 0.92, 0.92] });
         });
       } else {
-        let vals = this.cpuValues.get(fkey);
+        // the same points as a degenerate 3D grid (size 1 along the axis): what the field is sampled on
+        const size3 = [0, 0, 0], a3 = [0, 0, 0], b3 = [0, 0, 0];
+        size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
+        oa.forEach((d, i) => { size3[d] = grid2.size[i]!; a3[d] = grid2.box.a[i]!; b3[d] = grid2.box.b[i]!; });
+        const grid3 = new DenseGrid(size3, new Box(a3, b3));
+        const vkey = `${side}|${depth}`;
+        let vals = this.cpuValues.get(vkey);
         if (!vals) {
           vals = exact ? Float64Array.from(iv.data.sampleOn(grid3)) : Float64Array.from(new DenseScalarFieldData(grid, this.volumeCpu(iv, grid).values).sampleOn(grid3));
-          this.cpuValues.set(fkey, vals); lru(this.cpuValues, 16, () => {});
+          this.cpuValues.set(vkey, vals); lru(this.cpuValues, 16, () => {});
         }
         for (const level of levels) {
-          const sk = `${fkey}|${level}`;
+          const sk = `${vkey}|${level}`;
           let segs = this.faceCpu.get(sk);
           if (!segs) {
             const lines = exact ? contourField(sliceScalarField(iv.data, axis, depth), grid2, vals!, level, { tolerance: tol }).lines : isoContours(grid2, vals!, level);
@@ -405,7 +410,7 @@ export class View3D {
       const alpha = c.alpha();
       const colour = ic ? c.colour(ic) : undefined;
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
-      if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
+      if (c.showOutline()) lines.push(...this.faceLines(iv, grid, box, cbox, levels, 2));
     }
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box)); if (layer) lines.push(layer); }
     this.renderer.resize();
