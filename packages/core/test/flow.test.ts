@@ -127,3 +127,29 @@ describe("streamline modes", () => {
     expect(integrateFromSeeds(v, cov.seeds, opts).length).toBe(cov.lines.length);
   });
 });
+
+describe("3D streamline modes", () => {
+  const x = { op: "coord", index: 0 } as const, y = { op: "coord", index: 1 } as const;
+  // a helix flow: rotation about z plus a lift
+  const swirl = buildVectorFieldData({ type: "symbolicv", box: [[-1, 1], [-1, 1], [-1, 1]], expr: { op: "compv", coeffs: [{ op: "mul", vals: [-1, y] }, x, 0.3] } }, 3);
+  const opts = { count: 300, maxSteps: 60, step: 0.02, sign: 1 as const, bidirectional: false };
+
+  it("evenly-spaced planning works in 3D: seeds keep the separation, budgets reproduce the lines", () => {
+    const plan = evenlySpacedStreamlines(swirl, { ...opts, mode: "evenly-spaced", seed: 7 });
+    expect(plan.lines.length).toBeGreaterThan(20);
+    const P = plan.seeds.points, n = plan.seeds.phases.length;
+    let minD = Infinity;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) minD = Math.min(minD, Math.hypot(P[3 * i]! - P[3 * j]!, P[3 * i + 1]! - P[3 * j + 1]!, P[3 * i + 2]! - P[3 * j + 2]!));
+    expect(minD).toBeGreaterThanOrEqual(plan.separation * 0.999);
+    const again = integrateFromSeeds(swirl, plan.seeds, opts);
+    expect(again.length).toBe(plan.lines.length);
+    again.forEach((l, i) => { expect(l.points.length).toBe(plan.lines[i]!.points.length); expect(l.points[0]).toBeCloseTo(plan.lines[i]!.points[0]!, 12); });
+  });
+
+  it("coverage and stratified planning are dimension-generic", () => {
+    const cov = planStreamlines(swirl, { ...opts, mode: "coverage" });
+    const strat = planStreamlines(swirl, { ...opts, mode: "stratified" });
+    expect(cov.lines.length).toBeGreaterThanOrEqual(strat.lines.length);
+    for (const l of strat.lines) expect(l.points.length % 3).toBe(0);
+  });
+});

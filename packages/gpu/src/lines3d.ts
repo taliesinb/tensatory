@@ -90,3 +90,21 @@ export function boxEdges(a: ArrayLike<number>, b: ArrayLike<number>): Float32Arr
   for (let m = 0; m < 8; m++) for (const bit of [1, 2, 4]) if (!(m & bit)) lines.push([...corner(m), ...corner(m | bit)]);
   return packPolylines3(lines);
 }
+
+/** read a Seg3 set back (tests / debugging): the valid records as floats */
+export async function readSegments3(backend: GpuBackend, s: GpuSegments3): Promise<Float32Array> {
+  const dev = backend.device;
+  const readInd = dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const readSeg = dev.createBuffer({ size: s.buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const enc = dev.createCommandEncoder();
+  enc.copyBufferToBuffer(s.indirect, 0, readInd, 0, 16);
+  enc.copyBufferToBuffer(s.buffer, 0, readSeg, 0, s.buffer.size);
+  dev.queue.submit([enc.finish()]);
+  await readInd.mapAsync(GPUMapMode.READ);
+  const n = Math.min(s.capacity, new Uint32Array(readInd.getMappedRange())[1]!);
+  readInd.unmap(); readInd.destroy();
+  await readSeg.mapAsync(GPUMapMode.READ);
+  const out = new Float32Array(readSeg.getMappedRange().slice(0, n * SEG3_FLOATS * 4));
+  readSeg.unmap(); readSeg.destroy();
+  return out;
+}

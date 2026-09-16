@@ -213,60 +213,77 @@ export function integrateFromSeeds(field: VectorFieldData, seeds: StreamlineSeed
 /*******************************************************/
 /* evenly-spaced (Jobard–Lefer) */
 
-/** growable point set hashed on a square grid of `cell`; each point remembers its line and ordinal along it */
+/** growable point set hashed on a grid of `cell` (2D or 3D); each point remembers its line and ordinal along it */
 class PointHash {
   private readonly cells = new Map<number, number[]>();
-  private xs: number[] = [];
-  private ys: number[] = [];
+  private readonly D: number;
+  private readonly pts: number[] = [];
   private line: number[] = [];
   private ord: number[] = [];
-  constructor(private readonly ax: number, private readonly ay: number, private readonly cell: number, private readonly nx: number) {}
-  get count(): number { return this.xs.length; }
-  private key(x: number, y: number): number {
-    return Math.floor((x - this.ax) / this.cell) + this.nx * Math.floor((y - this.ay) / this.cell);
-  }
-  add(x: number, y: number, line: number, ord: number): void {
-    const i = this.xs.length;
-    this.xs.push(x); this.ys.push(y); this.line.push(line); this.ord.push(ord);
-    const k = this.key(x, y);
+  /** `a`: hash origin; `n`: cells per axis (for the key) */
+  constructor(private readonly a: readonly number[], private readonly cell: number, private readonly n: readonly number[]) { this.D = a.length; }
+  get count(): number { return this.line.length; }
+  private key(c0: number, c1: number, c2: number): number { return c0 + this.n[0]! * (c1 + this.n[1]! * c2); }
+  private cellOf(p: ArrayLike<number>, d: number): number { return Math.floor((p[d]! - this.a[d]!) / this.cell); }
+  add(p: ArrayLike<number>, line: number, ord: number): void {
+    const i = this.line.length;
+    for (let d = 0; d < this.D; d++) this.pts.push(p[d]!);
+    this.line.push(line); this.ord.push(ord);
+    const k = this.key(this.cellOf(p, 0), this.cellOf(p, 1), this.D > 2 ? this.cellOf(p, 2) : 0);
     const list = this.cells.get(k);
     if (list) list.push(i); else this.cells.set(k, [i]);
   }
   /**
-   * is any point within `r` (≤ cell) of (x, y)? Points of line `self` closer than `minOrd` ordinals to
+   * is any point within `r` (≤ cell) of p? Points of line `self` closer than `minOrd` ordinals to
    * ordinal `ord` are ignored (a line must not stop on its own recent past).
    */
-  near(x: number, y: number, r: number, self = -1, ord = 0, minOrd = 0): boolean {
-    const r2 = r * r;
-    const cx = Math.floor((x - this.ax) / this.cell), cy = Math.floor((y - this.ay) / this.cell);
-    for (let j = cy - 1; j <= cy + 1; j++) for (let i = cx - 1; i <= cx + 1; i++) {
-      const list = this.cells.get(i + this.nx * j);
+  near(p: ArrayLike<number>, r: number, self = -1, ord = 0, minOrd = 0): boolean {
+    const r2 = r * r, D = this.D;
+    const c0 = this.cellOf(p, 0), c1 = this.cellOf(p, 1), c2 = D > 2 ? this.cellOf(p, 2) : 0;
+    const k2lo = D > 2 ? c2 - 1 : 0, k2hi = D > 2 ? c2 + 1 : 0;
+    for (let k = k2lo; k <= k2hi; k++) for (let j = c1 - 1; j <= c1 + 1; j++) for (let i = c0 - 1; i <= c0 + 1; i++) {
+      const list = this.cells.get(this.key(i, j, k));
       if (!list) continue;
-      for (const p of list) {
-        if (this.line[p] === self && Math.abs(this.ord[p]! - ord) < minOrd) continue;
-        const dx = this.xs[p]! - x, dy = this.ys[p]! - y;
-        if (dx * dx + dy * dy < r2) return true;
+      for (const q of list) {
+        if (this.line[q] === self && Math.abs(this.ord[q]! - ord) < minOrd) continue;
+        let d2 = 0;
+        for (let d = 0; d < D; d++) { const dd = this.pts[q * D + d]! - p[d]!; d2 += dd * dd; }
+        if (d2 < r2) return true;
       }
     }
     return false;
   }
 }
 
+/** unit vectors perpendicular to the unit tangent t: one in 2D (left normal), two in 3D (an orthonormal pair) */
+function perpendiculars(t: ArrayLike<number>, D: number): number[][] {
+  if (D === 2) return [[-t[1]!, t[0]!]];
+  // 3D: n1 = t × (the axis least aligned with t), n2 = t × n1
+  const ax = Math.abs(t[0]!), ay = Math.abs(t[1]!), az = Math.abs(t[2]!);
+  const u = ax <= ay && ax <= az ? [1, 0, 0] : ay <= az ? [0, 1, 0] : [0, 0, 1];
+  const c = (a: ArrayLike<number>, b: ArrayLike<number>) => [a[1]! * b[2]! - a[2]! * b[1]!, a[2]! * b[0]! - a[0]! * b[2]!, a[0]! * b[1]! - a[1]! * b[0]!];
+  const n1 = c(t, u), l1 = Math.hypot(...n1);
+  const n1u = n1.map((x) => x / l1);
+  return [n1u, c(t, n1u)];
+}
+
 /**
- * Evenly-spaced streamlines (Jobard & Lefer 1997), 2D only. Separation d_sep = seed-cell side for
+ * Evenly-spaced streamlines (Jobard & Lefer 1997), 2D and 3D. Separation d_sep = seed-cell side for
  * `count`; a line stops within d_test = testRatio·d_sep of another line (or of its own distant past);
- * candidate seeds lie d_sep to either side of every vertex of accepted lines (FIFO), and when that
- * front is exhausted the jittered stratified seeds farther than d_sep from every line restart it
- * (disconnected regions, regions the flow never reaches). Deterministic for a given `seed`.
+ * candidate seeds lie d_sep to either side of every vertex of accepted lines (in 3D: four candidates,
+ * ± two perpendiculars of the tangent), FIFO, and when that front is exhausted the jittered stratified
+ * seeds farther than d_sep from every line restart it (disconnected regions, regions the flow never
+ * reaches). Deterministic for a given `seed`.
  */
 export function evenlySpacedStreamlines(field: VectorFieldData, opts: StreamlineOptions): StreamlinePlan {
-  if (field.dimCount !== 2) throw new Error("evenly-spaced streamlines are 2D only");
+  const D = field.dimCount;
+  if (D !== 2 && D !== 3) throw new Error("evenly-spaced streamlines are 2D or 3D only");
   const box = opts.box ?? field.box;
   const h = opts.step, M = opts.maxSteps, MB = opts.bidirectional === false ? 0 : M;
   const dSep = seedCellSide(box, opts.count);
   const dTest = (opts.testRatio ?? 0.5) * dSep;
   const minOrd = Math.max(2, Math.ceil((2 * dSep) / h)); // own points closer along the arc than this do not stop a line
-  const hash = new PointHash(box.a[0]!, box.a[1]!, dSep, Math.ceil(box.size[0]! / dSep) + 3);
+  const hash = new PointHash(box.a, dSep, box.size.map((sz) => Math.ceil(sz / dSep) + 3));
   const integrate = makeIntegrator(field, opts);
   const rand = lcg((opts.seed ?? 12345) ^ 0x5bd1e995);
   const fallback = streamlineSeeds(box, opts.count, opts.seed);
@@ -275,24 +292,25 @@ export function evenlySpacedStreamlines(field: VectorFieldData, opts: Streamline
   const seedPts: number[] = [], phases: number[] = [], budgets: number[] = [];
   const queue: number[] = []; // indices into `lines` whose sides still have to be inspected
   // generous cap: the front can only be this long if every line is a single step (degenerate fields)
-  const maxLines = Math.max(64, Math.ceil((8 * box.size[0]! * box.size[1]!) / (dSep * h)));
+  const vol = box.size.reduce((a, b) => a * b, 1);
+  const maxLines = Math.max(64, Math.ceil((8 * vol) / (Math.pow(dSep, D - 1) * h)));
 
-  const tryLine = (sx: number, sy: number): boolean => {
-    if (!box.contains([sx, sy], 1e-12) || hash.near(sx, sy, dSep)) return false;
+  const tryLine = (sp: number[]): boolean => {
+    if (!box.contains(sp, 1e-12) || hash.near(sp, dSep)) return false;
     const id = lines.length;
     // points enter the hash as they are produced (ordinal = signed step), so the forward half also avoids the backward half
     const stopFor = (s: 1 | -1) => (q: Float64Array, n: number): boolean => {
-      if (hash.near(q[0]!, q[1]!, dTest, id, s * n, minOrd)) return true;
-      hash.add(q[0]!, q[1]!, id, s * n);
+      if (hash.near(q, dTest, id, s * n, minOrd)) return true;
+      hash.add(q, id, s * n);
       return false;
     };
-    hash.add(sx, sy, id, 0);
-    const back = integrate([sx, sy], -1, MB, stopFor(-1));
-    const fwd = integrate([sx, sy], 1, M, stopFor(1));
-    const line = assemble(2, [sx, sy], back, fwd, h, rand());
+    hash.add(sp, id, 0);
+    const back = integrate(sp, -1, MB, stopFor(-1));
+    const fwd = integrate(sp, 1, M, stopFor(1));
+    const line = assemble(D, sp, back, fwd, h, rand());
     if (!line) return false; // its seed stays in the hash: nothing else can start there either
     lines.push(line); queue.push(id);
-    seedPts.push(sx, sy); phases.push(line.phase); budgets.push(back.length / 2, fwd.length / 2);
+    seedPts.push(...sp); phases.push(line.phase); budgets.push(back.length / D, fwd.length / D);
     return true;
   };
 
@@ -300,23 +318,26 @@ export function evenlySpacedStreamlines(field: VectorFieldData, opts: Streamline
   const restart = (): boolean => {
     while (nextFallback < fallback.phases.length) {
       const i = nextFallback++;
-      if (tryLine(fallback.points[2 * i]!, fallback.points[2 * i + 1]!)) return true;
+      if (tryLine(Array.from(fallback.points.subarray(D * i, D * i + D)))) return true;
     }
     return false;
   };
   restart();
+  const t = new Array<number>(D).fill(0);
   while (queue.length && lines.length < maxLines) {
     const l = lines[queue.shift()!]!.points;
-    const n = l.length / 2;
+    const n = l.length / D;
     for (let k = 0; k < n && lines.length < maxLines; k++) {
       const i0 = Math.max(0, k - 1), i1 = Math.min(n - 1, k + 1);
-      let tx = l[2 * i1]! - l[2 * i0]!, ty = l[2 * i1 + 1]! - l[2 * i0 + 1]!;
-      const tl = Math.hypot(tx, ty);
+      let tl = 0;
+      for (let d = 0; d < D; d++) { t[d] = l[D * i1 + d]! - l[D * i0 + d]!; tl += t[d]! * t[d]!; }
+      tl = Math.sqrt(tl);
       if (!(tl > 0)) continue;
-      tx /= tl; ty /= tl;
-      const px = l[2 * k]!, py = l[2 * k + 1]!;
-      tryLine(px - ty * dSep, py + tx * dSep);
-      tryLine(px + ty * dSep, py - tx * dSep);
+      for (let d = 0; d < D; d++) t[d]! /= tl;
+      for (const nrm of perpendiculars(t, D)) {
+        tryLine(nrm.map((x, d) => l[D * k + d]! + x * dSep));
+        tryLine(nrm.map((x, d) => l[D * k + d]! - x * dSep));
+      }
     }
     if (!queue.length) restart();
   }
