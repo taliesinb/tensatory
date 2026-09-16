@@ -14,10 +14,12 @@ Rough order; each item is independent enough to be picked up alone.
    evaluator over the expression tree, prune cells whose enclosure excludes
    the level, subdivide the rest; removes the seed-grid topology limitation.
    Generalizes to an octree for 3D.
-3. **3D**: marching cubes / tetrahedra in core (port `makeMesher` from the
-   prototype), vertex projection onto the isosurface with exact normals from
-   ∇f, the WebGL2 renderer (OIT, thick lines, supersampling) as a second view
-   next to the 2D one; panels are already shaped like the 3D ones.
+3. **3D** — done in its first form (`notes/3d.md`): spaces, marching
+   tetrahedra on CPU and GPU, exact-gradient normals, WebGPU renderer with
+   weighted-blended OIT. Still to do: crop planes, isolines on the box faces,
+   3D streamlines, vertex projection onto the isosurface, Taubin smoothing
+   (needs welded connectivity), depth-tested box / trajectories, per-level
+   colouring through the I_V colormap when no I_C is set.
 4. **npz / npy / zarr backends** and sparse supports.
 5. **Charts / affine frames** (`schema/mappings.ts`): fields on a
    low-dimensional frame inside a high-dimensional parameter manifold; 1-forms
