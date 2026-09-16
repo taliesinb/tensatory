@@ -665,6 +665,10 @@ function view3dOf(): View3D | undefined {
     cropPreview: () => (cropPreviewing ? CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange) : undefined),
     pointSets: spacePointSets,
     colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
+    streamVector: () => streamVector(),
+    streamColour: () => slotScalar("sc"),
+    streamOpts: () => ({ count: num("lines") ?? 0, maxSteps: num("slen")!, sign: streamSign(), ...streamMode(), alpha: num("sAlpha") ?? 1, tail: num("tail"), split: num("ssplit") ?? 1, clock: state.animClock }),
+    plan: streamPlan,
   });
   return view3d;
 }
@@ -680,6 +684,11 @@ function render3d(): void {
   $("res3v").textContent = ui.res3.value ?? "";
   $("metricv").textContent = ui.metric.value ?? "—";
   $("linev").textContent = ui.line.value ?? "—";
+  $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
+  $("slenv").textContent = ui.slen.value ?? "";
+  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
+  $("tailv").textContent = ui.tail.value ?? "";
+  $("ssplitv").textContent = ui.ssplit.value ?? "—";
   CROP_IDS.forEach((id, d) => { $(`${id}v`).textContent = fmtCrop(cropPreviewing ? [cropEl(id).lo, cropEl(id).hi] : cropCommitted[d]!); });
   updateIsoNotches();
 }
@@ -784,7 +793,7 @@ function colourSlots(): [Slot, ScalarUse][] {
   const is2 = spaceDims() === 2;
   const c = slotScalar("c"); if (is2 && ui.showScalar.checked && c) out.push(["c", c]);
   const ic = slotScalar("ic"); if (ui.showIso.checked && ic) out.push(["ic", ic]);
-  const sc = slotScalar("sc"); if (is2 && streamVector() && sc) out.push(["sc", sc]);
+  const sc = slotScalar("sc"); if (streamVector() && sc) out.push(["sc", sc]);
   return out;
 }
 const legendUses = new Map<string, ScalarUse>();
@@ -792,7 +801,7 @@ const legendUses = new Map<string, ScalarUse>();
 function shapeSlots(): [Slot, ScalarUse][] {
   const out: [Slot, ScalarUse][] = [];
   const iv = slotScalar("iv"); if (ui.showIso.checked && iv) out.push(["iv", iv]);
-  const sg = state.sel.sg; if (spaceDims() === 2 && streamsOn() && sg && usable.scalars.includes(sg)) { const u = useScalar(sg); if (u) out.push(["sg", u]); }
+  const sg = state.sel.sg; if (streamsOn() && sg && usable.scalars.includes(sg)) { const u = useScalar(sg); if (u) out.push(["sg", u]); }
   return out;
 }
 function updateInfo(): void {
@@ -908,8 +917,8 @@ const metrics = new MetricsTable({
     { key: "c", label: "C", tip: SLOT_TIP.c, type: "scalar", visible: () => ui.showScalar.checked, toggle: () => ui.showScalar.click(), present: () => spaceDims() === 2 },
     { key: "iv", label: "I", sub: "V", tip: SLOT_TIP.iv, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
     { key: "ic", label: "I", sub: "C", tip: SLOT_TIP.ic, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
-    { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click(), present: () => spaceDims() === 2 },
-    { key: "sc", label: "S", sub: "C", tip: SLOT_TIP.sc, type: "scalar", visible: streamsOn, toggle: () => ui.showStream.click(), present: () => spaceDims() === 2 },
+    { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click() },
+    { key: "sc", label: "S", sub: "C", tip: SLOT_TIP.sc, type: "scalar", visible: streamsOn, toggle: () => ui.showStream.click() },
   ],
   sel: () => state.sel,
   lockedSel: () => state.lockedSel,

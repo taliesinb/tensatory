@@ -6,18 +6,21 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, DenseScalarFieldData, boxBlur, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, DenseScalarFieldData, DenseVectorFieldData, boxBlur, contourField, integrateFromSeeds, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, streamlineSeeds, type PointSet, type ScalarFieldData, type StreamlineMode, type StreamlinePlan, type StreamlineSeeds, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   allocMesh,
   allocSegments,
+  allocSegments3,
   blurResidentSync,
   boxEdges,
   fusedIsolines,
   fusedIsosurface,
+  fusedStreamlines3,
   packMesh,
   packPolylines,
   packPolylines3,
+  packStreamlines3,
   project,
   resetMesh,
   resetSegments,
@@ -29,6 +32,7 @@ import {
   type Camera3D,
   type FusedIsolines,
   type FusedIsosurface,
+  type FusedStreamlines3,
   type GpuBackend,
   type GpuGrid,
   type GpuLineLayer3D,
@@ -41,6 +45,20 @@ import {
 } from "@tensatory/gpu";
 
 export interface Use3 { id: string; data: ScalarFieldData }
+export interface VectorUse3 { id: string; data: VectorFieldData }
+export interface StreamOpts3 {
+  count: number;
+  maxSteps: number;
+  sign: 1 | -1;
+  mode: StreamlineMode;
+  bidirectional: boolean;
+  alpha: number;
+  /** tail in cells, null = solid lines */
+  tail: number | null;
+  split: number;
+  /** the animation clock (seconds) */
+  clock: number;
+}
 export type CropRange = [number | null, number | null];
 
 export interface View3DContext {
@@ -75,10 +93,16 @@ export interface View3DContext {
   cropPreview(): CropRange[] | undefined;
   pointSets(): PointSet[];
   colour(u: Use3): { map: ValueMap; lut: Lut; key: string };
+  /** the S∇ field (a vector field, or a scalar's gradient) when streamlines are on and `lines` is set */
+  streamVector(): VectorUse3 | undefined;
+  streamColour(): Use3 | undefined;
+  streamOpts(): StreamOpts3;
+  /** planned seeds (JL / coverage), cached by main.ts */
+  plan(key: string, field: VectorFieldData, opts: { count: number; maxSteps: number; step: number; sign: 1 | -1; box: Box; mode: StreamlineMode; bidirectional: boolean }): StreamlinePlan;
 }
 
 const lru = <V>(m: Map<string, V>, max: number, drop: (v: V) => void) => { while (m.size > max) { const k = m.keys().next().value as string; drop(m.get(k)!); m.delete(k); } };
-const gridKey = (u: Use3, g: DenseGrid) => `${u.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`;
+const gridKey = (u: { id: string }, g: DenseGrid) => `${u.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`;
 
 export class View3D {
   readonly renderer: GpuRenderer3D;
@@ -98,6 +122,11 @@ export class View3D {
   private readonly faceSets = new Map<string, { segs: GpuSegments; stamp: string }>();
   private readonly faceCpu = new Map<string, GpuSegments>();
   private readonly lines3 = new Map<string, GpuSegments3>();
+  // streamlines: resident vector grids, sampled copies for CPU planning, fused kernels and their segment sets
+  private readonly vgrids = new Map<string, GpuGrid>();
+  private readonly vsampled = new Map<string, DenseVectorFieldData>();
+  private readonly streamKernels = new Map<string, FusedStreamlines3>();
+  private readonly streamSets = new Map<string, GpuSegments3>();
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
@@ -115,6 +144,10 @@ export class View3D {
     for (const f of this.faceSets.values()) f.segs.destroy();
     for (const f of this.faceCpu.values()) f.destroy();
     for (const l of this.lines3.values()) l.destroy();
+    for (const g of this.vgrids.values()) g.destroy();
+    for (const k of this.streamKernels.values()) k.destroy();
+    for (const l of this.streamSets.values()) l.destroy();
+    this.vgrids.clear(); this.vsampled.clear(); this.streamKernels.clear(); this.streamSets.clear();
     this.grids.clear(); this.kernels.clear(); this.meshes.clear(); this.cpuMeshes.clear(); this.cpuValues.clear();
     this.faceGrids.clear(); this.faceKernels.clear(); this.faceSets.clear(); this.faceCpu.clear(); this.lines3.clear();
     this.boxKey = "";
@@ -289,6 +322,54 @@ export class View3D {
     return out;
   }
 
+  /** the vector field sampled on the volume grid (what streamlines are integrated through, like the 2D arm) */
+  private sampledVector(v: VectorUse3, grid: DenseGrid): DenseVectorFieldData {
+    if (v.data.kind === "sampled" && v.data instanceof DenseVectorFieldData) return v.data;
+    const key = gridKey(v, grid);
+    let d = this.vsampled.get(key);
+    if (!d) { this.vsampled.set(key, (d = new DenseVectorFieldData(grid, v.data.sampleOn(grid)))); lru(this.vsampled, 4, () => {}); }
+    return d;
+  }
+
+  /** streamlines of the S∇ field: one segment set per (field, grid, options), particles by the renderer */
+  private streamLayer(v: VectorUse3, box: Box, grid: DenseGrid): GpuLineLayer3D | undefined {
+    const c = this.c, o = c.streamOpts();
+    const vbox = v.data.box.intersect(box) ?? v.data.box;
+    const size = [0, 1, 2].map((d) => Math.max(2, Math.round(vbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
+    const vgrid = new DenseGrid(size, vbox);
+    const cell = Math.min(...vgrid.spacing) || 1e-3, step = 0.5 * cell;
+    const sc = c.streamColour();
+    const iopts = { maxSteps: o.maxSteps, step, sign: o.sign, box: vbox, bidirectional: o.bidirectional };
+    const key = [v.id, gridKey(v, vgrid), o.mode, o.bidirectional, o.count, o.maxSteps, o.sign, step.toExponential(4), sc?.id ?? ""].join("|");
+    let segs = this.streamSets.get(key);
+    if (!segs) {
+      const gpu = c.compute() === "gpu";
+      let seeds: StreamlineSeeds | undefined, plan: StreamlinePlan | undefined;
+      if (o.mode === "stratified") seeds = streamlineSeeds(vbox, o.count, 12345);
+      else { plan = c.plan(key, this.sampledVector(v, vgrid), { count: o.count, mode: o.mode, ...iopts }); seeds = plan.seeds; }
+      if (gpu) {
+        const gk = `vec:${gridKey(v, vgrid)}`;
+        let vectors = this.vgrids.get(gk);
+        if (!vectors) { this.vgrids.set(gk, (vectors = sampleResidentSync(c.gpu, v.data, vgrid))); lru(this.vgrids, 4, (g) => g.destroy()); }
+        let kernel = this.streamKernels.get(key);
+        if (!kernel) { this.streamKernels.set(key, (kernel = fusedStreamlines3(c.gpu, vectors, seeds, iopts, sc?.data))); lru(this.streamKernels, 8, (k) => k.destroy()); }
+        segs = allocSegments3(c.gpu, kernel.capacity, true);
+        kernel.dispatch(segs);
+      } else {
+        const lines = plan?.lines ?? integrateFromSeeds(this.sampledVector(v, vgrid), seeds, iopts);
+        const colours = sc ? lines.map((l) => { const out = new Float64Array(l.points.length / 3); for (let i = 0; i < out.length; i++) out[i] = sc.data.value([l.points[3 * i]!, l.points[3 * i + 1]!, l.points[3 * i + 2]!]) ?? NaN; return out; }) : undefined;
+        segs = uploadSegments3(c.gpu, packStreamlines3(lines, step, colours), true);
+      }
+      this.streamSets.set(key, segs); lru(this.streamSets, 8, (s) => s.destroy());
+    }
+    const colour = sc ? c.colour(sc) : undefined;
+    return {
+      segs, width: 1.5, color: [1, 1, 1],
+      particles: o.tail === null ? undefined : { tail: o.tail * cell, split: o.split, travel: o.clock * 10 * cell },
+      ...(colour ? { map: colour.map, lut: colour.lut } : {}),
+    };
+  }
+
   /** a cached uploaded 3D segment set */
   private segs3(key: string, make: () => Float32Array): GpuSegments3 {
     let s = this.lines3.get(key);
@@ -299,7 +380,8 @@ export class View3D {
   render(): void {
     const c = this.c;
     const iv = c.showIso() ? c.isoField() : undefined;
-    const box = iv?.data.box ?? this.box;
+    const sv = c.streamVector();
+    const box = iv?.data.box ?? sv?.data.box ?? this.box;
     const key = box.intervals.flat().join(",");
     if (key !== this.boxKey) { this.boxKey = key; this.box = box; if (!this.cameraCustom) this.fit(box); }
     const cbox = this.cropped(box, c.crop());
@@ -325,6 +407,7 @@ export class View3D {
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
+    if (sv) { const layer = this.streamLayer(sv, box, this.grid(box)); if (layer) lines.push(layer); }
     this.renderer.resize();
     this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
     this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);
