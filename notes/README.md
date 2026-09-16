@@ -14,7 +14,8 @@ the short summary; when a decision changes, update both.
 | [gpu.md](gpu.md) | the WebGPU backend: WGSL transpilation, compute-shader sampling, CPU/GPU agreement tests, Dawn-in-node pitfalls |
 | [3d.md](3d.md) | spaces and the 3D arm: marching tetrahedra, exact projection, the WebGPU 3D renderer, face outlines, crop, 3D streamlines |
 | [resolution.md](resolution.md) | the adaptive resolution (two tiers, frame / latency / memory feedback), sets sized from measured complexity, the memory cap, device limits |
-| [roadmap.md](roadmap.md) | what comes next (array backends, quadtree seeding, 3D, GPU, server) |
+| [sweeps.md](sweeps.md) | design (not built) for external arrays — `part` with kept axes, `ByteSource`, prefetch then synchronous build — and for sweeps: members with flat records, `common`, faceted navigation, options keyed by structural signature |
+| [roadmap.md](roadmap.md) | what comes next (array backends and the rest of the unimplemented schema, quadtree seeding, 3D round two, GPU, server), and what is done since phase 1 |
 
 ## The one-paragraph version
 
