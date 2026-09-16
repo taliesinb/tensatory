@@ -40,6 +40,9 @@ export interface GpuScene3D {
   camera: Camera3D;
   /** the world box the camera frames (near / far planes are derived from it) */
   radius: number;
+  /** the part of the canvas the camera frames, as fractions of its width / height (`[x0, y0, x1, y1]`, y down):
+   *  the view is centred in it and its aspect is used, the rest of the canvas shows the periphery. Default: all of it */
+  region?: [number, number, number, number];
   background: [number, number, number];
   meshes: GpuMeshLayer[];
   lines?: GpuLineLayer3D[];
@@ -79,12 +82,31 @@ export function cameraEye(c: Camera3D): [number, number, number] {
   const cp = Math.cos(c.pitch);
   return [c.target[0] + c.distance * cp * Math.cos(c.yaw), c.target[1] + c.distance * cp * Math.sin(c.yaw), c.target[2] + c.distance * Math.sin(c.pitch)];
 }
-export function cameraMatrices(c: Camera3D, aspect: number, radius: number): { view: Mat4; proj: Mat4; viewProj: Mat4; eye: [number, number, number] } {
+/**
+ * view / projection of an orbit camera for a canvas of `aspect` (width / height). With `region` (fractions of the
+ * canvas, y down) the camera frames that part of the canvas instead: the perspective is built for the region's
+ * aspect and then shifted / scaled in clip space so its centre lands on the region's centre (an off-centre frustum —
+ * the rest of the canvas simply shows more of the scene).
+ */
+export function cameraMatrices(c: Camera3D, aspect: number, radius: number, region?: [number, number, number, number]): { view: Mat4; proj: Mat4; viewProj: Mat4; eye: [number, number, number] } {
   const eye = cameraEye(c);
   const near = Math.max(1e-3 * radius, c.distance - 2 * radius), far = c.distance + 2 * radius;
   const view = lookAt(eye, c.target, [0, 0, 1]);
-  const proj = perspective(c.fov, aspect, near, far);
+  let proj = perspective(c.fov, aspect * regionAspect(region), near, far);
+  if (region) {
+    const [x0, y0, x1, y1] = region;
+    const m = new Float32Array(16);
+    m[0] = x1 - x0; m[5] = y1 - y0; m[10] = 1; m[15] = 1;
+    m[12] = x0 + x1 - 1; m[13] = 1 - (y0 + y1); // region centre in NDC (y up)
+    proj = mul4(m, proj);
+  }
   return { view, proj, viewProj: mul4(proj, view), eye };
+}
+/** the region's width / height relative to the canvas aspect (1 for the whole canvas) */
+export function regionAspect(region?: [number, number, number, number]): number {
+  if (!region) return 1;
+  const w = region[2] - region[0], h = region[3] - region[1];
+  return w > 1e-6 && h > 1e-6 ? w / h : 1;
 }
 /** world point → css-pixel screen position and depth (NDC z), or undefined behind the camera */
 export function project(vp: Mat4, p: ArrayLike<number>, width: number, height: number): [number, number, number] | undefined {
@@ -429,7 +451,7 @@ export class GpuRenderer3D {
     this.poolIdx = 0;
     const w = this.canvas.width, h = this.canvas.height;
     const T = this.ensureTargets(w, h);
-    const { viewProj, eye } = cameraMatrices(scene.camera, w / h, scene.radius);
+    const { viewProj, eye } = cameraMatrices(scene.camera, w / h, scene.radius, scene.region);
     this.viewProj = viewProj;
     const crop = scene.cropMax ?? [Infinity, Infinity, Infinity], cropLo = scene.cropMin ?? [-Infinity, -Infinity, -Infinity];
     const [r, g, b] = scene.background;

@@ -643,6 +643,7 @@ function view3dOf(): View3D | undefined {
     gpu,
     canvas: $<HTMLCanvasElement>("gpu"),
     overlay: canvas,
+    region: viewRegion, // centred in the free part of the viewport, like the 2D arm
     isoField: () => (ui.showIso.checked ? slotScalar("iv") : undefined),
     colourField: () => slotScalar("ic"),
     gradientOf: (u) => {
@@ -955,7 +956,13 @@ function fitLeftColumn(): void {
   const m = $("metrics");
   $("left").style.maxHeight = `${Math.max(200, window.innerHeight - m.offsetHeight - 44)}px`;
 }
-window.addEventListener("resize", () => { fitLeftColumn(); if (!viewCustom && state.bundle) fitView(); state.dirty = true; });
+window.addEventListener("resize", () => {
+  fitLeftColumn();
+  if (state.bundle) {
+    if (spaceDims() === 3) { if (view3d && !view3d.cameraCustom) view3d.fit(); } else if (!viewCustom) fitView();
+  }
+  state.dirty = true;
+});
 installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 
 /*******************************************************/

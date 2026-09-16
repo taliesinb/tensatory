@@ -22,6 +22,7 @@ import {
   packPolylines3,
   packStreamlines3,
   project,
+  regionAspect,
   resetMesh,
   resetSegments,
   planeSampler,
@@ -69,6 +70,8 @@ export interface View3DContext {
   /** the WebGPU canvas (#gpu) and the Canvas 2D overlay above it (#gl) */
   canvas: HTMLCanvasElement;
   overlay: HTMLCanvasElement;
+  /** the free part of the canvas (css px `[x0, y0, x1, y1]`, right of the panels) the camera frames; the whole canvas when absent */
+  region?(): [number, number, number, number];
   isoField(): Use3 | undefined;
   colourField(): Use3 | undefined;
   /** exact gradient data of a symbolic use (for normals), undefined for sampled data */
@@ -154,10 +157,29 @@ export class View3D {
     this.boxKey = "";
   }
 
-  /** frame `box`: look at its centre from a distance that fits it */
+  /** the framed part of the canvas as fractions of its size (y down), undefined for all of it */
+  private region(): [number, number, number, number] | undefined {
+    const r = this.c.region?.(), cv = this.c.overlay;
+    if (!r || cv.clientWidth <= 0 || cv.clientHeight <= 0) return undefined;
+    const f: [number, number, number, number] = [r[0] / cv.clientWidth, r[1] / cv.clientHeight, r[2] / cv.clientWidth, r[3] / cv.clientHeight];
+    return f[2] - f[0] > 0.05 && f[3] - f[1] > 0.05 ? f : undefined; // a degenerate region (tiny window) frames the whole canvas
+  }
+  /** css px height of the framed region (the vertical fov spans it) */
+  private regionHeight(): number {
+    const r = this.c.region?.();
+    return Math.max(1, r ? r[3] - r[1] : this.c.overlay.clientHeight);
+  }
+  /** the smaller of the vertical fov and the horizontal one the framed region gives it: what a bounding sphere must fit */
+  private fitFov(): number {
+    const cv = this.c.overlay, region = this.region();
+    const aspect = (cv.clientWidth / Math.max(1, cv.clientHeight) || 1) * regionAspect(region);
+    return Math.min(this.camera.fov, 2 * Math.atan(Math.tan(this.camera.fov / 2) * aspect));
+  }
+
+  /** frame `box`: look at its centre from a distance that fits it in the framed region */
   fit(box = this.box): void {
     const r = Math.hypot(...box.size) / 2 || 1;
-    this.camera = { ...this.camera, target: box.center as [number, number, number], distance: r / Math.sin(this.camera.fov / 2) * 1.05 };
+    this.camera = { ...this.camera, target: box.center as [number, number, number], distance: r / Math.sin(this.fitFov() / 2) * 1.05 };
     this.cameraCustom = false;
   }
 
@@ -169,7 +191,7 @@ export class View3D {
   }
   /** pan the target in the view plane */
   pan(dx: number, dy: number): void {
-    const s = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.c.overlay.clientHeight;
+    const s = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.regionHeight();
     const cy = Math.cos(this.camera.yaw), sy = Math.sin(this.camera.yaw), cp = Math.cos(this.camera.pitch), sp = Math.sin(this.camera.pitch);
     const right = [-sy, cy, 0], up = [-sp * cy, -sp * sy, cp];
     const t = this.camera.target;
@@ -414,7 +436,7 @@ export class View3D {
     }
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box)); if (layer) lines.push(layer); }
     this.renderer.resize();
-    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
+    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
     this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);
   }
 
