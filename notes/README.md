@@ -12,6 +12,8 @@ the short summary; when a decision changes, update both.
 | [viewer.md](viewer.md) | the 2D viewer: panels, slots and the mappings matrix, legend, rendering, persistence, URL overrides |
 | [performance.md](performance.md) | where time goes, what was done about it, and what is left |
 | [gpu.md](gpu.md) | the WebGPU backend: WGSL transpilation, compute-shader sampling, CPU/GPU agreement tests, Dawn-in-node pitfalls |
+| [3d.md](3d.md) | spaces and the 3D arm: marching tetrahedra, exact projection, the WebGPU 3D renderer, face outlines, crop, 3D streamlines |
+| [resolution.md](resolution.md) | the adaptive resolution (two tiers, frame / latency / memory feedback), sets sized from measured complexity, the memory cap, device limits |
 | [roadmap.md](roadmap.md) | what comes next (array backends, quadtree seeding, 3D, GPU, server) |
 
 ## The one-paragraph version

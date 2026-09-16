@@ -40,6 +40,8 @@ import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
 import { View3D, type CropRange, type Use3 } from "./view3d";
+import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
+import { Cache, type MemoryUser } from "./cache";
 import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
@@ -69,7 +71,7 @@ for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlid
 for (const el of document.querySelectorAll<HTMLElement>(".isl:not(.cmap)")) makeIntervalSlider(el); // the 3D crop ranges
 
 const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim"] as const;
-const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode"] as const;
+const VALUES = ["cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -171,7 +173,7 @@ function applyModes(): void {
   sampler.backend = modes.compute === "gpu" && gpu ? "gpu" : "cpu";
   geometry = gpu && modes.compute === "gpu" && modes.render === "canvas" ? (geometry ?? new GpuGeometry(gpu, () => { state.dirty = true; })) : undefined;
   if (gpu && modes.render === "gpu") {
-    fused ??= new FusedGeometry(gpu);
+    fused ??= new FusedGeometry(gpu, () => { state.dirty = true; });
     gpuRenderer ??= new GpuRenderer(gpu, $<HTMLCanvasElement>("gpu"));
   } else { fused?.clear(); fused = undefined; }
   document.body.classList.toggle("gpu-render", modes.render === "gpu" || spaceDims() === 3);
@@ -336,14 +338,10 @@ function squareGrid(box: Box, n: number): DenseGrid {
 }
 
 function currentGrid(box: Box): DenseGrid {
-  const res = num("res");
-  if (res === null) {
-    // native: when every selected sampled field shares one grid filling the view box
-    const grids = selectedUses().scalars.map((f) => f.data.samplePoints).filter((g): g is DenseGrid => !!g);
-    if (grids.length && grids.every((g) => g.equals(grids[0]!, 1e-12)) && grids[0]!.box.equals(box, 1e-12)) return grids[0]!;
-    return squareGrid(box, 128);
-  }
-  return squareGrid(box, res);
+  // native: when every selected sampled field shares one grid filling the view box
+  const grids = selectedUses().scalars.map((f) => f.data.samplePoints).filter((g): g is DenseGrid => !!g);
+  if (grids.length && grids.every((g) => g.equals(grids[0]!, 1e-12)) && grids[0]!.box.equals(box, 1e-12)) return grids[0]!;
+  return squareGrid(box, autoRes2.resolution(tier()));
 }
 
 /** field values on the grid (NaN outside the field's own box); undefined while the GPU is still computing */
@@ -373,6 +371,60 @@ let isoCache: { key: string; result: IsoResult } | undefined;
 let isoLastChange = -1e9;
 const ISO_SETTLE_MS = 200;
 const isoMoving = () => (ui.isoAnim.checked && !state.paused) || performance.now() - isoLastChange < ISO_SETTLE_MS;
+
+/*******************************************************/
+/* adaptive resolution (autores.ts): one controller per arm; the tier follows the isolines' moving / settled state */
+
+const autoRes2 = new AutoRes(ladder(32, 2048), 2, 64);
+const autoRes3 = new AutoRes(ladder(16, 256), 3, 16);
+const autoRes = (): AutoRes => (spaceDims() === 3 ? autoRes3 : autoRes2);
+/** the 2D grid follows the view box and the 3D grid the crop, so a pan / zoom / crop drag recomputes everything: `moving` too */
+let viewLastChange = -1e9;
+/** the tier this frame uses: `moving` while the levels change (animation, value / split drag) or the view box /
+ *  crop is being dragged, else `settled` */
+const tier = (): Tier => ((ui.showIso.checked && slotScalar("iv") && isoMoving()) || performance.now() - viewLastChange < ISO_SETTLE_MS ? "moving" : "settled");
+/** a glyph in the top-right corner of the viewport whenever the loop acts (↑ / ↓ a tier step, ⟳ a remeasure):
+ *  makes it possible to tell a feedback adjustment from any other stutter */
+let flashTimer: ReturnType<typeof setTimeout> | undefined;
+function flash(glyph: string, title: string): void {
+  const el = $("resFlash");
+  el.textContent = glyph; el.title = title; el.classList.add("on");
+  clearTimeout(flashTimer); flashTimer = setTimeout(() => el.classList.remove("on"), 700);
+}
+for (const a of [autoRes2, autoRes3]) {
+  a.onChange = (_tier, dir) => { flash(dir > 0 ? "↑" : "↓", a.note); state.dirty = true; saveOptsSoon(); };
+  a.onRemeasure = () => { flash("⟳", "remeasuring"); fused?.redo(); view3d?.redo(); isoCache = undefined; state.dirty = true; };
+}
+const MB = 2 ** 20;
+/** the memory cap (MB), global: `tensatory.memcap`, ?memcap= */
+const memcapEl = $("memcap") as ValueControl;
+function applyMemcap(): void {
+  const mb = +(memcapEl.value ?? 1024) || 1024;
+  autoRes2.capBytes = autoRes3.capBytes = mb * MB;
+  localStorage.setItem("tensatory.memcap", String(mb));
+  state.dirty = true;
+}
+memcapEl.addEventListener("input", applyMemcap);
+/** everything that holds resident memory */
+const memoryUsers = (): MemoryUser[] => [sampler, ...(fused ? [fused] : []), ...(view3d ? [view3d] : [])];
+function memoryNow(): { total: number; volume: number; surface: number } {
+  let volume = 0, surface = 0, cpu = 0;
+  for (const u of memoryUsers()) { const m = u.memory(); volume += m.volume; surface += m.surface; cpu += m.cpu; }
+  // device buffers are counted by the backend (whatever cache they sit in), JS arrays by their caches
+  return { total: (sampler.gpu?.bytesAllocated ?? 0) + cpu, volume, surface };
+}
+/** trim caches to the cap (never what this frame uses); true when the working set alone still exceeds it */
+function governMemory(cap: number): boolean {
+  let over = memoryNow().total - cap * 0.9;
+  if (over <= 0) return false;
+  for (const u of memoryUsers()) { if (over <= 0) break; over -= u.trim(over); }
+  return memoryNow().total > cap;
+}
+/** 12.3k / 3.31M */
+const fmtCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}k` : String(n));
+const fmtMB = (b: number) => String(Math.round(b / MB));
+// console access for debugging: tensatory.memory(), tensatory.autoRes()
+Object.assign(window, { tensatory: { device: () => sampler.gpu?.device, backend: () => sampler.gpu, view3d: () => view3d, fused: () => fused, memory: () => ({ ...memoryNow(), device: sampler.gpu?.bytesAllocated, users: memoryUsers().map((u) => ({ name: u.constructor.name, ...u.memory(), all: (u as unknown as { debug?: () => unknown }).debug?.() })) }), autoRes } });
 function isolines(grid: DenseGrid): IsoResult | undefined {
   const f = slotScalar("iv");
   if (!f || !ui.showIso.checked) return undefined;
@@ -471,15 +523,15 @@ function integrableVector(v: VectorUse, grid: DenseGrid): VectorFieldData | unde
 /**
  * The grid streamlines are measured in — the step is ½ cell, `length` counts steps, `tail` counts cells — and
  * that symbolic vectors are sampled on for integration. Same rule as `currentGrid` applies to the scalar fields
- * (the field's own sample grid when `resolution` is deselected, else the resolution grid over the view box,
- * symbolic fields falling back to 128) but derived from the vector field ALONE: `currentGrid` switches between
+ * (the field's own sample grid for sampled fields, else a FIXED 128 grid over the view box — not the adaptive
+ * resolution, so line lengths do not change with the tier) but derived from the vector field ALONE: `currentGrid` switches between
  * a native grid and the 128 fallback depending on which scalar panels are enabled, which used to rescale the
  * streamlines whenever the colourfield or the isolines were toggled.
  */
+const STREAM_N = 128;
 function streamGrid(v: VectorUse, box: Box): DenseGrid {
-  const res = num("res");
-  if (res === null && v.data.samplePoints) return v.data.samplePoints;
-  return squareGrid(box, res ?? 128);
+  if (v.data.samplePoints) return v.data.samplePoints;
+  return squareGrid(box, STREAM_N);
 }
 
 /**
@@ -560,6 +612,7 @@ function renderEmpty(): void {
 
 function render(): void {
   state.dirty = false;
+  fused?.beginFrame();
   if (!state.bundle || !state.space) { renderEmpty(); return; }
   if (spaceDims() === 3) { render3d(); return; }
   const box = currentViewBox();
@@ -601,7 +654,7 @@ function render(): void {
   updateIsoNotches();
 
   // labels
-  $("resv").textContent = num("res") === null ? `${grid.size.join("×")}` : String(num("res"));
+  $("resv").textContent = `${grid.size.join("×")}${fused?.info.segments ? ` · ${fmtCount(fused.info.segments)} segs` : ""}${tier() === "moving" && autoRes2.moving !== autoRes2.settled ? ` · settles at ${autoRes2.resolution("settled")}` : ""}`;
   $("isoValuev").textContent = isoField ? isoField.codomain.format(isoField.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(isoField))) : "—";
   $("splitv").textContent = ui.split.value ?? "—";
   $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
@@ -630,7 +683,7 @@ const fmtCrop = (r: CropRange) => (r[0] === null && r[1] === null ? "—" : `${r
 for (const id of CROP_IDS) {
   const el = cropEl(id);
   // live: the face passes are fixed-size and re-dispatched only, so every crop gesture updates the picture directly
-  el.addEventListener("input", () => { readCrop(); state.dirty = true; });
+  el.addEventListener("input", () => { readCrop(); viewLastChange = performance.now(); state.dirty = true; }); // the 3D grid follows the crop: a drag is `moving`
   el.addEventListener("change", () => { readCrop(); state.dirty = true; saveOptsSoon(); });
 }
 
@@ -654,7 +707,8 @@ function view3dOf(): View3D | undefined {
     },
     levels: (u: Use3) => { const f = u as ScalarUse; const [lo, hi] = rangeOf(f); return isoLevelParams().map((t) => f.codomain.fromParam(t, lo, hi)); },
     alpha: () => num("isoAlpha") ?? 1,
-    resolution: () => num("res3") ?? 32,
+    resolution: () => autoRes3.resolution(tier()),
+    invalidate: () => { state.dirty = true; },
     blur: () => num("metric"),
     smoothing: () => num("line") ?? 0,
     compute: () => modes.compute,
@@ -683,7 +737,8 @@ function render3d(): void {
   $("isoValuev").textContent = isoField ? isoField.codomain.format(isoField.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(isoField))) : "—";
   $("splitv").textContent = ui.split.value ?? "—";
   $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
-  $("res3v").textContent = ui.res3.value ?? "";
+  const i3 = v.info;
+  $("res3v").textContent = `${i3.grid.join("×")}${i3.triangles ? ` · ${fmtCount(i3.triangles)} △` : ""}${tier() === "moving" && autoRes3.moving !== autoRes3.settled ? ` · settles at ${autoRes3.resolution("settled")}` : ""}`;
   $("metricv").textContent = ui.metric.value ?? "—";
   $("linev").textContent = ui.line.value ?? "—";
   $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
@@ -970,7 +1025,7 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
-interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D }
+interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
 interface Opts { ui?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
 function readOpts(): Opts {
   const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return {};
@@ -982,7 +1037,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.map((id) => [id, ui[id].value])]),
     maps: state.maps, intervals: state.intervals, space: state.space,
-    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
+    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
 }
@@ -1006,6 +1061,7 @@ function loadOpts(): boolean {
     // dir.stream used to be the integration sign (now the `sdir` UI value): saves without `sdir` predate that and are not playback directions
     if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: o.ui?.sdir !== undefined && so.dir.stream === -1 ? -1 : 1 };
     if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...so.camera }; view3d.cameraCustom = true; }
+    if (so?.res) autoRes().restore(so.res); // the last good resolutions of this space
     syncPlayGlyphs();
   } finally { loadingOpts = false; }
   return !!so;
@@ -1043,8 +1099,7 @@ function setSpace(id: string, fromUser: boolean): void {
   document.body.classList.toggle("dim3", m.numDims === 3);
   $("spaceTitle").textContent = `${m.numDims}D space`;
   $("isoTitle").textContent = m.numDims === 3 ? "isosurfaces" : "isolines";
-  $("lineLabel").textContent = m.numDims === 3 ? "surface" : "line";
-  $("pickSpace").textContent = `${m.numDims}D (${m.dimNames.join(", ")}) — ${usable.scalars.length} scalar, ${usable.vectors.length} vector fields, ${spacePointSets().length} point sets`;
+  $("lineLabel").textContent = m.numDims === 3 ? "surf sm" : "line sm";
 
   // defaults: colorfield and isoline value on the first scalar field; colour slots none (white lines;
   // a colour slot equal to C would make lines vanish into the raster); streamline direction from the
@@ -1058,6 +1113,7 @@ function setSpace(id: string, fromUser: boolean): void {
   renderer.view = { ...renderer.view, flipX: false, flipY: false, rot: 0 };
   if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
   if (m.numDims === 3) { const v = view3dOf(); if (v) { v.clear(); v.cameraCustom = false; } }
+  autoRes().restore({ moving: 0, settled: 0 }); // ramp from the bottom unless this space remembers better
   loadOpts();
   if (m.numDims === 2 && !viewCustom) fitView();
   applyModes();
@@ -1071,20 +1127,30 @@ function setSpace(id: string, fromUser: boolean): void {
   state.dirty = true;
 }
 
+/** the one-line `about` value; the full text is its tooltip. The bundle's name is already the
+ *  picker's entry, so only the description is shown — minus a redundant leading name (and the
+ *  separator after it) if the description repeats it. */
+function aboutText(bundle: Bundle): string {
+  const d = (bundle.spec.description ?? "").trim();
+  if (!d.toLowerCase().startsWith(bundle.name.toLowerCase())) return d;
+  return d.slice(bundle.name.length).replace(/^[\s:.,;\-\u2013\u2014]*/, "") || d;
+}
+function setAbout(text: string): void { const el = $("pickAbout"); el.textContent = text; el.dataset.tip = text; }
+
 function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
   state.bundle = bundle; state.bundleFile = file;
   rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
   const errors = buildErrors;
-  $("pickAbout").textContent = [bundle.name, bundle.spec.description ?? ""].filter(Boolean).join(" — ");
+  setAbout(aboutText(bundle));
   $("pickErrRow").style.display = errors.size ? "" : "none";
   $("pickErr").textContent = [...errors].map(([id, e]) => `${id}: ${e.message}`).join("\n");
   const spaces = spaceList();
-  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: `${m.name} (${m.numDims}D)` })));
+  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name })));
   spaceSel.disabled = spaces.length < 2;
   const saved = readOpts().space;
   const pick = [wantSpace, saved, spaces.find((m) => m.numDims === 2)?.id, spaces[0]?.id].find((id) => id && spaces.some((m) => m.id === id));
-  if (!pick) { usable = { scalars: [], vectors: [] }; state.space = ""; $("pickSpace").textContent = "no 2D or 3D space with fields"; buildMetrics(); updateInfo(); status(""); state.dirty = true; return; }
+  if (!pick) { usable = { scalars: [], vectors: [] }; state.space = ""; buildMetrics(); updateInfo(); status("no 2D or 3D space with fields"); state.dirty = true; return; }
   setSpace(pick, false);
   status("");
 }
@@ -1110,18 +1176,21 @@ function chooseBundle(i: number): void {
   void loadBundle(b.file);
 }
 pickSel.onchange = () => void loadBundle(pickSel.value);
-{
+stepOnWheel(pickSel, (dir) => chooseBundle(pickSel.selectedIndex + dir));
+stepOnWheel(spaceSel, (dir) => { const n = spaceSel.options.length; if (n < 2) return; spaceSel.selectedIndex = (((spaceSel.selectedIndex + dir) % n) + n) % n; setSpace(spaceSel.value, true); });
+
+/** step a <select> with the wheel or ↑/↓ while hovering it (same one-step-per-gesture wheel handling as the discrete sliders) */
+function stepOnWheel(sel: HTMLSelectElement, step: (dir: number) => void): void {
   let over = false;
-  pickSel.addEventListener("pointerenter", () => (over = true)); pickSel.addEventListener("pointerleave", () => (over = false));
-  // same one-step-per-gesture wheel handling as the discrete sliders
-  const wheel = wheelStepper((dir) => chooseBundle(pickSel.selectedIndex + dir));
-  pickSel.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
-  window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); chooseBundle(pickSel.selectedIndex + 1); } else if (e.key === "ArrowUp") { e.preventDefault(); chooseBundle(pickSel.selectedIndex - 1); } });
+  sel.addEventListener("pointerenter", () => (over = true)); sel.addEventListener("pointerleave", () => (over = false));
+  const wheel = wheelStepper(step);
+  sel.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
+  window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); } });
 }
 $("uploadBtn").onclick = () => $<HTMLInputElement>("pickFile").click();
 $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
   const file = (ev.target as HTMLInputElement).files?.[0]; if (!file) return;
-  try { setBundle(Bundle.parse(JSON.parse(await file.text())), `local:${file.name}`); $("pickAbout").textContent = `${file.name} (local) — ${$("pickAbout").textContent}`; }
+  try { setBundle(Bundle.parse(JSON.parse(await file.text())), `local:${file.name}`); setAbout(`${file.name} (local) — ${$("pickAbout").textContent}`); }
   catch (e) { console.error(e); status(e instanceof Error ? e.message : String(e)); }
 });
 
@@ -1137,7 +1206,7 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
       if (view3d) { if (drag.pan) view3d.pan(dx, dy); else view3d.orbit(dx, dy); state.dirty = true; }
       return;
     }
-    if (drag) { renderer.pan(e.clientX - drag.x, e.clientY - drag.y); drag = { ...drag, x: e.clientX, y: e.clientY }; viewCustom = true; state.dirty = true; return; }
+    if (drag) { renderer.pan(e.clientX - drag.x, e.clientY - drag.y); drag = { ...drag, x: e.clientX, y: e.clientY }; viewCustom = true; viewLastChange = performance.now(); state.dirty = true; return; }
     if (spaceDims() === 3) return;
     const r = canvas.getBoundingClientRect();
     const [x, y] = renderer.toWorld(e.clientX - r.left, e.clientY - r.top);
@@ -1149,7 +1218,7 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     if (spaceDims() === 3) { view3d?.zoom(Math.exp(-e.deltaY * 0.0015)); state.dirty = true; saveOptsSoon(); return; }
-    const r = canvas.getBoundingClientRect(); renderer.zoom(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); viewCustom = true; state.dirty = true; saveOptsSoon();
+    const r = canvas.getBoundingClientRect(); renderer.zoom(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); viewCustom = true; viewLastChange = performance.now(); state.dirty = true; saveOptsSoon();
   }, { passive: false });
 }
 /** the free screen region right of the left column, with the same 12 px margin the panels keep from the viewport */
@@ -1203,9 +1272,17 @@ ui.lines.addEventListener("change", () => { buildMetrics(); updateInfo(); });
 /* frame loop */
 
 let lastT = performance.now();
+/** the rendered frame awaiting its frame time (the interval to the next rAF includes the GPU stall) */
+let pendingFrame: (Omit<FrameReport, "ms"> & { t0: number; jsMs: number }) | undefined;
+let lastFrameKey = "", lastTier: Tier = "settled";
+/** what a frame recomputes when it changes: grid, levels, slots, options (CPU compute has no dispatch counter to watch) */
+const frameKey = () => [spaceDims(), autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
+/** what the resolution is spent on: failed steps are remembered per context */
+const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 function frame(now: number): void {
   const dt = state.paused ? 0 : Math.min(0.1, (now - lastT) / 1000);
   lastT = now;
+  if (pendingFrame) { const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined; autoRes().report({ ...r, ms: Math.max(now - t0, jsMs) }); }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
@@ -1213,8 +1290,17 @@ function frame(now: number): void {
     state.dirty = true;
   }
   if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
+  if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
   if (state.dirty) {
+    Cache.frame++;
+    const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();
     try { render(); } catch (e) { showError(e); state.dirty = false; }
+    const a = autoRes();
+    const overCap = governMemory(a.capBytes);
+    const bytes = memoryNow();
+    pendingFrame = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: (gpu?.pipelinesBuilt ?? 0) !== p0, bytes, overCap, ctx: resCtx() };
+    lastFrameKey = key;
+    $("memv").textContent = `${fmtMB(bytes.total)}/${fmtMB(a.capBytes)}${a.pin !== undefined ? ` · pinned ${a.pin}` : a.note ? ` · ${a.note}` : ""}`;
   }
   requestAnimationFrame(frame);
 }
@@ -1232,6 +1318,11 @@ function frame(now: number): void {
   if (wantCompute === "cpu" || wantCompute === "gpu") modes.compute = wantCompute;
   if (wantRender === "canvas" || wantRender === "gpu") modes.render = wantRender;
   applyModes();
+  memcapEl.value = params.get("memcap") ?? localStorage.getItem("tensatory.memcap") ?? "1024";
+  applyMemcap();
+  const pin2 = Number(params.get("res")), pin3 = Number(params.get("res3"));
+  if (pin2 > 1) autoRes2.pin = pin2;
+  if (pin3 > 1) autoRes3.pin = pin3;
   try {
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }

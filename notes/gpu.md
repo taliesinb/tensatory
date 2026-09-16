@@ -12,7 +12,7 @@ shader-based renderer.
 |---|---|
 | `src/wgsl.ts` | `FunctionEmitter`: normalized AST → one WGSL function `fn f(p: vecD<f32>, pos: i32) -> f32 \| vecD`. Emits SSA (`let tN = …`) keyed by structural subtree key, so every distinct subtree is computed once (the GPU counterpart of core's CSE memo). `PRELUDE` holds helpers WGSL lacks (`erf_`, `gelu_`, `pow_` with JS semantics for negative bases, `mod_`, `round_` = half-up, `nan_()` — WGSL rejects NaN literals). `expandGrad` replaces `grad` nodes by their explicit gradient before emission. |
 | `src/program.ts` | `ProgramBuilder`: field data → a complete compute program for one dispatch grid. Symbolic data is transpiled, with its arguments bound recursively; dense data is uploaded and read through a generated reader (direct `pos` read when the dispatch grid *is* its support, multilinear interpolation otherwise, NaN outside its box — the CPU semantics exactly); derivatives of dense arguments are computed by core (grid differences) and uploaded; pullbacks become coordinate maps with the chain-rule factor; anything else (closure-backed data) is sampled by core on the dispatch grid and uploaded. **All uploads are packed into one storage buffer** (binding 1) with offsets — WebGPU allows only 8 storage buffers per stage, and derived fields easily need more readers than that. |
-| `src/device.ts` | `GpuBackend`: finds `navigator.gpu` in a browser or Dawn's node bindings (`webgpu` package) in node; explicit bind-group layout (out + data); pipeline cache by shader code; validation error scopes; `run(program)` → `Float32Array`. |
+| `src/device.ts` | `GpuBackend`: finds `navigator.gpu` in a browser or Dawn's node bindings (`webgpu` package) in node (device requested with the adapter's buffer limits, up to 2 GB); explicit bind-group layout (out + data); pipeline cache by shader code; validation error scopes; `run(program)` → `Float32Array`. Kernels use a 1D `id.x`; dispatches over 65535 workgroups are laid out in 2D and the entry point rewritten (`linearize`). `createBuffer` accounts resident allocations (`bytesAllocated`); `dispatches` / `pipelinesBuilt` counters and `readCounter` (a set's true record count) feed the viewer's adaptive resolution ([resolution.md](resolution.md)). |
 | `src/sample.ts` | `gpuSampleOn(backend, field, grid)`: the counterpart of `field.sampleOn(grid)`. |
 
 ## Semantics preserved
@@ -55,7 +55,7 @@ grid; core still computes statistics (slider ranges), exact isoline
 projection and streamline integration on the CPU. NaN masking outside a
 field's box is applied uniformly on the viewer side.
 
-The bundle panel shows the backend (`GPU (apple metal-3)` / `CPU`);
+The system panel shows the backend (`GPU (apple metal-3)` / `CPU`);
 `?backend=cpu|gpu` overrides, `?check=1` computes every GPU sample on the CPU
 too and logs the deviation (`agreement <key>: worst 0.12× tolerance …`) —
 the test suite's guarantee, live. Measured in Chrome (M-series): at 512² the
@@ -108,7 +108,7 @@ per level with all levels concurrent and the main thread free; 1k streamlines
 
 ## Stage 4 (done): the fused path and the WebGPU renderer
 
-The viewer now has two independent switches (bundle panel, `?compute=cpu|gpu`,
+The viewer now has two independent switches (system panel, `?compute=cpu|gpu`,
 `?render=canvas|gpu`, remembered in `tensatory.modes`; default gpu/gpu when an
 adapter exists):
 
@@ -186,9 +186,22 @@ With these, gpu/gpu handles every isoline option (`metric`, `line`, exact
 projection, I_C colouring) without a readback; the only asynchronous piece is
 the stats refinement, and it is invisible unless the coarse range was wrong.
 
+## Stage 6 (done): 3D and adaptive resolution
+
+3D is [3d.md](3d.md) (fused marching tetrahedra, `GpuRenderer3D`). The
+append kernels (isolines, smoothed isolines, isosurfaces) now take the set's
+real capacity from their params and count every record through the atomic, so
+the indirect buffer holds the true count even on overflow; the viewer reads
+it back and sizes sets from measured complexity ([resolution.md](resolution.md)).
+No kernel bakes its dispatch grid: it travels as a header in the params /
+data buffer (`gridWgsl`, `packGrid` in `wgsl.ts`), so one pipeline per field
+serves every resolution and crop — see [resolution.md](resolution.md).
+
 ## Next stages
 
-1. 3D: marching cubes as a fused kernel appending triangles, a mesh pipeline
-   with OIT — the same resident-grid / indirect-draw structure.
-2. Interval-arithmetic quadtree seeding for exact isolines (topology still
+1. Interval-arithmetic quadtree seeding for exact isolines (topology still
    comes from the seed grid).
+2. Timestamp queries (`timestamp-query` feature) for real GPU frame times in
+   the adaptive resolution instead of vsync-quantized rAF intervals.
+3. Reuse same-sized resident buffers across frames (a moving crop allocates
+   and frees its grids every frame; Dawn zero-fills new buffers).

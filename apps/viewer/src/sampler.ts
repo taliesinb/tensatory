@@ -6,12 +6,13 @@
 
 import type { DenseGrid, ScalarFieldData, VectorFieldData } from "@tensatory/core";
 import { GpuBackend, gpuSampleOn } from "@tensatory/gpu";
+import { Cache, type MemoryUser } from "./cache";
 
 export type Backend = "gpu" | "cpu";
 export type Values = Float64Array | Float32Array;
 
-export class Sampler {
-  private readonly cache = new Map<string, Values>();
+export class Sampler implements MemoryUser {
+  private readonly cache = new Cache<Values>(48, () => {}, (v) => v.byteLength);
   private readonly pending = new Set<string>();
   private readonly checked = new Set<string>();
   gpu: GpuBackend | undefined;
@@ -36,6 +37,9 @@ export class Sampler {
   }
 
   clear(): void { this.cache.clear(); this.pending.clear(); this.checked.clear(); }
+  /** CPU-side sample arrays: ∝ nᴰ */
+  memory(): { volume: number; surface: number; cpu: number } { return { volume: this.cache.liveBytes, surface: 0, cpu: this.cache.bytes }; }
+  trim(bytes: number): number { return this.cache.trim(bytes); }
 
   /**
    * Values of `field` on `grid` (row-major; D per point for vectors), NaN where
@@ -66,10 +70,7 @@ export class Sampler {
     return undefined;
   }
 
-  private store(key: string, v: Values): void {
-    if (this.cache.size > 48) this.cache.delete(this.cache.keys().next().value!);
-    this.cache.set(key, v);
-  }
+  private store(key: string, v: Values): void { this.cache.set(key, v); }
 
   /** core's sampling, with NaN outside the field's own box */
   cpu(field: ScalarFieldData | VectorFieldData, grid: DenseGrid): Float64Array {

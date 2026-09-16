@@ -58,13 +58,14 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }
 input[type="file"] { max-width: 100%; font-size: 11px; }
 
-#picker .body { padding: 6px 12px 8px; }
-#picker .prow { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
-#picker .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
-#picker .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
+#picker .body, #system .body { padding: 6px 12px 8px; }
+#picker .prow, #system .prow { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+#picker .prow label, #system .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
+#picker .pval, #system .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+/* about: one line, the full text (name — description) in the tooltip */
+#picker .pval.about { font-size: inherit; line-height: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; user-select: none; -webkit-user-select: none; }
 #pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }
-#picker .psep { border-top: 1px solid #2a2f3d; margin: 6px 0 4px; }
 
 #cursorPane { position: absolute; right: 12px; bottom: 12px; display: none; pointer-events: none; }
 #cursorPane .body { padding: 6px 14px; font-size: 12px; line-height: 1.5; color: #dde; }
@@ -92,6 +93,9 @@ label[data-tip]:not(.tick) { cursor: help; }
 #help { display: none; }
 #status { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: #9ab; pointer-events: none; max-width: 60vw; text-align: center; }
 #status.err { color: #f66; }
+/* adaptive-resolution activity: ↑ / ↓ a tier step, ⟳ a remeasure; fades out */
+#resFlash { position: absolute; top: 10px; right: 14px; font-size: 22px; line-height: 1; color: #93c5fd; opacity: 0; transition: opacity .5s ease-out; pointer-events: none; text-shadow: 0 0 6px rgba(0,0,0,.8); }
+#resFlash.on { opacity: .9; transition: none; }
 #logModal { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none; z-index: 50; align-items: center; justify-content: center; }
 #logModal.open { display: flex; }
 .logbox { background: #0b0d12; border: 1px solid #2a2f3d; border-radius: 8px; width: min(760px, 92vw); max-height: 82vh; display: flex; flex-direction: column; }

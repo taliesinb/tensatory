@@ -95,7 +95,8 @@ profiling test.
 * Codomains are visualization hints (bounds, log base, flip, wrap, unit,
   marks); they never change values. Numbers are formatted compactly
   (`6.24·10⁻⁵`, unicode superscripts).
-* Viewer: one super-stack of panels top-left (`bundle`, `2D space`,
+* Viewer: one super-stack of panels top-left (`bundle`, `system` — closed by
+  default: compute / render, device, `mem cap`, live memory —, `2D space`,
   `colorfield`, `isolines`, `streamlines`), the `mappings` matrix bottom-left,
   cursor pane + legend bottom-right. The matrix assigns fields to slots C,
   I_V, I_C, S_∇, S_C; rows are every scalar AND vector field; a vector slot
@@ -137,7 +138,26 @@ profiling test.
   packed into ONE storage buffer (8-buffer limit); explicit bind-group layout;
   the `GPU` instance must be retained for the device's lifetime under Dawn or
   the process segfaults. See `notes/gpu.md`.
-* Viewer modes: `compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (bundle
+* Resolution is not a control (`notes/resolution.md`, `apps/viewer/src/autores.ts`):
+  one controller per arm over a ladder (2D 32 … 2048, 3D 16 … 256) with two
+  tiers — `moving` (levels animating / dragged, 2D view dragged) holds 30 fps,
+  `settled` is bounded by one recomputation ≤ 200 ms — plus the memory cap
+  (`mem cap` 256 / 512 / 1024 / 2048 MB, default 1024; `?memcap=`,
+  `tensatory.memcap`). Frame times come from rAF intervals (vsync-quantized,
+  so 60 fps windows probe one step up), compiled frames are remeasured, the
+  last good pair is remembered per bundle + space, `?res=` / `?res3=` pin.
+  Fused kernels count every record even when a set is full (real capacity in
+  params), the viewer reads the counts back (`GpuBackend.readCounter`) and
+  sizes sets from the measured complexity per family, regrowing on overflow;
+  `GpuBackend.createBuffer` accounts resident bytes; caches are byte-aware
+  LRUs (`cache.ts`) trimmed to the cap, keyed by grid identity where a kernel
+  reads a grid. Dispatches over 65535 workgroups are 2D (`linearize`); the
+  device asks for the adapter's buffer limits. No kernel bakes its grid:
+  grids travel as a 20-float header in params / data (`gridWgsl`, `packGrid`
+  in `gpu/src/wgsl.ts`), so a resolution step, pan or crop drag compiles
+  nothing (a dense field's own support stays baked — intrinsic to the field). Streamline grids are FIXED
+  (128 in 2D, 64 in 3D) so line lengths do not follow the tier.
+* Viewer modes: `compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (system
   panel, `?compute=`, `?render=`, `tensatory.modes`; default gpu/gpu). gpu/gpu
   is fused: resident grids, fused kernels appending `Seg` records, drawIndirect,
   no readback, exact isolines every frame. gpu/canvas reads back asynchronously
@@ -161,10 +181,11 @@ profiling test.
   two-sided headlight, weighted-blended OIT for translucent levels, depth-
   tested thick lines (box, trajectories, face outlines, streamlines); points /
   labels on the Canvas 2D overlay. Exact vertices via ∇f projection (flag ∇),
-  isolines of I_V on the cropped box faces (`outline`; fixed per-face passes
-  re-dispatched per depth, so cropping is live), crop ranges x / y / z as
-  interval sliders, metric
-  blur and Taubin `surface` smoothing (CPU), 3D streamlines with the 2D
+  isolines of I_V on the cropped box faces (`outline`), crop ranges x / y / z
+  as interval sliders — the volume grid follows the cropped box, so a small
+  crop is a full-resolution close-up and crop drags run in the `moving` tier —,
+  adaptive resolution (see above), `value sm` box blur and `surf sm` Taubin
+  smoothing (CPU; control ids `metric` / `line`), 3D streamlines with the 2D
   panel's dir / mode (JL planning is dimension-generic). WebGPU only; compute
   cpu / gpu as in 2D. Matrix columns absent in a space are hidden
   (`SlotDef.present`).

@@ -22,14 +22,22 @@
   <div class="strip"><span class="title">bundle</span><span class="ticks"><button class="tickbtn" id="resetBtn" title="wipe local storage and reload">R</button><button class="tickbtn" id="logBtn" title="show console log">L</button><button class="tickbtn" id="uploadBtn" title="open a bundle JSON from disk (not persisted)">⤒</button><input type="file" id="pickFile" accept=".json,application/json" hidden></span></div>
   <div class="body">
     <div class="prow"><label data-tip="Which Tensatory data bundle to view; scroll or use ↑/↓ while hovering to switch.">bundle</label><select id="pickBundle"></select></div>
-    <div class="psep"></div>
-    <div class="prow"><label>about</label><div class="pval" id="pickAbout"></div></div>
+    <div class="prow"><label>about</label><div class="pval about" id="pickAbout" data-tip=""></div></div>
     <div class="prow"><label data-tip="Which of the bundle's spaces (manifolds) to view: a 2D space gets the colorfield / isolines / streamlines panels, a 3D space the isosurface panels. Point sets and fields belong to a space. Only 2D and 3D spaces are listed. ?space=id">space</label><select id="pickSpaceSel"></select></div>
-    <div class="prow"><label></label><div class="pval" id="pickSpace"></div></div>
+    <div class="prow" id="pickErrRow" style="display:none"><label>errors</label><div class="pval err" id="pickErr"></div></div>
+  </div>
+</div>
+
+<div id="system" class="panel collapsed">
+  <div class="strip"><span class="title">system</span></div>
+  <div class="body">
     <div class="prow"><label data-tip="Where fields are sampled and geometry (isolines, streamlines) is computed. GPU results are asynchronous when rendered by the canvas, fully resident when rendered by the GPU. ?compute=cpu|gpu; ?check=1 logs CPU/GPU agreement.">compute</label><div id="computeBar" class="bar"></div></div>
     <div class="prow"><label data-tip="canvas: Canvas 2D. gpu: WebGPU raster and lines (points and labels stay on a canvas overlay). ?render=canvas|gpu">render</label><div id="renderBar" class="bar"></div></div>
     <div class="prow"><label>device</label><div class="pval" id="pickCompute"></div></div>
-    <div class="prow" id="pickErrRow" style="display:none"><label>errors</label><div class="pval err" id="pickErr"></div></div>
+    <div class="prow"><label data-tip="Cap on the memory the viewer keeps resident (device buffers: value grids, meshes, line sets; plus CPU sample arrays), in MB. Caches are trimmed to it; the adaptive resolution never takes a step predicted to exceed it. ?memcap=256|512|1024|2048">mem cap</label><div class="ch" id="memcap" data-options="256,512,1024,2048" data-value="1024"></div></div>
+    <div class="prow"><label data-tip="Resident memory in use / the cap, in MB (tracked allocations), then the adaptive resolution's last decision: mov / set = the moving / settled tier, ↑↓ a step with its reason (~ms predicted, ms measured, probe, draw, mem cap), @n the resolution held, →n the next step's predicted cost.">memory</label><div class="pval" id="memv"></div></div>
+    <div class="prow d2"><label data-tip="Grid the fields are sampled on (raster, isoline seeds). Chosen automatically: it ramps up while idle as far as one recomputation stays quick (up to 2048), drops while the isolines animate or the view is dragged to hold 30 fps, and never exceeds the memory cap. Sampled fields that fill the view keep their own grid. ?res=N pins it.">iso res</label><div class="pval" id="resv"></div></div>
+    <div class="prow d3"><label data-tip="Grid the I_V field is sampled on for the isosurfaces (longest side of the cropped box; marching tetrahedra on that grid) and the triangles drawn. Chosen automatically: it ramps up while idle as far as one recomputation stays quick (up to 256), drops while the levels animate or a crop is dragged to hold 30 fps, and never exceeds the memory cap. ?res3=N pins it.">iso res</label><div class="pval" id="res3v"></div></div>
   </div>
 </div>
 
@@ -42,7 +50,6 @@
   </div></div>
 
   <div class="panel d2"><div class="strip"><span class="title">colorfield</span><span class="ticks"><label class="tick on" for="showScalar" data-tip="Paint the C field as a colormapped raster.">✓<input type="checkbox" id="showScalar" checked></label></span></div><div class="body">
-    <div class="row"><label data-tip="Grid resolution the fields are sampled on (longest side). Deselect for the field's own sample grid (symbolic fields fall back to 128).">resolution</label><div class="ds" id="res" data-values="16,32,64,128,256,512" data-value="" data-nullable></div><span class="val" id="resv"></span></div>
     <div class="row"><label>flags</label><span class="flags"><label class="tick on" for="smooth" data-tip="Interpolate between raster cells instead of showing them as blocks.">✓<input type="checkbox" id="smooth" checked></label><span class="flag">smooth</span></span></div>
   </div></div>
 
@@ -51,10 +58,8 @@
     <div class="row"><label data-tip="Number of isolines, evenly spaced and centred on 'value', wrapping past the field's min and max. Deselect for a single line at 'value'.">split</label><div class="ds" id="split" data-values="2,3,4,5,8,12" data-value="4" data-nullable></div><span class="val" id="splitv"></span></div>
     <div class="row"><label data-tip="Opacity of the isolines. Deselect for fully opaque.">opacity</label><div class="sl" id="isoAlpha" data-min="0" data-max="1" data-step="0.01" data-value="0.8" data-nullable></div><span class="val"><span id="isoAlphav"></span></span></div>
     <div class="row d3"><label>flags</label><span class="flags"><label class="tick on" for="isoExact" data-tip="Exact surfaces: every vertex is moved onto the true level set along the exact ∇f of a symbolic field (Newton, then bisection), and the normals are ∇f there — the 3D twin of the exact 2D isolines. Sampled fields stay on their grid. Off: linear marching-tetrahedra vertices.">✓<input type="checkbox" id="isoExact" checked></label><span class="flag">∇</span><label class="tick on" for="isoOutline" data-tip="Draw the isolines of the I_V field on the (cropped) box faces: where each isosurface meets the faces — the intersection is much easier to read from these outlines than from the shells alone.">✓<input type="checkbox" id="isoOutline" checked></label><span class="flag">outline</span></span></div>
-    <div class="row d3"><label data-tip="Grid resolution the I_V field is sampled on for the isosurfaces (longest box side); marching tetrahedra on that grid.">resolution</label><div class="ds" id="res3" data-values="16,24,32,48,64,96" data-value="32"></div><span class="val" id="res3v"></span></div>
-    <div class="row"><label class="h">smoothing</label></div>
-    <div class="row"><label data-tip="Box-blur radius (cells) applied to the I_V field before contouring — a coarse-grained smoothing of the field (2D and 3D). Blurred fields are contoured on the grid (exact projection only applies to the unblurred symbolic field). Deselect for the raw field.">metric</label><div class="ds" id="metric" data-values="1,2,3,4" data-value="" data-nullable></div><span class="val" id="metricv"></span></div>
-    <div class="row"><label id="lineLabel" data-tip="Taubin λ|μ iterations on grid-contoured polylines / surfaces (shape-preserving). Not applied to exact lines and surfaces, which are already on the true level set. In 3D the welded mesh is smoothed on the CPU (compute=gpu meshes fall back to the CPU while this is set). Deselect for raw geometry.">line</label><div class="ds" id="line" data-values="2,4,8,16" data-value="" data-nullable></div><span class="val" id="linev"></span></div>
+    <div class="row"><label data-tip="Smoothing of the I_V field's values: box-blur radius (cells) applied before contouring — a coarse-grained smoothing of the field (2D and 3D). Blurred fields are contoured on the grid (exact projection only applies to the unblurred symbolic field). Deselect for the raw field. (control id: metric)">value sm</label><div class="ds" id="metric" data-values="1,2,3,4" data-value="" data-nullable></div><span class="val" id="metricv"></span></div>
+    <div class="row"><label id="lineLabel" data-tip="Taubin λ|μ iterations on grid-contoured polylines / surfaces (shape-preserving). Not applied to exact lines and surfaces, which are already on the true level set. In 3D the welded mesh is smoothed on the CPU (compute=gpu meshes fall back to the CPU while this is set). Deselect for raw geometry. (control id: line)">line sm</label><div class="ds" id="line" data-values="2,4,8,16" data-value="" data-nullable></div><span class="val" id="linev"></span></div>
     <!-- diagnostics line (method, vertex count, residual, timing); re-enable together with the isoInfo line in main.ts -->
     <!-- <div class="row"><span class="hint" id="isoInfo"></span></div> -->
   </div></div>
@@ -76,6 +81,7 @@
 <div id="metrics" class="panel"><div class="strip"><span class="title">mappings</span></div><div class="body" id="metricSvgBody"></div></div>
 <div id="help">drag: pan<br>wheel: zoom<br>R: refit<br>space: pause animations<br>shift-hover: preview sliders and metrics</div>
 <div id="status">loading…</div>
+<div id="resFlash"></div>
 <div id="tip"></div>
 <div id="logModal"><div class="logbox"><div class="loghead"><span>console</span><button id="logClose">✕</button></div><pre id="logText"></pre></div></div>
 <script type="module" src="/src/main.ts"></script>

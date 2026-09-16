@@ -28,13 +28,17 @@ mixture through the argument. Measured with `PERF=1 pnpm test`
    compiled once; shared subtrees get a per-point memo (last coordinates +
    pos → value). Exact, safe through nested argument evaluation.
 2. **Sample-then-integrate streamlines** (`main.ts` `integrableVector`). A
-   symbolic vector field is sampled once onto a grid at the current resolution
-   (cached) and streamlines integrate through the bilinear interpolant, as the
+   symbolic vector field is sampled once onto a fixed grid (128 in 2D, 64 in
+   3D; cached) and streamlines integrate through the bilinear interpolant, as the
    3D prototype did: O(grid) instead of O(lines × steps × 4) evaluations.
 3. **Progressive isolines**. While the level is moving (animation, or within
    200 ms of a slider change) symbolic fields are contoured with plain
    marching squares; once settled, a frame swaps in the exact projected lines.
-4. Smaller: `derivative(dim)` cached per field datum; isoline results cached
+4. **Adaptive resolution** ([resolution.md](resolution.md)): the grid is a
+   feedback loop with a `moving` tier holding 30 fps while levels animate and
+   a `settled` tier bounded by one recomputation's latency and the memory
+   cap; resident sets are sized from measured triangle / segment counts.
+5. Smaller: `derivative(dim)` cached per field datum; isoline results cached
    by (field, grid, levels, tolerance, colour); sampled values cached per
    (use, grid); streamline sets LRU-cached by (field, count, steps, sign,
    step, box) with colours recomputed cheaply.

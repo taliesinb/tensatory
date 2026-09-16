@@ -22,7 +22,7 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 
 ## Compute and render modes
 
-`compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (bundle panel; `?compute=`,
+`compute ∈ {cpu, gpu}` × `render ∈ {canvas, gpu}` (system panel; `?compute=`,
 `?render=`; stored in `tensatory.modes`; default gpu/gpu when WebGPU exists).
 GPU/gpu is the fused path: `renderGpu()` in `main.ts` builds a `GpuScene`
 from resident grids and segment sets — including the `metric` blur (GPU box
@@ -35,10 +35,13 @@ pipelines and either draw with Canvas 2D or upload their results. See
 ## Layout
 
 * **Left super-stack** (one rounded container; strips are coloured rows):
-  `bundle` (picker with wheel/arrow switching, R = wipe storage, L = log,
-  ⤒ = open a local JSON), `2D space` (points / box flags; view: fit, flip x,
-  flip y, cw, ccw), `colorfield` (strip tick = raster on/off; resolution,
-  smooth), `isolines` (value, split, opacity, metric blur, line smoothing,
+  `bundle` (picker and space picker, both with wheel/arrow switching; about
+  = the description on one line with the full text as tooltip; R = wipe
+  storage, L = log, ⤒ = open a local JSON), `system` (closed by default:
+  compute / render modes, device, `mem cap`, live memory with the adaptive
+  resolution's last decision, and `iso res` — the current grid and segment /
+  triangle count, read-only), `2D space` (points / box flags; view: fit,
+  flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
   ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
   strat / JL / cover; lines, length, opacity, tail, split, ▶).
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
@@ -63,10 +66,11 @@ headers toggle their panel; disabled columns stay visible, dimmed.
 
 The view box is the union of the boxes of all selected uses (fields in one
 bundle may differ); rasters are transparent outside their own box, streamline
-seeds stay inside the vector field's box. The sampling grid is `resolution`
-along the longer side, or the fields' native grid when `resolution` is
-deselected and every selected sampled field shares one grid filling the view
-box (symbolic fields fall back to 128).
+seeds stay inside the vector field's box. The sampling grid is the fields'
+native grid when every selected sampled field shares one grid filling the
+view box, else the adaptive resolution along the longer side
+([resolution.md](resolution.md): two tiers, moving ≤ settled, ladder 32 …
+2048, frame / latency / memory feedback; `?res=N` pins it).
 
 ## Isolines and streamlines in the viewer
 
@@ -94,12 +98,11 @@ box (symbolic fields fall back to 128).
   (field, grid, mode, options). The CPU / read-back paths draw the plan's
   lines directly; the fused path hands the planned seeds with their step
   budgets to `fusedStreamlines`, which re-integrates them resident (so the
-  colour field is still evaluated per vertex on the GPU). The streamline grid follows the same rule as the scalar
-  grid above (the vector field's own grid when `resolution` is deselected,
-  else `resolution` over the view box, symbolic → 128) but is derived from
-  the S_∇ field alone (`streamGrid`), never from `currentGrid`: that one flips
-  between a native grid and the 128 fallback as the colourfield / isolines
-  panels are toggled, which used to rescale the streamlines with them.
+  colour field is still evaluated per vertex on the GPU). The streamline grid
+  is the vector field's own grid, else a FIXED 128 over the view box
+  (`streamGrid`, `STREAM_N`) — never `currentGrid`, whose adaptive resolution
+  (and, before that, its native / 128 switching with the colourfield and
+  isolines panels) would rescale the lines' step, `length` and `tail`.
   Particles are always drawn at the current
   phase; ▶ advances the clock, ◀ (shift-click) runs it backwards so the
   particles travel the other way along the same lines. Plain click only

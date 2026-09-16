@@ -6,6 +6,7 @@
 
 import type { DenseGrid, ScalarFieldData, StreamlineSeeds, VectorFieldData } from "@tensatory/core";
 import {
+  SEG_FLOATS,
   allocSegments,
   blurResidentSync,
   fusedIsolines,
@@ -23,65 +24,119 @@ import {
   type GpuSegments,
   type SmoothedIsolines,
 } from "@tensatory/gpu";
+import { Cache, uidOf, type MemoryUser } from "./cache";
 
-function lru<V>(map: Map<string, V>, max: number, dispose: (v: V) => void): void {
-  while (map.size > max) { const k = map.keys().next().value!; dispose(map.get(k)!); map.delete(k); }
-}
+/** a segment set with its count read back after every dispatch (see `track`) */
+interface Counted { segs: GpuSegments; stamp: string; pending: boolean; count: number; overflow: boolean }
+/** segments a family of isoline sets (field, colour, options — not the grid) produced, at the resolution measured */
+interface Complexity { records: number; n: number; t: number }
+const bufBytes = (o: { buffer: GPUBuffer }) => o.buffer.size;
+const MIN_RECORDS = 16384, MARGIN = 1.5;
 
-export class FusedGeometry {
-  private readonly grids = new Map<string, GpuGrid>();
-  private readonly isoKernels = new Map<string, FusedIsolines>();
-  private readonly smoothKernels = new Map<string, SmoothedIsolines>();
-  private readonly blurred = new Map<string, GpuGrid>();
-  private readonly isoSets = new Map<string, { segs: GpuSegments; stamp: string }>();
-  private readonly streamKernels = new Map<string, { kernel: FusedStreamlines; segs: GpuSegments }>();
-  private readonly uploaded = new Map<string, GpuSegments>();
+export interface FusedInfo { segments: number; capacity: number; overflow: boolean }
 
-  constructor(readonly gpu: GpuBackend) {}
+export class FusedGeometry implements MemoryUser {
+  // ∝ n²
+  private readonly grids = new Cache<GpuGrid>(24, (g) => g.destroy(), bufBytes);
+  private readonly blurred = new Cache<GpuGrid>(8, (g) => g.destroy(), bufBytes);
+  private readonly smoothKernels = new Cache<SmoothedIsolines>(8, (k) => k.destroy()); // own n²-sized scratch (not counted: destroyed with the kernel)
+  // ∝ n
+  private readonly isoKernels = new Cache<FusedIsolines>(16, () => {});
+  private readonly isoSets = new Cache<Counted>(32, (s) => s.segs.destroy(), (s) => s.segs.buffer.size);
+  private readonly streamKernels = new Cache<{ kernel: FusedStreamlines; segs: GpuSegments }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
+  private readonly uploaded = new Cache<GpuSegments>(32, (s) => s.destroy(), bufBytes);
+  private readonly complexity = new Map<string, Complexity>();
+  /** what the last frame's isoline sets held (summed over the sets used) */
+  info: FusedInfo = { segments: 0, capacity: 0, overflow: false };
+
+  /** @param invalidate called when a count readback resized a set: render again */
+  constructor(readonly gpu: GpuBackend, private readonly invalidate: () => void) {}
 
   clear(): void {
-    for (const g of this.grids.values()) g.destroy();
-    for (const s of this.isoSets.values()) s.segs.destroy();
-    for (const s of this.streamKernels.values()) s.segs.destroy();
-    for (const s of this.uploaded.values()) s.destroy();
-    for (const k of this.smoothKernels.values()) k.destroy();
-    for (const g of this.blurred.values()) g.destroy();
-    this.grids.clear(); this.isoKernels.clear(); this.isoSets.clear(); this.streamKernels.clear(); this.uploaded.clear(); this.smoothKernels.clear(); this.blurred.clear();
+    for (const c of [this.grids, this.blurred, this.smoothKernels, this.isoKernels, this.isoSets, this.streamKernels, this.uploaded] as Cache<unknown>[]) c.clear();
+    this.complexity.clear();
+  }
+  /** call at the start of a frame: the info accumulates over the frame's isoline sets */
+  beginFrame(): void { this.info = { segments: 0, capacity: 0, overflow: false }; }
+  /** forget that the isoline sets are up to date: the next frame dispatches them again (timing without compiles) */
+  redo(): void { for (const s of this.isoSets.values()) s.stamp = ""; }
+
+  debug(): Record<string, string> {
+    const e = { grids: this.grids, blurred: this.blurred, isoSets: this.isoSets, streamKernels: this.streamKernels, uploaded: this.uploaded };
+    return Object.fromEntries(Object.entries(e).map(([k, c]) => [k, `${c.size} entries, ${(c.bytes / 2 ** 20).toFixed(1)} MB (${(c.liveBytes / 2 ** 20).toFixed(1)} live)`]));
+  }
+  memory(): { volume: number; surface: number; cpu: number } {
+    return { volume: this.grids.liveBytes + this.blurred.liveBytes, surface: this.isoSets.liveBytes + this.streamKernels.liveBytes + this.uploaded.liveBytes, cpu: 0 };
+  }
+  trim(bytes: number): number {
+    let freed = 0;
+    for (const c of [this.uploaded, this.isoSets, this.streamKernels, this.smoothKernels, this.blurred, this.grids] as Cache<unknown>[]) {
+      if (freed >= bytes) break;
+      freed += c.trim(bytes - freed);
+    }
+    return freed;
   }
 
   /** resident samples of `field` on `grid` (enqueued on first use) */
   grid(key: string, field: ScalarFieldData | VectorFieldData, grid: DenseGrid): GpuGrid {
-    let g = this.grids.get(key);
-    if (!g) { this.grids.set(key, (g = sampleResidentSync(this.gpu, field, grid))); lru(this.grids, 24, (v) => v.destroy()); }
-    return g;
+    return this.grids.getOr(key, () => sampleResidentSync(this.gpu, field, grid));
   }
 
   /** CPU values as a resident grid (CPU compute + GPU render) */
   uploadGrid(key: string, grid: DenseGrid, values: ArrayLike<number>, channels: number): GpuGrid {
-    let g = this.grids.get(key);
-    if (!g) { this.grids.set(key, (g = uploadGrid(this.gpu, grid, values, channels))); lru(this.grids, 24, (v) => v.destroy()); }
-    return g;
+    return this.grids.getOr(key, () => uploadGrid(this.gpu, grid, values, channels));
   }
 
   /** box-blurred copy of a resident grid (core's `boxBlur` semantics) */
   blur(key: string, values: GpuGrid, radius: number): GpuGrid {
     if (radius <= 0) return values;
-    const k = `${key}|blur${radius}`;
-    let g = this.blurred.get(k);
-    if (!g) { this.blurred.set(k, (g = blurResidentSync(this.gpu, values, radius))); lru(this.blurred, 8, (v) => v.destroy()); }
-    return g;
+    return this.blurred.getOr(`${key}|blur${radius}`, () => blurResidentSync(this.gpu, values, radius));
+  }
+
+  /**
+   * Read the segment count of `set` back once its dispatch ran (one readback in flight per set); the family's
+   * complexity becomes a running max with a slow decay (half-life 60 s, so a cycle of animated levels keeps
+   * its peak), and an overflowed set is flagged for reallocation at the true count.
+   */
+  private track(cs: Counted, family: string, n: number): void {
+    if (cs.pending) return;
+    cs.pending = true;
+    const stamp = cs.stamp;
+    void this.gpu.readCounter(cs.segs.indirect, 1).then((count) => {
+      cs.pending = false;
+      const prev = this.complexity.get(family), now = performance.now();
+      const scaled = prev ? prev.records * (n / prev.n) * 0.5 ** ((now - prev.t) / 60_000) : 0; // isolines: segments ∝ n
+      this.complexity.set(family, { records: Math.max(count, scaled), n, t: now });
+      if (cs.stamp !== stamp) return;
+      const changed = cs.count !== count;
+      cs.count = count;
+      if (count > cs.segs.capacity) { cs.overflow = true; cs.stamp = ""; }
+      if (changed) this.invalidate(); // the resolution row shows the count; an overflow reallocates
+    }).catch(() => { cs.pending = false; });
+  }
+
+  /** the segment set for `setKey`, sized from the family's measured complexity (a modest guess before any) */
+  private isoSet(setKey: string, family: string, values: GpuGrid, max: number): Counted {
+    const n = Math.max(...values.grid.size);
+    const cells = (values.grid.size[0]! - 1) * (values.grid.size[1]! - 1);
+    let cs = this.isoSets.get(setKey);
+    if (cs?.overflow) { this.complexity.set(family, { records: Math.max(cs.count, this.complexity.get(family)?.records ?? 0), n, t: performance.now() }); this.isoSets.delete(setKey); cs = undefined; this.info.overflow = true; }
+    const cx = this.complexity.get(family);
+    const want = Math.max(1, Math.min(max, Math.floor(this.gpu.maxBufferBytes / (SEG_FLOATS * 4)), Math.max(MIN_RECORDS, Math.ceil(cx ? cx.records * (n / cx.n) * MARGIN : Math.min(cells, 1 << 18)))));
+    if (cs && (cs.segs.capacity < want / MARGIN || cs.segs.capacity > want * 4)) { this.isoSets.delete(setKey); cs = undefined; }
+    if (!cs) cs = this.isoSets.set(setKey, { segs: allocSegments(this.gpu, want, false), stamp: "", pending: false, count: 0, overflow: false });
+    return cs;
   }
 
   /** marching-squares isolines of a resident grid with Taubin smoothing on the edge graph (non-exact path with `line` > 0) */
   smoothedIsolines(kernelKey: string, setKey: string, values: GpuGrid, colour: ScalarFieldData | undefined, level: number, iterations: number): GpuSegments {
-    let kernel = this.smoothKernels.get(kernelKey);
-    if (!kernel) { this.smoothKernels.set(kernelKey, (kernel = smoothedIsolines(this.gpu, values, colour))); lru(this.smoothKernels, 8, (v) => v.destroy()); }
-    let set = this.isoSets.get(setKey);
-    if (set && set.segs.capacity !== kernel.capacity) { set.segs.destroy(); this.isoSets.delete(setKey); set = undefined; }
-    if (!set) { this.isoSets.set(setKey, (set = { segs: allocSegments(this.gpu, kernel.capacity, false), stamp: "" })); lru(this.isoSets, 32, (v) => v.segs.destroy()); }
+    const kernel = this.smoothKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => smoothedIsolines(this.gpu, values, colour)); // the kernel reads THIS grid's buffer
+    const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|smooth`;
+    const cs = this.isoSet(setKey, family, values, kernel.capacity);
     const stamp = `${kernelKey}|${level}|it${iterations}`;
-    if (set.stamp !== stamp) { resetSegments(this.gpu, set.segs); kernel.dispatch(set.segs, level, iterations); set.stamp = stamp; }
-    return set.segs;
+    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, iterations); cs.stamp = stamp; this.track(cs, family, Math.max(...values.grid.size)); }
+    this.info.segments += cs.count; this.info.capacity += cs.segs.capacity;
+    return cs.segs;
   }
 
   /**
@@ -89,39 +144,27 @@ export class FusedGeometry {
    * `setKey` identifies the slot (kernel + level index) whose segment set is reused across level changes.
    */
   isolines(kernelKey: string, setKey: string, field: ScalarFieldData, values: GpuGrid, colour: ScalarFieldData | undefined, level: number, tol: number, exact?: boolean): GpuSegments {
-    let kernel = this.isoKernels.get(kernelKey);
-    if (!kernel) { this.isoKernels.set(kernelKey, (kernel = fusedIsolines(this.gpu, field, values, colour, { exact }))); lru(this.isoKernels, 16, () => {}); }
-    const cells = (values.grid.size[0]! - 1) * (values.grid.size[1]! - 1);
-    const capacity = Math.min(kernel.capacity, Math.max(cells * 8, 65536));
-    let set = this.isoSets.get(setKey);
-    if (set && set.segs.capacity !== capacity) { set.segs.destroy(); this.isoSets.delete(setKey); set = undefined; }
-    if (!set) { this.isoSets.set(setKey, (set = { segs: allocSegments(this.gpu, capacity, false), stamp: "" })); lru(this.isoSets, 32, (v) => v.segs.destroy()); }
+    const kernel = this.isoKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => fusedIsolines(this.gpu, field, values, colour, { exact }));
+    const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|${exact ? "exact" : "ms"}`; // the kernel key without its grid part
+    const cs = this.isoSet(setKey, family, values, kernel.capacity);
     const stamp = `${kernelKey}|${level}|${tol.toExponential(3)}`;
-    if (set.stamp !== stamp) {
-      resetSegments(this.gpu, set.segs);
-      kernel.dispatch(set.segs, level, tol);
-      set.stamp = stamp;
-    }
-    return set.segs;
+    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, tol); cs.stamp = stamp; this.track(cs, family, Math.max(...values.grid.size)); }
+    this.info.segments += cs.count; this.info.capacity += cs.segs.capacity;
+    return cs.segs;
   }
 
   /** segments of the streamlines through resident `vectors` from `seeds` (key covers everything that affects them) */
   streamlines(key: string, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour: ScalarFieldData | undefined): GpuSegments {
-    let e = this.streamKernels.get(key);
-    if (!e) {
+    return this.streamKernels.getOr(key, () => {
       const kernel = fusedStreamlines(this.gpu, vectors, seeds, opts, colour);
       const segs = allocSegments(this.gpu, kernel.capacity, true);
       kernel.dispatch(segs);
-      this.streamKernels.set(key, (e = { kernel, segs }));
-      lru(this.streamKernels, 8, (v) => v.segs.destroy());
-    }
-    return e.segs;
+      return { kernel, segs };
+    }).segs;
   }
 
   /** CPU-computed lines packed as Seg records (GPU render of CPU geometry) */
   uploadedSegments(key: string, pack: () => Float32Array, particles: boolean): GpuSegments {
-    let s = this.uploaded.get(key);
-    if (!s) { this.uploaded.set(key, (s = uploadSegments(this.gpu, pack(), particles))); lru(this.uploaded, 32, (v) => v.destroy()); }
-    return s;
+    return this.uploaded.getOr(key, () => uploadSegments(this.gpu, pack(), particles));
   }
 }
