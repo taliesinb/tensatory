@@ -39,7 +39,8 @@ pipelines and either draw with Canvas 2D or upload their results. See
   ⤒ = open a local JSON), `2D space` (points / box flags; view: fit, flip x,
   flip y, cw, ccw), `colorfield` (strip tick = raster on/off; resolution,
   smooth), `isolines` (value, split, opacity, metric blur, line smoothing,
-  ▶ + rate), `streamlines` (lines, length, opacity, tail, split, ▶).
+  ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
+  strat / JL / cover; lines, length, opacity, tail, split, ▶).
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 
@@ -76,15 +77,33 @@ box (symbolic fields fall back to 128).
   [performance.md](performance.md)). Colour from I_C per vertex.
 * Streamlines: integrated through a sampled copy of the S_∇ field on the
   *streamline grid*, ½ cell per step; `length` counts steps and `tail` counts
-  cells of that grid. The streamline grid follows the same rule as the scalar
+  cells of that grid. `dir` (ascending / descending, `?sdir=`, a per-bundle
+  UI value) is the integration sign: each path starts at its seed and follows
+  the S_∇ field or its inverse (one way, `bidirectional: false`, so only the
+  ends of the lines bunch up where the flow converges — except in `bi-strat`,
+  which integrates both ways through the seed). It is NOT the ▶/◀
+  playback direction (`state.dir.stream`, saved
+  per space, shift-click ▶): with a converging field, descending lines drain
+  into the sinks — a different set of lines than ascending ones played
+  backwards. `mode`
+  (`?smode=bi-strat|strat|JL|cover`, a per-bundle UI value) picks core's
+  seeding strategy and the `bidirectional` flag (`STREAM_MODES`; see
+  [isolines.md](isolines.md)): stratified seeds are generated per frame key
+  as before; JL and cover plans are sequential
+  CPU work over the integrable (sampled) field, cached in `PLAN_CACHE` per
+  (field, grid, mode, options). The CPU / read-back paths draw the plan's
+  lines directly; the fused path hands the planned seeds with their step
+  budgets to `fusedStreamlines`, which re-integrates them resident (so the
+  colour field is still evaluated per vertex on the GPU). The streamline grid follows the same rule as the scalar
   grid above (the vector field's own grid when `resolution` is deselected,
   else `resolution` over the view box, symbolic → 128) but is derived from
   the S_∇ field alone (`streamGrid`), never from `currentGrid`: that one flips
   between a native grid and the 128 fallback as the colourfield / isolines
   panels are toggled, which used to rescale the streamlines with them.
   Particles are always drawn at the current
-  phase; ▶ advances the clock, ◀ (shift-click) reverses the flow direction
-  itself (◀ = against the field = descent). Plain click only toggles play.
+  phase; ▶ advances the clock, ◀ (shift-click) runs it backwards so the
+  particles travel the other way along the same lines. Plain click only
+  toggles play.
   Space starts both animations when none is playing, otherwise pauses.
 
 ## Legend and cursor

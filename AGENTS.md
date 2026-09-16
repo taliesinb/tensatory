@@ -102,9 +102,18 @@ profiling test.
   given a scalar uses its gradient (∇ glyph), a scalar slot given a vector uses
   its norm (|·| glyph; log-scaled codomain, since gradient norms span orders
   of magnitude and vanish at critical points). Column headers toggle their
-  panel; disabled columns dim. Streamline flow direction is the ▶/◀ play direction (◀ = against the
-  field = descent); shift-click a ▶ reverses, plain click only toggles play,
-  space starts both animations when none is playing else pauses. Colormaps
+  panel; disabled columns dim. Streamlines have `dir` (ascending /
+  descending: whether each path is integrated following the S_∇ field or its
+  inverse — which lines get drawn) and `mode` (bi-strat / strat / JL / cover:
+  seeding and oversampling — strat = stratified seeds, each line starts at
+  its seed and runs in `dir`; bi-strat = the same seeds integrated both ways
+  through the seed; JL = Jobard–Lefer evenly spaced, planned on the CPU into
+  seeds with per-seed step budgets that the GPU kernels re-integrate; cover =
+  strat plus seeds in starved cells; see `notes/isolines.md`).
+  ▶/◀ on a panel strip is purely the playback direction of that animation
+  (particles forward / backward along the drawn lines); shift-click a ▶ to
+  reverse it, plain click only toggles play, space starts both animations
+  when none is playing else pauses. Colormaps
   are per field: one legend bar per coloured field listing its slots (click
   the name to cycle), black bars for shape-only fields (I_V, S_∇ source), red
   θ* detent, white isoline notches and cursor pip. Every bar is a colormap

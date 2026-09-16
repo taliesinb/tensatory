@@ -34,6 +34,13 @@ export interface StreamlineOptions {
   step: number;
   /** +1 follows the field (ascent for a gradient), -1 flows against it (descent) */
   sign?: 1 | -1;
+  /**
+   * integrate against the direction as well, so a line passes through its seed (default true). The viewer
+   * passes false: a line then STARTS at its seed and runs in the chosen direction only, so line starts stay
+   * as distributed as the seeds and lines only concentrate where the flow converges (their ends) — with both
+   * ways, the backward halves of descending lines are ascending lines and pile up at the field's sources.
+   */
+  bidirectional?: boolean;
   /** RNG seed for the jitter */
   seed?: number;
   /** restrict seeds / integration to this box (defaults to the field's box) */
@@ -128,7 +135,7 @@ export function planStreamlines(field: VectorFieldData, opts: StreamlineOptions)
   return { seeds, lines: integrateFromSeeds(field, seeds, opts), separation: seedCellSide(box, opts.count) };
 }
 
-type IntegrateOpts = Pick<StreamlineOptions, "maxSteps" | "step" | "sign" | "box">;
+type IntegrateOpts = Pick<StreamlineOptions, "maxSteps" | "step" | "sign" | "box" | "bidirectional">;
 
 /** one-direction RK4 integrator on the unit field; `stop(q, n)` (n = steps taken so far) ends a line early */
 function makeIntegrator(field: VectorFieldData, opts: IntegrateOpts) {
@@ -183,9 +190,9 @@ function assemble(D: number, seed: ArrayLike<number>, back: number[], fwd: numbe
 }
 
 /**
- * Integrate one streamline per seed (both directions, `seeds.budgets` capping the steps per direction
- * below `opts.maxSteps` where present). Seeds whose line has fewer than 2 points are skipped, so the
- * result may be shorter than the seed list.
+ * Integrate one streamline per seed (both directions unless `bidirectional` is false, `seeds.budgets`
+ * capping the steps per direction below `opts.maxSteps` where present). Seeds whose line has fewer than
+ * 2 points are skipped, so the result may be shorter than the seed list.
  */
 export function integrateFromSeeds(field: VectorFieldData, seeds: StreamlineSeeds, opts: IntegrateOpts): Streamline[] {
   const D = field.dimCount;
@@ -193,10 +200,10 @@ export function integrateFromSeeds(field: VectorFieldData, seeds: StreamlineSeed
   const total = seeds.phases.length;
   const lines: Streamline[] = [];
   const seed = new Float64Array(D);
-  const M = opts.maxSteps, budgets = seeds.budgets;
+  const M = opts.maxSteps, MB = opts.bidirectional === false ? 0 : M, budgets = seeds.budgets;
   for (let c = 0; c < total; c++) {
     for (let d = 0; d < D; d++) seed[d] = seeds.points[c * D + d]!;
-    const nb = budgets ? Math.min(M, budgets[2 * c]!) : M, nf = budgets ? Math.min(M, budgets[2 * c + 1]!) : M;
+    const nb = budgets ? Math.min(MB, budgets[2 * c]!) : MB, nf = budgets ? Math.min(M, budgets[2 * c + 1]!) : M;
     const line = assemble(D, seed, integrate(seed, -1, nb), integrate(seed, 1, nf), opts.step, seeds.phases[c]!);
     if (line) lines.push(line);
   }
@@ -255,7 +262,7 @@ class PointHash {
 export function evenlySpacedStreamlines(field: VectorFieldData, opts: StreamlineOptions): StreamlinePlan {
   if (field.dimCount !== 2) throw new Error("evenly-spaced streamlines are 2D only");
   const box = opts.box ?? field.box;
-  const h = opts.step, M = opts.maxSteps;
+  const h = opts.step, M = opts.maxSteps, MB = opts.bidirectional === false ? 0 : M;
   const dSep = seedCellSide(box, opts.count);
   const dTest = (opts.testRatio ?? 0.5) * dSep;
   const minOrd = Math.max(2, Math.ceil((2 * dSep) / h)); // own points closer along the arc than this do not stop a line
@@ -280,7 +287,7 @@ export function evenlySpacedStreamlines(field: VectorFieldData, opts: Streamline
       return false;
     };
     hash.add(sx, sy, id, 0);
-    const back = integrate([sx, sy], -1, M, stopFor(-1));
+    const back = integrate([sx, sy], -1, MB, stopFor(-1));
     const fwd = integrate([sx, sy], 1, M, stopFor(1));
     const line = assemble(2, [sx, sy], back, fwd, h, rand());
     if (!line) return false; // its seed stays in the hash: nothing else can start there either

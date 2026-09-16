@@ -8,6 +8,7 @@ import {
   SymbolicVectorFieldData,
   buildScalarFieldData,
   contourField,
+  evenlySpacedStreamlines,
   integrateFromSeeds,
   marchingSquaresSegments,
   streamlineSeeds,
@@ -136,6 +137,25 @@ describe("fused streamlines", () => {
       const arcs = idx.map((i) => out[i * SEG_FLOATS + 6]!).sort((a, b) => a - b);
       arcs.forEach((a, k) => expect(a).toBeCloseTo(k * opts.step, 5));
     }
+    segs.destroy(); vres.destroy();
+  });
+  it("sizes capacity from the budgets and emits exactly the planned segments", async () => {
+    if (!gpu) return;
+    const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: bowl }, vectors: {} });
+    const g = new DenseGrid([64, 64], bowl.box);
+    const vres = await sampleResident(gpu, grad, g);
+    const dense = new DenseVectorFieldData(g, grad.sampleOn(g));
+    const opts = { count: 80, maxSteps: 300, step: 0.02, sign: -1 as const, box: bowl.box, seed: 3 };
+    const plan = evenlySpacedStreamlines(dense, opts);
+    const kernel = fusedStreamlines(gpu, vres, plan.seeds, opts);
+    let planned = 0;
+    for (const l of plan.lines) planned += l.points.length / 2 - 1;
+    expect(kernel.capacity).toBe(planned); // Σ budgets, not lines × 2 × maxSteps
+    expect(kernel.capacity).toBeLessThan(plan.lines.length * 2 * opts.maxSteps);
+    const segs = allocSegments(gpu, kernel.capacity, true);
+    await kernel.run(segs);
+    const out = await readSegments(gpu, segs);
+    expect(out.length / SEG_FLOATS).toBe(planned);
     segs.destroy(); vres.destroy();
   });
 });

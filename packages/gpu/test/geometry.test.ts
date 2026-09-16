@@ -12,6 +12,7 @@ import {
   buildScalarFieldData,
   buildVectorFieldData,
   contourField,
+  evenlySpacedStreamlines,
   integrateFromSeeds,
   marchingSquaresSegments,
   projectToLevel,
@@ -142,6 +143,43 @@ describe("streamline kernel", () => {
       for (let k = 0; k < l.length; k += 2) if (Math.abs(l[k]! - sx) < 1e-6 && Math.abs(l[k + 1]! - sy) < 1e-6) { found = true; break; }
       expect(found).toBe(true);
     }
+  });
+  it("one-way integration matches core and starts at the seed", async () => {
+    if (!gpu) return;
+    const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: bowl }, vectors: {} });
+    const g = new DenseGrid([64, 64], bowl.box);
+    const dense = new DenseVectorFieldData(g, grad.sampleOn(g));
+    const seeds = streamlineSeeds(bowl.box, 40, 9);
+    const opts = { maxSteps: 50, step: 0.03, sign: -1 as const, box: bowl.box, bidirectional: false };
+    const cpu = integrateFromSeeds(dense, seeds, opts);
+    const gp = await gpuIntegrateFromSeeds(gpu, dense, seeds, opts);
+    expect(gp.length).toBe(cpu.length);
+    gp.forEach((l, i) => {
+      expect(l.points[0]).toBeCloseTo(seeds.points[2 * i]!, 6); expect(l.points[1]).toBeCloseTo(seeds.points[2 * i + 1]!, 6);
+      expect(Math.abs(l.points.length - cpu[i]!.points.length)).toBeLessThanOrEqual(2 * 2);
+    });
+  });
+
+  it("honours per-seed step budgets (evenly-spaced plan re-integrated)", async () => {
+    if (!gpu) return;
+    const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: bowl }, vectors: {} });
+    const g = new DenseGrid([64, 64], bowl.box);
+    const dense = new DenseVectorFieldData(g, grad.sampleOn(g));
+    const opts = { count: 80, maxSteps: 300, step: 0.02, sign: -1 as const, box: bowl.box, seed: 3 };
+    const plan = evenlySpacedStreamlines(dense, opts);
+    expect(plan.seeds.budgets).toBeDefined();
+    const gp = await gpuIntegrateFromSeeds(gpu, dense, plan.seeds, opts);
+    expect(gp.length).toBe(plan.lines.length);
+    // a smooth bowl: the budgeted f32 lines have exactly the planned point counts and follow the f64 lines closely
+    gp.forEach((l, i) => {
+      const c = plan.lines[i]!;
+      expect(l.points.length).toBe(c.points.length);
+      expect(l.phase).toBe(c.phase);
+      for (let k = 0; k < l.points.length; k++) expect(Math.abs(l.points[k]! - c.points[k]!)).toBeLessThan(2e-3);
+    });
+    // without budgets the same seeds run to the cap: strictly more points somewhere
+    const free = await gpuIntegrateFromSeeds(gpu, dense, { points: plan.seeds.points, phases: plan.seeds.phases }, opts);
+    expect(free.reduce((a, l) => a + l.points.length, 0)).toBeGreaterThan(gp.reduce((a, l) => a + l.points.length, 0));
   });
   it("matches core on a constant field exactly (deterministic, no drift)", async () => {
     if (!gpu) return;

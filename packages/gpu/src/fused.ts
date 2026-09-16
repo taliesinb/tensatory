@@ -5,8 +5,9 @@
 //  * fusedIsolines: per cell — marching squares, Newton projection of the two
 //    endpoints (symbolic fields), in-thread adaptive midpoint refinement into
 //    up to MAXP points, colour-field evaluation per vertex, append.
-//  * fusedStreamlines: per seed — RK4 both ways into scratch slots, then
-//    append segments with arc / length / phase and colour.
+//  * fusedStreamlines: per seed — RK4 both ways (within the seed's step
+//    budgets) into scratch slots, then append segments with arc / length /
+//    phase and colour.
 
 import { DenseGrid, type ScalarFieldData, type StreamlineSeeds } from "@tensatory/core";
 import type { GpuBackend } from "./device";
@@ -14,6 +15,7 @@ import { marchingSquaresWgsl, projectionWgsl } from "./isolines";
 import { ProgramBuilder } from "./program";
 import type { GpuGrid } from "./resident";
 import { SEG_APPEND_WGSL, SEG_WGSL, type GpuSegments } from "./segments";
+import { SEED_FLOATS, integrateWgsl, packSeeds } from "./flow";
 import { f32 } from "./wgsl";
 
 export const ISO_MAXP = 17; // points per refined seed segment (16 pieces)
@@ -156,6 +158,7 @@ export interface FusedStreamlines {
   /** integrate from the seeds and append the segments into `segs` */
   run(segs: GpuSegments): Promise<void>;
   dispatch(segs: GpuSegments): void;
+  /** worst-case segment count: Σ over seeds of the step budgets both ways (2·maxSteps without budgets) */
   readonly capacity: number;
   destroy(): void;
 }
@@ -166,18 +169,23 @@ export interface FusedStreamlineOptions {
   sign?: 1 | -1;
   /** integration box (defaults to the vector grid's box) */
   box?: { a: readonly number[]; b: readonly number[]; size: number[] };
+  /** also integrate against the direction from each seed (default true); false = lines start at their seeds */
+  bidirectional?: boolean;
 }
 
 /**
  * Build the fused streamline kernel over a resident vector grid (bilinear
  * interpolation), with optional colour field evaluated at every vertex.
+ * Seeds may carry per-seed step budgets (evenly-spaced planning): the kernel
+ * re-integrates exactly that many steps each way, and its scratch and segment
+ * capacity are sized from the budgets.
  */
 export function fusedStreamlines(backend: GpuBackend, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour?: ScalarFieldData): FusedStreamlines {
   const grid = vectors.grid;
   const box = opts.box ?? grid.box;
-  const sgn = opts.sign ?? 1, h = opts.step, M = opts.maxSteps;
-  const lines = seeds.phases.length;
-  const stride = 2 * M + 1;
+  const sgn = opts.sign ?? 1, h = opts.step;
+  const packed = packSeeds(seeds, opts.maxSteps, opts.bidirectional);
+  const lines = packed.lines;
   // the vector grid is read through a DenseVectorFieldData reader emitted by the builder; bind its data to the resident buffer
   // (the builder would upload a copy: instead we emit the reader against binding 2 by giving it a placeholder and rebinding)
   const b = new ProgramBuilder(new DenseGrid([2, 2], grid.box));
@@ -186,7 +194,7 @@ export function fusedStreamlines(backend: GpuBackend, vectors: GpuGrid, seeds: S
   const [nx, ny] = grid.size as [number, number];
   const sx = grid.strides[0]!, sy = grid.strides[1]!;
   const eps = 1e-6 * Math.max(box.size[0]!, box.size[1]!);
-  const capacity = lines * 2 * M;
+  const capacity = Math.max(1, packed.segments);
   const code = `${lib.code}
 ${SEG_WGSL}
 @group(0) @binding(0) var<storage, read_write> segs: array<Seg>;
@@ -199,7 +207,7 @@ ${SEG_APPEND_WGSL}
 const A: vec2<f32> = vec2<f32>(${f32(box.a[0]!)}, ${f32(box.a[1]!)});
 const B: vec2<f32> = vec2<f32>(${f32(box.b[0]!)}, ${f32(box.b[1]!)});
 const EPS: f32 = ${f32(eps)};
-const H: f32 = ${f32(h)}; const SGN: f32 = ${f32(sgn)}; const M: i32 = ${M}; const STRIDE: i32 = ${stride};
+const H: f32 = ${f32(h)}; const SGN: f32 = ${f32(sgn)};
 fn inBox(q: vec2<f32>) -> bool { return q.x >= A.x - EPS && q.x <= B.x + EPS && q.y >= A.y - EPS && q.y <= B.y + EPS; }
 // bilinear read of the resident vector grid
 fn field(p: vec2<f32>) -> vec2<f32> {
@@ -221,30 +229,18 @@ fn dir(q: vec2<f32>) -> vec3<f32> {
   if (!isfinite_(l) || !(l > 1e-24)) { return vec3<f32>(0.0, 0.0, 0.0); }
   return vec3<f32>(v * (SGN / sqrt(l)), 1.0);
 }
-fn integrate(seed: vec2<f32>, s: f32, base: i32, stepDir: i32) -> i32 {
-  var q = seed; var n: i32 = 0;
-  for (var k = 0; k < M; k++) {
-    let k1 = dir(q); if (k1.z == 0.0) { break; }
-    let k2 = dir(q + s * 0.5 * H * k1.xy); if (k2.z == 0.0) { break; }
-    let k3 = dir(q + s * 0.5 * H * k2.xy); if (k3.z == 0.0) { break; }
-    let k4 = dir(q + s * H * k3.xy); if (k4.z == 0.0) { break; }
-    q = q + (s * H / 6.0) * (k1.xy + 2.0 * k2.xy + 2.0 * k3.xy + k4.xy);
-    if (!inBox(q)) { break; }
-    let o = (base + stepDir * (k + 1)) * 2;
-    scratch[o] = q.x; scratch[o + 1] = q.y; n++;
-  }
-  return n;
-}
+${integrateWgsl("scratch")}
 fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = i32(id.x);
   if (i >= ${lines}) { return; }
-  let seed = vec2<f32>(seeds[i * 3], seeds[i * 3 + 1]);
-  let phase = seeds[i * 3 + 2];
-  let base = i * STRIDE + M;
+  let s = i * ${SEED_FLOATS};
+  let seed = vec2<f32>(seeds[s], seeds[s + 1]);
+  let phase = seeds[s + 2];
+  let base = i32(seeds[s + 5]);
   scratch[base * 2] = seed.x; scratch[base * 2 + 1] = seed.y;
-  let nb = integrate(seed, -1.0, base, -1);
-  let nf = integrate(seed, 1.0, base, 1);
+  let nb = integrate(seed, -1.0, base, -1, i32(seeds[s + 3]));
+  let nf = integrate(seed, 1.0, base, 1, i32(seeds[s + 4]));
   let n = nb + 1 + nf;
   if (n < 2) { return; }
   let len = f32(n - 1) * H;
@@ -260,18 +256,16 @@ fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
     prev = cur; cPrev = cCur;
   }
 }`;
-  const seedData = new Float32Array(lines * 3);
-  for (let i = 0; i < lines; i++) { seedData[i * 3] = seeds.points[i * 2]!; seedData[i * 3 + 1] = seeds.points[i * 2 + 1]!; seedData[i * 3 + 2] = seeds.phases[i]!; }
   const kernel = (segs: GpuSegments) => ({
     code,
-    invocations: lines,
+    invocations: Math.max(1, lines),
     buffers: [
       { role: "rw" as const, buffer: segs.buffer },
       { role: "r" as const, data: lib.data },
       { role: "r" as const, buffer: vectors.buffer },
       { role: "rw" as const, buffer: segs.indirect },
-      { role: "r" as const, data: seedData },
-      { role: "rw" as const, size: lines * stride * 2 * 4 },
+      { role: "r" as const, data: packed.data.length ? packed.data : new Float32Array(SEED_FLOATS) },
+      { role: "rw" as const, size: Math.max(8, packed.points * 2 * 4) },
     ],
   });
   return {

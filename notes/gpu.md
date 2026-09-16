@@ -85,10 +85,14 @@ mostly shader compilation + readback, ~50–120 ms).
   topology and chords as core within tolerance; residuals ~1e-6 (f32) instead
   of ~1e-11.
 * **Streamlines** — `gpuIntegrateFromSeeds`: one invocation per seed, RK4 on
-  the unit field both ways into fixed slots; seeds and phases come from core's
-  `streamlineSeeds` (its LCG now uses `Math.imul`, so it is reproducible bit
-  for bit). Trajectories match core's until f32 drift near separatrices;
-  constant fields match exactly.
+  the unit field both ways (or forward only) into per-seed slots (`packSeeds`: `[x, y, phase,
+  back budget, fwd budget, slot]`, slots prefix-summed from the budgets, which
+  default to `maxSteps`); seeds and phases come from core's `streamlineSeeds`
+  (its LCG now uses `Math.imul`, so it is reproducible bit for bit) or from an
+  evenly-spaced / coverage plan (`planStreamlines`, whose budgets the kernel
+  honours). Trajectories match core's until f32 drift near separatrices;
+  constant fields match exactly; budgeted lines have exactly the planned
+  point counts.
 
 Two shader pitfalls found here: **`v != v` is optimized away under Metal's
 fast-math**, so NaN tests use bit patterns (`isnan_` / `isfinite_` in the
@@ -124,8 +128,9 @@ fused kernels; `readGrid` only when a CPU consumer needs values.
 squares → Newton projection of both endpoints → in-thread adaptive midpoint
 refinement (up to 16 pieces per seed segment, 4 rounds) → colour-field
 evaluation per vertex → append; sampled fields skip projection.
-`fusedStreamlines` integrates each seed both ways into scratch slots, then
-appends segments with arc / length / phase and colour. Both have `run`
+`fusedStreamlines` integrates each seed both ways (within its step budgets)
+into scratch slots, then appends segments with arc / length / phase and
+colour; scratch and capacity are sized from the budgets (Σ(nb + nf) segments). Both have `run`
 (awaited, for tests) and `dispatch` (fire-and-forget) forms; the GPU queue
 orders a dispatch before the frame's render pass, so a fused frame is
 completely synchronous from the CPU's point of view — no `await`, no readback,

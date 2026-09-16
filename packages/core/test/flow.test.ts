@@ -68,6 +68,21 @@ describe("streamline modes", () => {
     expect(lines[1]!.points[0]).toBeCloseTo(0.5, 10);
   });
 
+  it("one-way integration starts every line at its seed", () => {
+    const v = buildVectorFieldData({ type: "symbolicv", box: [[0, 1], [0, 1]], expr: { op: "constv", value: [1, 0] } }, 2);
+    const seeds = { points: Float64Array.from([0.5, 0.5, 0.2, 0.2]), phases: Float64Array.from([0.1, 0.2]) };
+    const fwd = integrateFromSeeds(v, seeds, { maxSteps: 10, step: 0.01, bidirectional: false });
+    fwd.forEach((l, i) => { expect(l.points.length / 2).toBe(11); expect(l.points[0]).toBeCloseTo(seeds.points[2 * i]!, 12); expect(l.points[20]).toBeCloseTo(seeds.points[2 * i]! + 0.1, 10); });
+    // descending: the line still starts at the seed and runs the other way
+    const back = integrateFromSeeds(v, seeds, { maxSteps: 10, step: 0.01, sign: -1, bidirectional: false });
+    expect(back[0]!.points[0]).toBeCloseTo(0.5, 12); expect(back[0]!.points[20]).toBeCloseTo(0.4, 10);
+    // evenly-spaced plans honour it too: budgets have no backward steps and re-integrate exactly
+    const plan = evenlySpacedStreamlines(grad, { count: 60, maxSteps: 200, step: 0.01, sign: -1, seed: 5, bidirectional: false });
+    for (let i = 0; i < plan.lines.length; i++) { expect(plan.seeds.budgets![2 * i]).toBe(0); expect(plan.lines[i]!.points[0]).toBe(plan.seeds.points[2 * i]); }
+    const again = integrateFromSeeds(grad, plan.seeds, { maxSteps: 200, step: 0.01, sign: -1, bidirectional: false });
+    expect(again.map((l) => l.points.length)).toEqual(plan.lines.map((l) => l.points.length));
+  });
+
   it("evenly-spaced lines keep their separation and re-integrate from the budgets", () => {
     const opts = { count: 100, maxSteps: 400, step: 0.005, sign: -1 as const, seed: 4, mode: "evenly-spaced" as const };
     const plan = evenlySpacedStreamlines(grad, opts);
@@ -90,15 +105,25 @@ describe("streamline modes", () => {
   });
 
   it("coverage fill seeds the starved cells", () => {
-    // field vanishing on the left half: stratified seeds there produce no lines, the right half is covered by long lines
-    const v = buildVectorFieldData({ type: "symbolicv", box: [[0, 1], [0, 1]], expr: { op: "scalev", vec: { op: "constv", value: [0, 1] }, by: { op: "max", vals: [0, { op: "sub", vals: [{ op: "coord", index: 0 }, 0.5] }] } } }, 2);
-    const strat = planStreamlines(v, { count: 64, maxSteps: 400, step: 0.01, seed: 2 });
-    const cov = coverageStreamlines(v, { count: 64, maxSteps: 20, step: 0.01, seed: 2 });
-    // short lines (20 steps each way) leave gaps between the seed rows; the fill adds seeds there
+    // a strongly divergent shear flow v = (1, 4y): lines fan out towards the corners, which stratified seeding leaves starved
+    const v = buildVectorFieldData({ type: "symbolicv", box: [[0, 1], [-1, 1]], expr: { op: "compv", coeffs: [1, { op: "mul", vals: [4, { op: "coord", index: 1 }] }] } }, 2);
+    const opts = { count: 32, maxSteps: 400, step: 0.01, seed: 2 };
+    const strat = planStreamlines(v, opts);
+    const cov = coverageStreamlines(v, opts);
+    // vertices per seed cell (4 × 8 cells of side 0.25), starved = fewer than ¼ of the median occupied cell
+    const starved = (lines: { points: Float64Array }[]): number => {
+      const hits = new Array<number>(32).fill(0);
+      for (const l of lines) for (let i = 0; i < l.points.length; i += 2) hits[Math.min(3, Math.floor(l.points[i]! * 4)) * 8 + Math.min(7, Math.floor((l.points[i + 1]! + 1) * 4))]!++;
+      const occ = hits.filter((h) => h > 0).sort((a, b) => a - b);
+      const threshold = Math.max(1, 0.25 * occ[occ.length >> 1]!);
+      return hits.filter((h) => h < threshold).length;
+    };
+    expect(starved(strat.lines)).toBeGreaterThan(0);
+    expect(starved(cov.lines)).toBeLessThan(starved(strat.lines));
     expect(cov.seeds.phases.length).toBeGreaterThan(strat.seeds.phases.length);
     expect(cov.lines.length).toBeGreaterThan(strat.lines.length);
     expect(cov.seeds.budgets).toBeUndefined();
     // all seeds re-integrate to the planned lines
-    expect(integrateFromSeeds(v, cov.seeds, { maxSteps: 20, step: 0.01 }).length).toBe(cov.lines.length);
+    expect(integrateFromSeeds(v, cov.seeds, opts).length).toBe(cov.lines.length);
   });
 });

@@ -204,6 +204,34 @@ export function makeDiscreteSlider(el0: HTMLElement): ValueControl {
 }
 
 /*******************************************************/
+/* choice: data-options="a,b,c" data-value="a" — a discrete slider over named options (never null); the same .seg look */
+
+export function makeChoice(el0: HTMLElement): ValueControl {
+  const el = el0 as ValueControl;
+  const options = el.dataset.options!.split(",");
+  const tips = el.dataset.tips?.split("|") ?? [];
+  let value = options.includes(el.dataset.value ?? "") ? el.dataset.value! : options[0]!;
+  // segment widths follow the labels, as the discrete sliders do
+  const segs = options.map((o, i) => { const s = document.createElement("div"); s.className = "seg"; s.textContent = o; s.style.flexGrow = String(o.length + 1); if (tips[i]) s.dataset.tip = tips[i]!; el.appendChild(s); return s; });
+  const paint = () => segs.forEach((s, i) => s.classList.toggle("on", options[i] === value));
+  const fire = (t: string) => el.dispatchEvent(new Event(t));
+  const set = (v: string) => { if (v === value) return; value = v; paint(); fire("input"); fire("change"); };
+  segs.forEach((s, i) => s.addEventListener("click", () => set(options[i]!)));
+  let over = false;
+  el.addEventListener("pointerenter", () => (over = true)); el.addEventListener("pointerleave", () => (over = false));
+  const step = (d: number) => set(options[Math.max(0, Math.min(options.length - 1, options.indexOf(value) + d))]!);
+  const wheel = wheelStepper(step);
+  el.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
+  window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowRight") { e.preventDefault(); step(1); } else if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); } });
+  Object.defineProperty(el, "value", {
+    get: () => value,
+    set: (v: string | null) => { if (v !== null && options.includes(v)) { value = v; paint(); } },
+  });
+  paint();
+  return el;
+}
+
+/*******************************************************/
 /* tab bar: a row of .tab buttons, one active */
 
 export interface TabItem { value: string; label: string; tip?: string; disabled?: boolean }

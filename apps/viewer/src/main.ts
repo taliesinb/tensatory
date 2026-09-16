@@ -17,12 +17,16 @@ import {
   contourField,
   integrateFromSeeds,
   isoContours,
+  planStreamlines,
   streamlineSeeds,
   taubinSmooth,
   type ContourResult,
   type Polyline,
   type ScalarFieldData,
   type Streamline,
+  type StreamlineMode,
+  type StreamlinePlan,
+  type StreamlineSeeds,
   type VectorFieldData,
 } from "@tensatory/core";
 import { MAPS, cmap, type Colormap } from "./colormap";
@@ -42,6 +46,7 @@ import {
   installTicks,
   fmtNum,
   installTooltips,
+  makeChoice,
   makeDiscreteSlider,
   makeSlider,
   syncTicks,
@@ -56,13 +61,14 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 /* widgets */
 
 installLogCapture();
+for (const el of document.querySelectorAll<HTMLElement>(".ch")) makeChoice(el); // before the tooltips: their options carry tips
 installTooltips();
 installTicks();
 for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
 
 const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim"] as const;
-const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
+const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -70,6 +76,24 @@ const ui = {
   ...(Object.fromEntries(VALUES.map((id) => [id, $<HTMLElement>(id) as ValueControl])) as Record<ValueId, ValueControl>),
 };
 const num = (id: ValueId): number | null => { const v = ui[id].value; return v === null ? null : +v; };
+/**
+ * the streamline seeding mode: the `smode` flipper's label mapped to core's mode plus whether lines are integrated
+ * both ways through their seeds (bi-strat: the classic picture) or start at their seeds and run in `dir` only (the
+ * others: line starts stay as distributed as the seeds, lines only bunch up where the flow converges)
+ */
+const STREAM_MODES: Record<string, { mode: StreamlineMode; bidirectional: boolean }> = {
+  "bi-strat": { mode: "stratified", bidirectional: true },
+  strat: { mode: "stratified", bidirectional: false },
+  JL: { mode: "evenly-spaced", bidirectional: false },
+  cover: { mode: "coverage", bidirectional: false },
+};
+const streamMode = (): { mode: StreamlineMode; bidirectional: boolean } => STREAM_MODES[ui.smode.value ?? "strat"] ?? STREAM_MODES.strat!;
+/**
+ * the integration sign from the `dir` flipper: +1 follows the S∇ field (ascent for a gradient), −1 its inverse
+ * (descent). Independent of the ▶/◀ playback direction: a converging field drains descending lines into its sinks,
+ * which is not the same picture as ascending lines played backwards.
+ */
+const streamSign = (): 1 | -1 => (ui.sdir.value === "ascending" ? 1 : -1);
 const syncIsoRate = () => { $("isoRate").style.display = ui.isoAnim.checked ? "" : "none"; };
 ui.isoAnim.addEventListener("change", syncIsoRate);
 syncIsoRate();
@@ -124,12 +148,12 @@ interface State {
   dirty: boolean;
   paused: boolean;
   animClock: number;
-  /** animation directions (+1 forward, -1 backward); shift-click a ▶ to reverse. For streamlines the
-   *  direction is the flow direction itself (-1 = against the field, i.e. descent for a gradient) */
+  /** animation (playback) directions (+1 forward, -1 backward); shift-click a ▶ to reverse. For streamlines this
+   *  moves the particles forward or backward along the drawn lines; the integration direction is the `dir` control */
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
+const state: State = { bundle: undefined, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -155,7 +179,7 @@ function applyModes(): void {
   const is3 = spaceDims() === 3;
   tabBar($("renderBar"), [{ value: "canvas", label: "canvas", disabled: is3, tip: is3 ? "3D spaces render with WebGPU only" : "" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], is3 ? "gpu" : modes.render, (v) => { modes.render = v as Render; applyModes(); });
   $("pickCompute").textContent = `${sampler.label}${sampler.check ? " — agreement check on (see L)" : ""}`;
-  STREAM_CACHE.clear(); isoCache = undefined; // geometry produced by the other backend
+  STREAM_CACHE.clear(); PLAN_CACHE.clear(); isoCache = undefined; // geometry produced by the other backend
   state.dirty = true;
 }
 let usable = { scalars: [] as string[], vectors: [] as string[] };
@@ -457,6 +481,24 @@ function streamGrid(v: VectorUse, box: Box): DenseGrid {
   return squareGrid(box, res ?? 128);
 }
 
+/**
+ * Planned seed sets (JL / coverage modes): sequential CPU work over the integrable field, cached per
+ * (field, grid, mode, options). The plan carries the seeds with their step budgets (for the GPU kernels,
+ * which re-integrate them resident) and the lines themselves (used directly by the CPU / read-back paths).
+ */
+const PLAN_CACHE = new Map<string, StreamlinePlan>();
+function streamPlan(key: string, field: VectorFieldData, opts: { count: number; maxSteps: number; step: number; sign: 1 | -1; box: Box; mode: StreamlineMode; bidirectional: boolean }): StreamlinePlan {
+  let plan = PLAN_CACHE.get(key);
+  if (!plan) {
+    const t0 = performance.now();
+    plan = planStreamlines(field, { ...opts, seed: 12345 });
+    console.log(`streamlines (${opts.mode}): planned ${plan.lines.length} lines, separation ${plan.separation.toExponential(2)}, in ${(performance.now() - t0).toFixed(1)} ms`);
+    PLAN_CACHE.set(key, plan);
+    if (PLAN_CACHE.size > 8) PLAN_CACHE.delete(PLAN_CACHE.keys().next().value!);
+  }
+  return plan;
+}
+
 let stream: StreamSet | undefined;
 function streamlines(view: Box): StreamSet | undefined {
   const v = streamVector();
@@ -464,23 +506,25 @@ function streamlines(view: Box): StreamSet | undefined {
   if (!v || count === null) { stream = undefined; return undefined; }
   const grid = streamGrid(v, view);
   const maxSteps = num("slen")!;
-  const sign = state.dir.stream;
+  const sign = streamSign(), { mode, bidirectional } = streamMode();
   const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
   const step = 0.5 * cell;
   const field = integrableVector(v, grid);
   if (!field) { stream = undefined; return undefined; } // still sampling
   const box = field.box.intersect(grid.box) ?? field.box;
-  const key = [v.id, count, maxSteps, sign, step.toExponential(4), box.intervals.flat().join(",")].join("|");
+  const key = [v.id, mode, bidirectional, count, maxSteps, sign, step.toExponential(4), box.intervals.flat().join(",")].join("|");
   let set = STREAM_CACHE.get(key);
   if (!set) {
-    const seeds = streamlineSeeds(box, count, 12345);
     let lines: Streamline[] | undefined;
-    if (geometry) {
-      lines = geometry.streamlines(key, field, seeds, { maxSteps, step, sign, box });
+    const iopts = { maxSteps, step, sign, box, bidirectional };
+    if (mode !== "stratified") {
+      lines = streamPlan(key, field, { count, mode, ...iopts }).lines; // planning integrates: nothing left for the GPU
+    } else if (geometry) {
+      lines = geometry.streamlines(key, field, streamlineSeeds(box, count, 12345), iopts);
       if (!lines) return stream; // still integrating: keep showing the previous set
     } else {
       const t0 = performance.now();
-      lines = integrateFromSeeds(field, seeds, { maxSteps, step, sign, box });
+      lines = integrateFromSeeds(field, streamlineSeeds(box, count, 12345), iopts);
       console.log(`streamlines: ${lines.length} lines in ${(performance.now() - t0).toFixed(1)} ms`);
     }
     set = { lines, step, cell, colourKey: "" };
@@ -683,11 +727,21 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       const size = [0, 1].map((d) => Math.max(2, Math.round(vbox.size[d]! / (sgrid.spacing[d]! || 1)) + 1));
       const vgrid = new DenseGrid(size, vbox);
       const vectors = F.grid(`vec:${gridKey(v, vgrid)}`, v.data, vgrid);
-      const maxSteps = num("slen")!, step = 0.5 * cell, sign = state.dir.stream;
-      const seeds = streamlineSeeds(vbox, count, 12345);
-      const key = [v.id, gridKey(v, vgrid), count, maxSteps, sign, step.toExponential(4), sc?.id ?? ""].join("|");
-      const segs = F.streamlines(key, vectors, seeds, { maxSteps, step, sign, box: vbox }, sc?.data);
-      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(cell), ...colour });
+      const maxSteps = num("slen")!, step = 0.5 * cell, sign = streamSign(), { mode, bidirectional } = streamMode();
+      const key = [v.id, gridKey(v, vgrid), mode, bidirectional, count, maxSteps, sign, step.toExponential(4)].join("|");
+      const iopts = { maxSteps, step, sign, box: vbox, bidirectional };
+      let seeds: StreamlineSeeds | undefined;
+      if (mode === "stratified") seeds = streamlineSeeds(vbox, count, 12345);
+      else {
+        // JL / coverage plans are sequential: planned on the CPU through the same grid (sampled once), then the
+        // fused kernel re-integrates the planned seeds within their step budgets — resident, no per-frame cost
+        const field = integrableVector(v, sgrid);
+        if (field) seeds = streamPlan(key, field, { count, mode, ...iopts }).seeds;
+      }
+      if (seeds) {
+        const segs = F.streamlines(`${key}|${sc?.id ?? ""}`, vectors, seeds, iopts, sc?.data);
+        gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(cell), ...colour });
+      }
     } else if (st) {
       const key = `stream|${v.id}|${st.lines.length}|${st.step}|${st.colourKey}|${st.lines[0]?.points[0] ?? 0}|${st.lines.length && st.lines[st.lines.length - 1]!.points.length}`;
       const segs = F.uploadedSegments(key, () => packStreamlines(st.lines, st.step, st.colours), true);
@@ -916,7 +970,8 @@ function loadOpts(): boolean {
     if (o.intervals) { state.intervals = {}; for (const [id, v] of Object.entries(o.intervals)) { const s = asSelection(v); if (!isNoSelection(s)) state.intervals[id] = s; } }
     if (so?.sel) for (const k of SLOTS) { const id = so.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
     if (so?.view) { renderer.view = { ...renderer.view, ...so.view }; viewCustom = so.view.scale !== undefined; }
-    if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: so.dir.stream === -1 ? -1 : 1 };
+    // dir.stream used to be the integration sign (now the `sdir` UI value): saves without `sdir` predate that and are not playback directions
+    if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: o.ui?.sdir !== undefined && so.dir.stream === -1 ? -1 : 1 };
     if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...so.camera }; view3d.cameraCustom = true; }
     syncPlayGlyphs();
   } finally { loadingOpts = false; }
@@ -947,7 +1002,7 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
-  rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
+  rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !buildErrors.has(id) && bundle.scalarField(id).domain === m),
     vectors: bundle.vectorFieldIds.filter((id) => !buildErrors.has(id) && bundle.vectorField(id).domain === m),
@@ -965,7 +1020,7 @@ function setSpace(id: string, fromUser: boolean): void {
   const exact = first ? bundle.scalarField(first).spec.exactGradient : undefined;
   const sel: Sel = { c: first, iv: first, ic: NONE, sg: exact && usable.vectors.includes(exact) ? exact : first, sc: NONE };
   state.sel = { ...sel }; state.lockedSel = { ...sel };
-  state.dir = { iso: 1, stream: -1 }; syncPlayGlyphs();
+  state.dir = { iso: 1, stream: 1 }; syncPlayGlyphs();
   viewCustom = false;
   renderer.view = { ...renderer.view, flipX: false, flipY: false, rot: 0 };
   if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
@@ -985,7 +1040,7 @@ function setSpace(id: string, fromUser: boolean): void {
 
 function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
   const errors = buildErrors;
   $("pickAbout").textContent = [bundle.name, bundle.spec.description ?? ""].filter(Boolean).join(" — ");
@@ -1118,7 +1173,7 @@ let lastT = performance.now();
 function frame(now: number): void {
   const dt = state.paused ? 0 : Math.min(0.1, (now - lastT) / 1000);
   lastT = now;
-  if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += dt; state.dirty = true; }
+  if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
     ui.isoValue.value = String((((+ui.isoValue.value! + (state.dir.iso * dt) / cycle) % 1) + 1) % 1);

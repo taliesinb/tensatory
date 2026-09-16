@@ -52,12 +52,41 @@ lines.
 
 ## Streamlines (`flow/streamlines.ts`)
 
-`integrateStreamlines(field, {count, maxSteps, step, sign, seed, box})`:
-seeds on a jittered grid of ≈`count` cells filling the box, RK4 on the *unit*
-field (so vertices are spaced `step` apart), integrated both ways from each
-seed, stopping where the field vanishes or the box is left. `sign = −1` flows
-against the field (descent for a gradient). Each line carries its arc length
-and a random phase for particle animation.
+`integrateStreamlines(field, {count, maxSteps, step, sign, seed, box, mode})`:
+RK4 on the *unit* field (so vertices are spaced `step` apart), stopping
+where the field vanishes or the box is left. `sign = −1` flows against the
+field (descent for a gradient). By default a line is integrated both ways
+from its seed; with `bidirectional: false` (what the viewer passes) it
+*starts* at its seed and runs in the chosen direction only, so line starts
+stay as distributed as the seeds and lines only concentrate where the flow
+converges — integrating both ways, the backward halves of descending lines
+are ascending lines and pile up at the field's sources. Each line carries
+its arc length and a random phase for particle animation.
+
+`mode` is how oversampling is handled (`planStreamlines` returns the seeds
+*and* the lines for any mode):
+
+* `stratified` (default) — `streamlineSeeds`: one jittered seed per cell of a
+  grid of ≈`count` cells filling the box, every line run to `maxSteps`. Cheap
+  and embarrassingly parallel, but lines pile up where the field converges
+  (the valley of a descent) and leave starved patches elsewhere.
+* `evenly-spaced` — Jobard–Lefer (`evenlySpacedStreamlines`, 2D): separation
+  d_sep = the seed-cell side for `count` (so `count` becomes a density), a
+  line stops within d_test = ½·d_sep of another line (or of its own distant
+  past), candidate seeds sit d_sep to either side of every vertex of the
+  accepted lines (FIFO front, spatial hash of all vertices), and the jittered
+  stratified seeds restart the front when it is exhausted (disconnected
+  regions). Sequential; ~10–100 ms in the viewer. The result's seeds carry
+  per-seed step **budgets** `[back, fwd]`, which `integrateFromSeeds` and the
+  GPU kernels honour — re-integrating the seeds reproduces the plan exactly
+  (f64) or to f32 accuracy, with no spatial test, so the fused kernel stays
+  resident and its scratch / segment capacity is Σ budgets instead of
+  lines × 2 × maxSteps.
+* `coverage` (`coverageStreamlines`) — stratified, then up to two rounds of
+  fill: vertices are histogrammed on the seed grid and every starved cell
+  (fewer than ¼ of the median hit count of the occupied cells) gets one more
+  jittered seed. Fixes the dark patches; the extra lines still drain into the
+  valleys.
 
 Both isolines (exact projection) and streamline integration also exist as GPU
 kernels with agreement tests — see [gpu.md](gpu.md).

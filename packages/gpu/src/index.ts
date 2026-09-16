@@ -6,8 +6,8 @@ export { FunctionEmitter, PRELUDE, expandGrad, f32, keyOf, vecType } from "./wgs
 export type { ArgBindings } from "./wgsl";
 export { gpuMarchingSquaresSegments, gpuProjector, gpuExactIsoContours } from "./isolines";
 export type { GpuProjector } from "./isolines";
-export { gpuIntegrateFromSeeds } from "./flow";
-export type { GpuStreamlineOptions } from "./flow";
+export { gpuIntegrateFromSeeds, packSeeds, SEED_FLOATS } from "./flow";
+export type { GpuStreamlineOptions, PackedSeeds } from "./flow";
 export type { Kernel, KernelBuffer, BufferRole } from "./device";
 export { sampleResident, sampleResidentSync, uploadGrid, readGrid } from "./resident";
 export type { GpuGrid } from "./resident";
