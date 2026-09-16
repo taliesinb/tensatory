@@ -35,7 +35,8 @@ import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
-import { GpuRenderer, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
+import { View3D, type Use3 } from "./view3d";
+import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -61,7 +62,7 @@ for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
 
 const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "showStream", "anim"] as const;
-const VALUES = ["res", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
+const VALUES = ["res", "res3", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -148,10 +149,11 @@ function applyModes(): void {
     fused ??= new FusedGeometry(gpu);
     gpuRenderer ??= new GpuRenderer(gpu, $<HTMLCanvasElement>("gpu"));
   } else { fused?.clear(); fused = undefined; }
-  document.body.classList.toggle("gpu-render", modes.render === "gpu");
+  document.body.classList.toggle("gpu-render", modes.render === "gpu" || spaceDims() === 3);
   localStorage.setItem("tensatory.modes", JSON.stringify(modes));
   tabBar($("computeBar"), [{ value: "cpu", label: "cpu" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], modes.compute, (v) => { modes.compute = v as Compute; applyModes(); });
-  tabBar($("renderBar"), [{ value: "canvas", label: "canvas" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], modes.render, (v) => { modes.render = v as Render; applyModes(); });
+  const is3 = spaceDims() === 3;
+  tabBar($("renderBar"), [{ value: "canvas", label: "canvas", disabled: is3, tip: is3 ? "3D spaces render with WebGPU only" : "" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], is3 ? "gpu" : modes.render, (v) => { modes.render = v as Render; applyModes(); });
   $("pickCompute").textContent = `${sampler.label}${sampler.check ? " — agreement check on (see L)" : ""}`;
   STREAM_CACHE.clear(); isoCache = undefined; // geometry produced by the other backend
   state.dirty = true;
@@ -514,8 +516,7 @@ function renderEmpty(): void {
 function render(): void {
   state.dirty = false;
   if (!state.bundle || !state.space) { renderEmpty(); return; }
-  if (spaceDims() === 3) { renderEmpty(); status("3D space: isosurfaces are next"); return; }
-  if ($("status").textContent?.startsWith("3D space")) status("");
+  if (spaceDims() === 3) { render3d(); return; }
   const box = currentViewBox();
   const grid = currentGrid(box);
   const scene: Scene = {
@@ -568,6 +569,51 @@ function render(): void {
   $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
   $("tailv").textContent = ui.tail.value ?? "";
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
+}
+
+/*******************************************************/
+/* the 3D arm (view3d.ts): isosurfaces of I_V coloured by I_C, WebGPU only */
+
+let view3d: View3D | undefined;
+const gradCache = new Map<string, VectorFieldData>();
+function view3dOf(): View3D | undefined {
+  const gpu = sampler.gpu;
+  if (!gpu) return undefined;
+  view3d ??= new View3D({
+    gpu,
+    canvas: $<HTMLCanvasElement>("gpu"),
+    overlay: canvas,
+    isoField: () => (ui.showIso.checked ? slotScalar("iv") : undefined),
+    colourField: () => slotScalar("ic"),
+    gradientOf: (u) => {
+      if (u.data.kind !== "symbolic") return undefined;
+      let g = gradCache.get(u.id);
+      if (!g) gradCache.set(u.id, (g = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, u.data.dimCount, { scalars: { f: u.data }, vectors: {} })));
+      return g;
+    },
+    levels: (u: Use3) => { const f = u as ScalarUse; const [lo, hi] = rangeOf(f); return isoLevelParams().map((t) => f.codomain.fromParam(t, lo, hi)); },
+    alpha: () => num("isoAlpha") ?? 1,
+    resolution: () => num("res3") ?? 32,
+    compute: () => modes.compute,
+    showIso: () => ui.showIso.checked,
+    showPoints: () => ui.showPoints.checked,
+    showBox: () => ui.showBox.checked,
+    pointSets: spacePointSets,
+    colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
+  });
+  return view3d;
+}
+
+function render3d(): void {
+  const v = view3dOf();
+  if (!v) { renderEmpty(); status("3D spaces need WebGPU"); return; }
+  try { v.render(); } catch (e) { showError(e); }
+  const isoField = slotScalar("iv");
+  $("isoValuev").textContent = isoField ? isoField.codomain.format(isoField.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(isoField))) : "—";
+  $("splitv").textContent = ui.split.value ?? "—";
+  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
+  $("res3v").textContent = ui.res3.value ?? "";
+  updateIsoNotches();
 }
 
 /*******************************************************/
@@ -657,9 +703,10 @@ function centerPoint(): number[] | undefined {
 /** the colour slots currently in use, in display order */
 function colourSlots(): [Slot, ScalarUse][] {
   const out: [Slot, ScalarUse][] = [];
-  const c = slotScalar("c"); if (ui.showScalar.checked && c) out.push(["c", c]);
+  const is2 = spaceDims() === 2;
+  const c = slotScalar("c"); if (is2 && ui.showScalar.checked && c) out.push(["c", c]);
   const ic = slotScalar("ic"); if (ui.showIso.checked && ic) out.push(["ic", ic]);
-  const sc = slotScalar("sc"); if (streamVector() && sc) out.push(["sc", sc]);
+  const sc = slotScalar("sc"); if (is2 && streamVector() && sc) out.push(["sc", sc]);
   return out;
 }
 const legendUses = new Map<string, ScalarUse>();
@@ -667,7 +714,7 @@ const legendUses = new Map<string, ScalarUse>();
 function shapeSlots(): [Slot, ScalarUse][] {
   const out: [Slot, ScalarUse][] = [];
   const iv = slotScalar("iv"); if (ui.showIso.checked && iv) out.push(["iv", iv]);
-  const sg = state.sel.sg; if (streamsOn() && sg && usable.scalars.includes(sg)) { const u = useScalar(sg); if (u) out.push(["sg", u]); }
+  const sg = state.sel.sg; if (spaceDims() === 2 && streamsOn() && sg && usable.scalars.includes(sg)) { const u = useScalar(sg); if (u) out.push(["sg", u]); }
   return out;
 }
 function updateInfo(): void {
@@ -780,11 +827,11 @@ function showCursor(x: number, y: number): void {
 const metrics = new MetricsTable({
   body: $("metricSvgBody"),
   slots: [
-    { key: "c", label: "C", tip: SLOT_TIP.c, type: "scalar", visible: () => ui.showScalar.checked, toggle: () => ui.showScalar.click() },
+    { key: "c", label: "C", tip: SLOT_TIP.c, type: "scalar", visible: () => ui.showScalar.checked, toggle: () => ui.showScalar.click(), present: () => spaceDims() === 2 },
     { key: "iv", label: "I", sub: "V", tip: SLOT_TIP.iv, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
     { key: "ic", label: "I", sub: "C", tip: SLOT_TIP.ic, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
-    { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click() },
-    { key: "sc", label: "S", sub: "C", tip: SLOT_TIP.sc, type: "scalar", visible: streamsOn, toggle: () => ui.showStream.click() },
+    { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click(), present: () => spaceDims() === 2 },
+    { key: "sc", label: "S", sub: "C", tip: SLOT_TIP.sc, type: "scalar", visible: streamsOn, toggle: () => ui.showStream.click(), present: () => spaceDims() === 2 },
   ],
   sel: () => state.sel,
   lockedSel: () => state.lockedSel,
@@ -828,7 +875,7 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
-interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"] }
+interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D }
 interface Opts { ui?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
 function readOpts(): Opts {
   const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return {};
@@ -840,7 +887,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.map((id) => [id, ui[id].value])]),
     maps: state.maps, intervals: state.intervals, space: state.space,
-    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir } },
+    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
 }
@@ -862,6 +909,7 @@ function loadOpts(): boolean {
     if (so?.sel) for (const k of SLOTS) { const id = so.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
     if (so?.view) { renderer.view = { ...renderer.view, ...so.view }; viewCustom = so.view.scale !== undefined; }
     if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: so.dir.stream === -1 ? -1 : 1 };
+    if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...so.camera }; view3d.cameraCustom = true; }
     syncPlayGlyphs();
   } finally { loadingOpts = false; }
   return !!so;
@@ -891,12 +939,14 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
-  rangeCache.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
+  rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !buildErrors.has(id) && bundle.scalarField(id).domain === m),
     vectors: bundle.vectorFieldIds.filter((id) => !buildErrors.has(id) && bundle.vectorField(id).domain === m),
   };
   document.body.classList.toggle("dim3", m.numDims === 3);
+  $("spaceTitle").textContent = `${m.numDims}D space`;
+  $("isoTitle").textContent = m.numDims === 3 ? "isosurfaces" : "isolines";
   $("pickSpace").textContent = `${m.numDims}D (${m.dimNames.join(", ")}) — ${usable.scalars.length} scalar, ${usable.vectors.length} vector fields, ${spacePointSets().length} point sets`;
 
   // defaults: colorfield and isoline value on the first scalar field; colour slots none (white lines;
@@ -910,8 +960,10 @@ function setSpace(id: string, fromUser: boolean): void {
   viewCustom = false;
   renderer.view = { ...renderer.view, flipX: false, flipY: false, rot: 0 };
   if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
+  if (m.numDims === 3) { const v = view3dOf(); if (v) { v.clear(); v.cameraCustom = false; } }
   loadOpts();
   if (m.numDims === 2 && !viewCustom) fitView();
+  applyModes();
   $("streamBox").style.display = usable.scalars.length + usable.vectors.length ? "" : "none";
   buildMetrics(); updateInfo();
   $("flipx").classList.toggle("active", renderer.view.flipX);
@@ -924,7 +976,7 @@ function setSpace(id: string, fromUser: boolean): void {
 
 function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
   state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
   const errors = buildErrors;
   $("pickAbout").textContent = [bundle.name, bundle.spec.description ?? ""].filter(Boolean).join(" — ");
@@ -980,10 +1032,16 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
 /* interaction */
 
 {
-  let drag: { x: number; y: number } | null = null;
-  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
+  let drag: { x: number; y: number; pan: boolean } | null = null;
+  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; canvas.setPointerCapture(e.pointerId); });
   canvas.addEventListener("pointermove", (e) => {
-    if (drag) { renderer.pan(e.clientX - drag.x, e.clientY - drag.y); drag = { x: e.clientX, y: e.clientY }; viewCustom = true; state.dirty = true; return; }
+    if (drag && spaceDims() === 3) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag = { ...drag, x: e.clientX, y: e.clientY };
+      if (view3d) { if (drag.pan) view3d.pan(dx, dy); else view3d.orbit(dx, dy); state.dirty = true; }
+      return;
+    }
+    if (drag) { renderer.pan(e.clientX - drag.x, e.clientY - drag.y); drag = { ...drag, x: e.clientX, y: e.clientY }; viewCustom = true; state.dirty = true; return; }
+    if (spaceDims() === 3) return;
     const r = canvas.getBoundingClientRect();
     const [x, y] = renderer.toWorld(e.clientX - r.left, e.clientY - r.top);
     showCursor(x, y);
@@ -991,7 +1049,11 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
   canvas.addEventListener("pointerup", () => { drag = null; saveOptsSoon(); });
   canvas.addEventListener("pointerleave", hideCursor);
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-  canvas.addEventListener("wheel", (e) => { e.preventDefault(); const r = canvas.getBoundingClientRect(); renderer.zoom(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); viewCustom = true; state.dirty = true; saveOptsSoon(); }, { passive: false });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (spaceDims() === 3) { view3d?.zoom(Math.exp(-e.deltaY * 0.0015)); state.dirty = true; saveOptsSoon(); return; }
+    const r = canvas.getBoundingClientRect(); renderer.zoom(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top); viewCustom = true; state.dirty = true; saveOptsSoon();
+  }, { passive: false });
 }
 /** the free screen region right of the left column, with the same 12 px margin the panels keep from the viewport */
 const MARGIN = 12;
@@ -1002,7 +1064,7 @@ function viewRegion(): [number, number, number, number] {
 }
 let viewCustom = false; // true after a pan / zoom; a fitted view is re-fitted on resize and never restored stale
 const fitView = () => { renderer.fit(viewBox, viewRegion()); viewCustom = false; };
-const refit = () => { fitView(); state.dirty = true; saveOptsSoon(); };
+const refit = () => { if (spaceDims() === 3) view3d?.fit(); else fitView(); state.dirty = true; saveOptsSoon(); };
 $("fit").onclick = refit;
 /** after an orientation change: reflect it on the buttons and keep a fitted view fitted */
 function orientationChanged(): void {

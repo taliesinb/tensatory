@@ -19,6 +19,8 @@ export interface SlotDef {
   /** what the slot consumes: a scalar slot set to a vector field uses its norm, a vector slot set to a scalar field uses its gradient */
   type: FieldKind;
   visible: () => boolean;
+  /** whether the column exists at all in the current space (default: always); absent columns are not drawn */
+  present?: () => boolean;
   /** clicking the column header enables / disables the slot's group (like the panel's tick) */
   toggle?: () => void;
 }
@@ -58,8 +60,8 @@ export class MetricsTable {
   }
 
   /** slots whose panel is currently enabled (disabled columns stay visible, dimmed) */
-  get visibleSlots(): SlotKey[] { return this.o.slots.filter((s) => s.visible()).map((s) => s.key); }
-  private get allSlotKeys(): SlotKey[] { return this.o.slots.map((s) => s.key); }
+  get visibleSlots(): SlotKey[] { return this.o.slots.filter((s) => (s.present?.() ?? true) && s.visible()).map((s) => s.key); }
+  private get allSlotKeys(): SlotKey[] { return this.o.slots.filter((s) => s.present?.() ?? true).map((s) => s.key); }
 
   private hit(e: PointerEvent | WheelEvent): { id: string; col: SlotKey | "all"; header: boolean } | null {
     const svg = this.o.body.querySelector("svg");

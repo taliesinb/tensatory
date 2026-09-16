@@ -24,3 +24,5 @@ export { gpuStats, blurResidentSync, smoothedIsolines } from "./passes";
 export type { GpuStats, SmoothedIsolines } from "./passes";
 export { VERT_FLOATS, VERT_WGSL, allocMesh, resetMesh, packMesh, uploadMesh, readMesh, fusedIsosurface } from "./mesh";
 export type { GpuMesh, FusedIsosurface } from "./mesh";
+export { GpuRenderer3D, cameraMatrices, cameraEye, project, perspective, lookAt, mul4 } from "./render3d";
+export type { Camera3D, GpuMeshLayer, GpuScene3D, Mat4 } from "./render3d";
