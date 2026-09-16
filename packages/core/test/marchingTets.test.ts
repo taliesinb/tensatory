@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Box, DenseGrid, marchingTetrahedra } from "../src";
+import { Box, DenseGrid, SymbolicVectorFieldData, buildScalarFieldData, contourField, marchingTetrahedra, projectToLevel, sliceScalarField } from "../src";
 
 const sphereGrid = (n: number) => new DenseGrid([n, n, n], new Box([-2, -2, -2], [2, 2, 2]));
 const sample = (g: DenseGrid, f: (x: number, y: number, z: number) => number) => {
@@ -57,5 +57,39 @@ describe("marching tetrahedra", () => {
     const m = marchingTetrahedra(g, holed, 1);
     expect(m.triangleCount).toBeGreaterThan(0);
     for (let v = 0; v < m.triangleCount * 3; v++) expect(m.positions[v * 3]!).toBeLessThanOrEqual(0.125 + 1e-9);
+  });
+});
+
+describe("exact projection and slices", () => {
+  const x = { op: "coord", index: 0 } as const, y = { op: "coord", index: 1 } as const, z = { op: "coord", index: 2 } as const;
+  const ball = buildScalarFieldData({ type: "symbolic", box: [[-2, 2], [-2, 2], [-2, 2]], expr: { op: "add", vals: [{ op: "square", val: x }, { op: "square", val: y }, { op: "square", val: z }] } }, 3);
+  const g = sphereGrid(17);
+  const vals = ball.sampleOn(g);
+
+  it("projected vertices lie on the level set to ~1e-12 and normals are the exact gradient there", () => {
+    const h = Math.hypot(...g.spacing);
+    const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 3, { scalars: { f: ball }, vectors: {} });
+    const m = marchingTetrahedra(g, vals, 1, { project: (p) => projectToLevel(ball, p, 1, h), gradient: (p) => grad.value(p) });
+    expect(m.triangleCount).toBeGreaterThan(100);
+    for (let v = 0; v < m.triangleCount * 3; v++) {
+      const px = m.positions[v * 3]!, py = m.positions[v * 3 + 1]!, pz = m.positions[v * 3 + 2]!;
+      expect(Math.abs(px * px + py * py + pz * pz - 1)).toBeLessThan(1e-6); // f32 storage of the exact point
+      expect(m.normals[v * 3]!).toBeCloseTo(px, 5);
+    }
+  });
+
+  it("sliceScalarField restricts a symbolic field to a plane with exact derivatives", () => {
+    const s = sliceScalarField(ball, 1, 0.5); // y = 0.5 → x² + z² + 0.25 on (x, z)
+    expect(s.dimCount).toBe(2);
+    expect(s.box.intervals).toEqual([[-2, 2], [-2, 2]]);
+    expect(s.value([1, 2])).toBeCloseTo(1 + 4 + 0.25, 12);
+    expect(s.derivative(0).value([1, 2])).toBeCloseTo(2, 12);
+    expect(s.derivative(1).value([1, 2])).toBeCloseTo(4, 12);
+    expect(s.kind).toBe("symbolic");
+    // exact contouring of the slice: the circle x² + z² = 0.75
+    const g2 = new DenseGrid([25, 25], s.box);
+    const r = contourField(s, g2, s.sampleOn(g2), 1, { tolerance: 1e-3 });
+    expect(r.method).not.toBe("linear");
+    for (const l of r.lines) for (let i = 0; i + 1 < l.length; i += 2) expect(Math.abs(Math.hypot(l[i]!, l[i + 1]!) - Math.sqrt(0.75))).toBeLessThan(1e-6);
   });
 });

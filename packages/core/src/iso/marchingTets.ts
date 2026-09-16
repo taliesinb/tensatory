@@ -81,6 +81,11 @@ export interface IsoMesh {
 export interface MarchingTetOptions {
   /** exact gradient at a point (symbolic fields); default: central differences of the grid values */
   gradient?: (p: Point) => ArrayLike<number> | undefined;
+  /**
+   * move an interpolated vertex onto the true level set (e.g. `projectToLevel` along the exact ∇f);
+   * undefined keeps the linear vertex. Shared edge vertices project identically, so the soup stays watertight.
+   */
+  project?: (p: Point) => ArrayLike<number> | undefined;
   /** colour values on the same grid, interpolated along the edge */
   colour?: ArrayLike<number>;
   /** colour evaluated at the vertex (symbolic colour fields); takes precedence over `colour` */
@@ -123,6 +128,7 @@ export function marchingTetrahedra(grid: DenseGrid, values: ArrayLike<number>, l
     const ca = CUBE[a]!, cb = CUBE[b]!;
     const fi = i + ca[0] + (cb[0] - ca[0]) * t, fj = j + ca[1] + (cb[1] - ca[1]) * t, fk = k + ca[2] + (cb[2] - ca[2]) * t;
     pt[0] = ax + fi * hx; pt[1] = ay + fj * hy; pt[2] = az + fk * hz;
+    if (opts.project) { const pp = opts.project(pt); if (pp) { pt[0] = pp[0]!; pt[1] = pp[1]!; pt[2] = pp[2]!; } }
     pos[out] = pt[0]; pos[out + 1] = pt[1]; pos[out + 2] = pt[2];
     let gx: number, gy: number, gz: number;
     const g = opts.gradient?.(pt);

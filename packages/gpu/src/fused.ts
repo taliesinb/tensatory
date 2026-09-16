@@ -18,6 +18,18 @@ import { f32 } from "./wgsl";
 
 export const ISO_MAXP = 17; // points per refined seed segment (16 pieces)
 
+export interface FusedIsolineOptions {
+  /** project the vertices onto the level set (default: the field is symbolic) */
+  exact?: boolean;
+  /** the values are a 3D field sampled on the plane `axis = depth`: exact projection uses the 3D field restricted to it */
+  slice?: { field: ScalarFieldData; axis: number; depth: number };
+}
+const sliceBox = (s: { field: ScalarFieldData; axis: number }) => {
+  const keep = [0, 1, 2].filter((d) => d !== s.axis);
+  const a = keep.map((d) => s.field.box.a[d]!), b = keep.map((d) => s.field.box.b[d]!);
+  return { a, b, size: a.map((x, i) => b[i]! - x) };
+};
+
 export interface FusedIsolines {
   /** append the isolines at `level` (world tolerance `tol`) into `segs`; the caller resets the set first when reusing it */
   run(segs: GpuSegments, level: number, tol: number): Promise<void>;
@@ -34,14 +46,27 @@ export interface FusedIsolines {
  * fields are projected exactly, sampled fields keep the marching-squares
  * segments.
  */
-export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData, opts: { exact?: boolean } = {}): FusedIsolines {
+export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData, opts: FusedIsolineOptions = {}): FusedIsolines {
   const grid = values.grid;
-  const exact = opts.exact ?? field?.kind === "symbolic";
-  if (exact && !field) throw new Error("fusedIsolines: exact projection needs the field");
-  const b = new ProgramBuilder(grid);
-  const fn = exact ? b.scalar(field!) : "", dx = exact ? b.scalar(field!, [0]) : "", dy = exact ? b.scalar(field!, [1]) : "";
+  const slice = opts.slice;
+  const exact = opts.exact ?? (slice ? slice.field.kind === "symbolic" : field?.kind === "symbolic");
+  if (exact && !field && !slice) throw new Error("fusedIsolines: exact projection needs the field");
+  // a slice of a 3D field: the programs are 3D, wrapped as 2D functions on the plane
+  const b = new ProgramBuilder(slice ? new DenseGrid([2, 2, 2], slice.field.box) : grid);
+  let fn = "", dx = "", dy = "";
+  const extra: string[] = [];
+  if (exact && slice) {
+    const keep = [0, 1, 2].filter((d) => d !== slice.axis) as [number, number];
+    const f3 = b.scalar(slice.field), d3 = keep.map((d) => b.scalar(slice.field, [d]));
+    const lift = (q: string) => { const c = ["", "", ""]; c[slice.axis] = f32(slice.depth); c[keep[0]] = `${q}.x`; c[keep[1]] = `${q}.y`; return `vec3<f32>(${c.join(", ")})`; };
+    fn = "sl_f"; dx = "sl_dx"; dy = "sl_dy";
+    extra.push(`fn sl_f(q: vec2<f32>, pos: i32) -> f32 { return ${f3}(${lift("q")}, -1); }`);
+    extra.push(`fn sl_dx(q: vec2<f32>, pos: i32) -> f32 { return ${d3[0]}(${lift("q")}, -1); }`);
+    extra.push(`fn sl_dy(q: vec2<f32>, pos: i32) -> f32 { return ${d3[1]}(${lift("q")}, -1); }`);
+  } else if (exact) { fn = b.scalar(field!); dx = b.scalar(field!, [0]); dy = b.scalar(field!, [1]); }
   const col = colour ? b.scalar(colour) : undefined;
   const lib = b.library();
+  lib.code += `\n${extra.join("\n")}`;
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
   const capacity = cells * 2 * (ISO_MAXP - 1);
   const cell = Math.max(grid.spacing[0]!, grid.spacing[1]!);
@@ -55,7 +80,7 @@ const CAP: u32 = ${capacity}u;
 const MAXP: i32 = ${ISO_MAXP};
 ${SEG_APPEND_WGSL}
 ${marchingSquaresWgsl(grid)}
-${exact ? projectionWgsl(fn, dx, dy, field!.box) : ""}
+${exact ? projectionWgsl(fn, dx, dy, slice ? sliceBox(slice) : field!.box) : ""}
 fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
   let d = b - a; let l2 = dot(d, d);

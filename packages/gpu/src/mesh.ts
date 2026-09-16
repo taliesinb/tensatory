@@ -5,12 +5,14 @@
 //   Vert { p: vec3 position | n: vec3 unit normal (towards increasing f) | c: colour value | pad }
 //
 // One thread per grid cell: eight values → mask → six tetrahedra → the
-// TET_TRIANGLES table (shared with core) → vertices on the tet edges with a
-// normal from the exact gradient (symbolic fields) or central differences of
-// the resident values, a colour from the colour program, appended through an
-// atomic vertex counter.
+// TET_TRIANGLES table (shared with core) → vertices on the tet edges, moved
+// onto the true level set along the exact gradient when the field is symbolic
+// (the 3D twin of the 2D projection: damped Newton, bisection fallback, box
+// faces locked), with a normal from the exact gradient (symbolic) or central
+// differences of the resident values, a colour from the colour program,
+// appended through an atomic vertex counter.
 
-import { CUBE, TET_EDGES, TET_TRIANGLES, TETS, type IsoMesh, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { CUBE, TET_EDGES, TET_TRIANGLES, TETS, type IsoMesh, type ScalarFieldData } from "@tensatory/core";
 import { RESIDENT_USAGE, type GpuBackend } from "./device";
 import { ProgramBuilder } from "./program";
 import type { GpuGrid } from "./resident";
@@ -90,6 +92,84 @@ export async function readMesh(backend: GpuBackend, m: GpuMesh): Promise<IsoMesh
   return { positions, normals, values, triangleCount: nv / 3 };
 }
 
+/** WGSL: `project3_(p, maxDist, level) -> vec4 (q, ok)` — Newton along the exact gradient of a symbolic 3D field, box faces locked */
+export function projection3Wgsl(fn: string, dx: string, dy: string, dz: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
+  const eps = 1e-6 * Math.max(...box.size);
+  return `
+const PA3: vec3<f32> = vec3<f32>(${f32(box.a[0]!)}, ${f32(box.a[1]!)}, ${f32(box.a[2]!)});
+const PB3: vec3<f32> = vec3<f32>(${f32(box.b[0]!)}, ${f32(box.b[1]!)}, ${f32(box.b[2]!)});
+const PEPS3: f32 = ${f32(eps)};
+fn inBox3_(q: vec3<f32>) -> bool { return all(q >= PA3 - PEPS3) && all(q <= PB3 + PEPS3); }
+fn resid3_(q: vec3<f32>, level: f32) -> f32 { return ${fn}(q, -1) - level; }
+fn grad3_(q: vec3<f32>) -> vec3<f32> { return vec3<f32>(${dx}(q, -1), ${dy}(q, -1), ${dz}(q, -1)); }
+fn project3_(p: vec3<f32>, maxDist: f32, level: f32) -> vec4<f32> {
+  let scale = max(1.0, abs(level));
+  let tolF = 1e-6 * scale;
+  let onLo = abs(p - PA3) < vec3<f32>(PEPS3); let onHi = abs(p - PB3) < vec3<f32>(PEPS3);
+  let lock = select(vec3<f32>(1.0), vec3<f32>(0.0), onLo | onHi);
+  var q = p;
+  var r = resid3_(q, level);
+  var ok = 0.0;
+  let g0 = grad3_(q) * lock;
+  let g02 = dot(g0, g0);
+  if (!isfinite_(r) || !(g02 > 1e-24)) { return vec4<f32>(p, 0.0); }
+  let r0 = r;
+  for (var it = 0; it < 12; it++) {
+    if (abs(r) < tolF) { break; }
+    let g = grad3_(q) * lock;
+    let g2 = dot(g, g);
+    if (!(g2 > 1e-24)) { break; }
+    var k = r / g2;
+    var accepted = false;
+    for (var damp = 0; damp < 5; damp++) {
+      let trial = q - k * g;
+      let d = trial - p;
+      if (inBox3_(trial) && dot(d, d) <= maxDist * maxDist) {
+        let rt = resid3_(trial, level);
+        if (isfinite_(rt) && abs(rt) < abs(r)) { q = trial; r = rt; accepted = true; break; }
+      }
+      k = k * 0.5;
+    }
+    if (!accepted) { break; }
+  }
+  if (abs(r) < tolF || abs(r) < 1e-5 * scale) { ok = 1.0; }
+  else {
+    let dir = -sign(r0) * g0 / sqrt(g02);
+    var lo = 0.0; var hi = maxDist / 64.0; var found = false;
+    for (var n = 0; n < 12; n++) {
+      let t = p + hi * dir;
+      if (!inBox3_(t)) { break; }
+      let rh = resid3_(t, level);
+      if (!isfinite_(rh)) { break; }
+      if (sign(rh) != sign(r0)) { found = true; break; }
+      lo = hi; hi = hi * 2.0;
+      if (hi > maxDist) { break; }
+    }
+    if (found) {
+      for (var it = 0; it < 40; it++) {
+        let mid = 0.5 * (lo + hi);
+        let rm = resid3_(p + mid * dir, level);
+        if (abs(rm) < tolF) { lo = mid; hi = mid; break; }
+        if (sign(rm) == sign(r0)) { lo = mid; } else { hi = mid; }
+      }
+      q = p + 0.5 * (lo + hi) * dir; ok = 1.0;
+    }
+  }
+  // locked coordinates snap back onto their face
+  q = select(q, select(PB3, PA3, abs(q - PA3) < abs(q - PB3)), lock == vec3<f32>(0.0));
+  return vec4<f32>(q, ok);
+}`;
+}
+
+export interface FusedIsosurfaceOptions {
+  /** the field `values` samples; symbolic data gives exact normals and (unless `exact: false`) projected vertices */
+  field?: ScalarFieldData;
+  /** project vertices onto the level set along the exact gradient (default: field is symbolic) */
+  exact?: boolean;
+  /** colour field evaluated at every vertex */
+  colour?: ScalarFieldData;
+}
+
 export interface FusedIsosurface {
   /** append the isosurface at `level` into `mesh` (reset it first when reusing) */
   run(mesh: GpuMesh, level: number): Promise<void>;
@@ -101,19 +181,24 @@ export interface FusedIsosurface {
 
 /**
  * Build the fused marching-tetrahedra kernel for `values` (a resident 3D scalar
- * grid). `gradient` (the exact gradient of the field, symbolic) gives the
- * normals; without it they come from central differences of the values.
- * `colour` is evaluated at every vertex.
+ * grid). With a symbolic `field` the vertices are projected onto the true level
+ * set and the normals are the exact gradient there; otherwise normals come from
+ * central differences of the values. `colour` is evaluated at every vertex.
  */
-export function fusedIsosurface(backend: GpuBackend, values: GpuGrid, gradient?: VectorFieldData, colour?: ScalarFieldData): FusedIsosurface {
+export function fusedIsosurface(backend: GpuBackend, values: GpuGrid, opts: FusedIsosurfaceOptions = {}): FusedIsosurface {
   const grid = values.grid;
   if (grid.dimCount !== 3 || values.channels !== 1) throw new Error("fusedIsosurface needs a resident 3D scalar grid");
   const [nx, ny, nz] = grid.size as [number, number, number];
   const [sx, sy, sz] = grid.strides as [number, number, number];
   const [hx, hy, hz] = grid.spacing as [number, number, number];
   const b = new ProgramBuilder(grid);
-  const grad = gradient ? b.vector(gradient) : undefined;
+  const symbolic = opts.field?.kind === "symbolic" ? opts.field : undefined;
+  const exact = opts.exact ?? !!symbolic;
+  if (exact && !symbolic) throw new Error("fusedIsosurface: exact projection needs a symbolic field");
+  const fn = symbolic ? b.scalar(symbolic) : "", dx = symbolic ? b.scalar(symbolic, [0]) : "", dy = symbolic ? b.scalar(symbolic, [1]) : "", dz = symbolic ? b.scalar(symbolic, [2]) : "";
+  const colour = opts.colour;
   const col = colour ? b.scalar(colour) : undefined;
+  const maxDist = Math.hypot(hx, hy, hz);
   const lib = b.library();
   const cells = (nx - 1) * (ny - 1) * (nz - 1);
   const capacity = cells * 12;
@@ -148,6 +233,8 @@ fn gridGrad_(i: i32, j: i32, k: i32) -> vec3<f32> {
     select((val_(i, j1, k) - val_(i, j0, k)) / (f32(j1 - j0) * H.y), 0.0, j1 == j0),
     select((val_(i, j, k1) - val_(i, j, k0)) / (f32(k1 - k0) * H.z), 0.0, k1 == k0));
 }
+${exact ? projection3Wgsl(fn, dx, dy, dz, symbolic!.box) : ""}
+const MAXD: f32 = ${f32(maxDist)};
 fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   let a = EDGE_A[e]; let bb = EDGE_B[e];
@@ -156,10 +243,11 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   if (va != vb) { t = clamp((level - va) / (vb - va), 0.0, 1.0); }
   let ca = CUBE_[a]; let cb = CUBE_[bb];
   let g = vec3<f32>(c) + vec3<f32>(ca) + (vec3<f32>(cb) - vec3<f32>(ca)) * t;
-  let p = A + g * H;
+  var p = A + g * H;
+  ${exact ? `let pr = project3_(p, MAXD, level); if (pr.w > 0.5) { p = pr.xyz; }` : ""}
   var out: Vert;
   out.p = p;
-  ${grad ? `let gr = ${grad}(p, -1);` : `let ga = gridGrad_(c.x + ca.x, c.y + ca.y, c.z + ca.z); let gb = gridGrad_(c.x + cb.x, c.y + cb.y, c.z + cb.z); let gr = ga + (gb - ga) * t;`}
+  ${symbolic ? `let gr = vec3<f32>(${dx}(p, -1), ${dy}(p, -1), ${dz}(p, -1));` : `let ga = gridGrad_(c.x + ca.x, c.y + ca.y, c.z + ca.z); let gb = gridGrad_(c.x + cb.x, c.y + cb.y, c.z + cb.z); let gr = ga + (gb - ga) * t;`}
   let l = length(gr);
   if (l > 0.0 && isfinite_(l)) { out.n = gr / l; } else { out.n = vec3<f32>(0.0, 0.0, 1.0); }
   out.c = colour_(p);

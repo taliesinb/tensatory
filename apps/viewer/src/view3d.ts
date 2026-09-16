@@ -6,7 +6,7 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, isoContours, marchingTetrahedra, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   allocMesh,
@@ -56,6 +56,8 @@ export interface View3DContext {
   resolution(): number;
   compute(): "cpu" | "gpu";
   showIso(): boolean;
+  /** project vertices onto the true level set along the exact gradient (symbolic fields) */
+  exact(): boolean;
   /** isolines of I_V on the (cropped) box faces */
   showOutline(): boolean;
   showPoints(): boolean;
@@ -145,9 +147,10 @@ export class View3D {
     const gk = gridKey(iv, grid);
     let values = this.grids.get(gk);
     if (!values) { this.grids.set(gk, (values = sampleResidentSync(this.c.gpu, iv.data, grid))); lru(this.grids, 4, (g) => g.destroy()); }
-    const kk = `${gk}|${ic?.id ?? ""}`;
+    const exact = this.c.exact() && iv.data.kind === "symbolic";
+    const kk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`;
     let kernel = this.kernels.get(kk);
-    if (!kernel) { this.kernels.set(kk, (kernel = fusedIsosurface(this.c.gpu, values, this.c.gradientOf(iv), ic?.data))); lru(this.kernels, 8, (k) => k.destroy()); }
+    if (!kernel) { this.kernels.set(kk, (kernel = fusedIsosurface(this.c.gpu, values, { field: iv.data, exact, colour: ic?.data }))); lru(this.kernels, 8, (k) => k.destroy()); }
     // triangle budget: surfaces touch O(n²) of the n³ cells; overflow drops triangles silently
     const cells = grid.size.reduce((a, s) => a * (s - 1), 1);
     const capacity = Math.min(kernel.capacity, Math.max(65536, Math.min(1 << 20, Math.round(cells * 0.5))));
@@ -167,12 +170,15 @@ export class View3D {
     let vals = this.cpuValues.get(gk);
     if (!vals) { this.cpuValues.set(gk, (vals = Float64Array.from(iv.data.sampleOn(grid)))); lru(this.cpuValues, 4, () => {}); }
     const grad = this.c.gradientOf(iv);
+    const exact = this.c.exact() && iv.data.kind === "symbolic";
+    const maxDist = Math.hypot(...grid.spacing);
     return levels.map((level) => {
-      const mk = `${gk}|${ic?.id ?? ""}|${level}`;
+      const mk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}|${level}`;
       let mesh = this.cpuMeshes.get(mk);
       if (!mesh) {
         const m = marchingTetrahedra(grid, vals!, level, {
           gradient: grad ? (p) => grad.value(p) ?? undefined : undefined,
+          project: exact ? (p) => projectToLevel(iv.data, p, level, maxDist) : undefined,
           colourAt: ic ? (p) => ic.data.value(p) ?? NaN : undefined,
         });
         this.cpuMeshes.set(mk, (mesh = uploadMesh(this.c.gpu, packMesh(m)))); lru(this.cpuMeshes, 24, (v) => v.destroy());
@@ -207,8 +213,10 @@ export class View3D {
       size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
       oa.forEach((d, i) => { size3[d] = size2[i]!; a3[d] = box2.a[i]!; b3[d] = box2.b[i]!; });
       const grid3 = new DenseGrid(size3, new Box(a3, b3));
-      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}`;
+      const exact = this.c.exact() && iv.data.kind === "symbolic";
+      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}|${exact ? "exact" : "lin"}`;
       const embed = { axis, depth };
+      const tol = 0.25 * Math.min(...grid.spacing); // world tolerance of the exact chords
       if (gpu) {
         let values = this.faceGrids.get(fkey);
         if (!values) {
@@ -217,15 +225,15 @@ export class View3D {
           this.faceGrids.set(fkey, values); lru(this.faceGrids, 12, (g) => g.destroy());
         }
         let kernel = this.faceKernels.get(fkey);
-        if (!kernel) { this.faceKernels.set(fkey, (kernel = fusedIsolines(this.c.gpu, undefined, values, undefined, { exact: false }))); lru(this.faceKernels, 12, (k) => k.destroy()); }
-        const capacity = Math.min(kernel.capacity, Math.max(4096, (size2[0]! - 1) * (size2[1]! - 1) * 2));
+        if (!kernel) { this.faceKernels.set(fkey, (kernel = fusedIsolines(this.c.gpu, undefined, values, undefined, exact ? { slice: { field: iv.data, axis, depth } } : { exact: false }))); lru(this.faceKernels, 12, (k) => k.destroy()); }
+        const capacity = Math.min(kernel.capacity, Math.max(4096, (size2[0]! - 1) * (size2[1]! - 1) * (exact ? 8 : 2)));
         levels.forEach((level, k) => {
           const sk = `${fkey}|${k}`;
           let set = this.faceSets.get(sk);
           if (set && set.segs.capacity !== capacity) { set.segs.destroy(); this.faceSets.delete(sk); set = undefined; }
           if (!set) { this.faceSets.set(sk, (set = { segs: allocSegments(this.c.gpu, capacity, false), stamp: "" })); lru(this.faceSets, 96, (v) => v.segs.destroy()); }
           const stamp = `${fkey}|${level}`;
-          if (set.stamp !== stamp) { resetSegments(this.c.gpu, set.segs); kernel!.dispatch(set.segs, level, 0); set.stamp = stamp; }
+          if (set.stamp !== stamp) { resetSegments(this.c.gpu, set.segs); kernel!.dispatch(set.segs, level, tol); set.stamp = stamp; }
           out.push({ segs: set.segs, embed, width, color: [0.92, 0.92, 0.92] });
         });
       } else {
@@ -234,7 +242,10 @@ export class View3D {
         for (const level of levels) {
           const sk = `${fkey}|${level}`;
           let segs = this.faceCpu.get(sk);
-          if (!segs) { this.faceCpu.set(sk, (segs = uploadSegments(this.c.gpu, packPolylines(isoContours(grid2, vals!, level)), false))); lru(this.faceCpu, 96, (v) => v.destroy()); }
+          if (!segs) {
+            const lines = exact ? contourField(sliceScalarField(iv.data, axis, depth), grid2, vals!, level, { tolerance: tol }).lines : isoContours(grid2, vals!, level);
+            this.faceCpu.set(sk, (segs = uploadSegments(this.c.gpu, packPolylines(lines), false))); lru(this.faceCpu, 96, (v) => v.destroy());
+          }
           out.push({ segs, embed, width, color: [0.92, 0.92, 0.92] });
         }
       }

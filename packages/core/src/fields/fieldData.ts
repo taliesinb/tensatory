@@ -486,3 +486,24 @@ export function scaleField<T extends FieldData>(inner: T, origin: readonly numbe
   const map = AxisMap.scale(inner.dimCount, origin, scale);
   return (inner.rank === "scalar" ? new PulledBackScalarFieldData(inner, map) : new PulledBackVectorFieldData(inner, map)) as unknown as T;
 }
+
+/**
+ * Restrict a scalar field to the hyperplane `p[axis] = value`: a field of one
+ * dimension less on the box with that axis removed. Symbolic data stays
+ * symbolic (values and derivatives are the inner field's, evaluated on the
+ * plane), so exact contouring works on slices; sampled data stays sampled
+ * (contoured linearly on whatever grid the caller samples).
+ */
+export function sliceScalarField(f: ScalarFieldData, axis: number, value: number): ScalarFieldData {
+  const D = f.dimCount;
+  if (axis < 0 || axis >= D) throw new EvalError(`slice axis ${axis} out of range for ${D}D data`);
+  const keep = Array.from({ length: D }, (_, d) => d).filter((d) => d !== axis);
+  const box = new Box(keep.map((d) => f.box.a[d]!), keep.map((d) => f.box.b[d]!));
+  const q = new Float64Array(D);
+  const fn: ScalarFn = (p) => {
+    for (let i = 0; i < keep.length; i++) q[keep[i]!] = p[i]!;
+    q[axis] = value;
+    return f.fn(q, -1);
+  };
+  return new ClosureScalarFieldData(f.kind, D - 1, box, undefined, fn, (dim) => sliceScalarField(f.derivative(keep[dim]!), axis, value));
+}

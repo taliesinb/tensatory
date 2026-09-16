@@ -61,7 +61,7 @@ installTicks();
 for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
 
-const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "showStream", "anim"] as const;
+const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim"] as const;
 const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
@@ -596,6 +596,7 @@ function view3dOf(): View3D | undefined {
     resolution: () => num("res3") ?? 32,
     compute: () => modes.compute,
     showIso: () => ui.showIso.checked,
+    exact: () => ui.isoExact.checked,
     showOutline: () => ui.isoOutline.checked,
     showPoints: () => ui.showPoints.checked,
     showBox: () => ui.showBox.checked,

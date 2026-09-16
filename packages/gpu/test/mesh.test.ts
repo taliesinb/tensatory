@@ -1,7 +1,7 @@
 // Fused marching tetrahedra: the appended triangle set equals core's (as a multiset of vertices).
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DenseGrid, DenseScalarFieldData, SymbolicVectorFieldData, buildScalarFieldData, marchingTetrahedra, type IsoMesh } from "@tensatory/core";
+import { DenseGrid, DenseScalarFieldData, SymbolicVectorFieldData, buildScalarFieldData, marchingTetrahedra, projectToLevel, type IsoMesh } from "@tensatory/core";
 import { GpuBackend, allocMesh, fusedIsosurface, readMesh, sampleResident, uploadGrid, gpuStats } from "../src";
 
 let gpu: GpuBackend | undefined;
@@ -41,7 +41,7 @@ describe("fused isosurface", () => {
     const vals = ball.sampleOn(g);
     const grad = gradOf(ball);
     const colour = buildScalarFieldData({ type: "symbolic", box: ball.box.intervals, expr: { op: "mul", vals: [x, z] } }, 3);
-    const kernel = fusedIsosurface(gpu, values, grad, colour);
+    const kernel = fusedIsosurface(gpu, values, { field: ball, exact: false, colour });
     const mesh = allocMesh(gpu, kernel.capacity);
     await kernel.run(mesh, 1.3);
     const got = await readMesh(gpu, mesh);
@@ -58,7 +58,7 @@ describe("fused isosurface", () => {
     for (let p = 0; p < g.sampleCount; p++) if (g.point(p)[0]! > 2.2) vals[p] = NaN;
     const dense = new DenseScalarFieldData(g, vals);
     const values = uploadGrid(gpu, g, vals, 1);
-    const kernel = fusedIsosurface(gpu, values, undefined, undefined);
+    const kernel = fusedIsosurface(gpu, values);
     const mesh = allocMesh(gpu, kernel.capacity);
     await kernel.run(mesh, 0);
     const got = await readMesh(gpu, mesh);
@@ -72,6 +72,26 @@ describe("fused isosurface", () => {
     await kernel.run(mesh, 0.7);
     const got2 = await readMesh(gpu, mesh);
     expectSame(marchingTetrahedra(g, dense.data, 0.7), got2, 4);
+    mesh.destroy(); values.destroy();
+  });
+
+  it("exact projection: vertices on the unit sphere on both backends, and they agree", async () => {
+    if (!gpu) return;
+    const g = new DenseGrid([15, 14, 13], ball.box);
+    const values = await sampleResident(gpu, ball, g);
+    const vals = ball.sampleOn(g);
+    const kernel = fusedIsosurface(gpu, values, { field: ball });
+    const mesh = allocMesh(gpu, kernel.capacity);
+    await kernel.run(mesh, 1);
+    const got = await readMesh(gpu, mesh);
+    const h = Math.hypot(...g.spacing), grad = gradOf(ball);
+    const want = marchingTetrahedra(g, vals, 1, { project: (p) => projectToLevel(ball, p, 1, h), gradient: (p) => grad.value(p) });
+    expect(got.triangleCount).toBe(want.triangleCount);
+    for (let v = 0; v < got.triangleCount * 3; v++) {
+      const r = Math.hypot(got.positions[v * 3]!, got.positions[v * 3 + 1]!, got.positions[v * 3 + 2]!);
+      expect(Math.abs(r - 1)).toBeLessThan(2e-5); // f32 Newton
+    }
+    expectSame(want, got, 3);
     mesh.destroy(); values.destroy();
   });
 
