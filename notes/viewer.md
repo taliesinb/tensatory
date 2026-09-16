@@ -129,8 +129,14 @@ ends: full `(lo, hi)`, half `(lo, ·)` / `(·, hi)`, none = everything.
 Gestures: press a handle and drag to move it (clamped so lo ≤ hi); press
 anywhere else and drag to move the whole bracket (a half's only end); click a
 handle, or drag it off the bar, to delete it; on an empty bar drag out a new
-interval (release past an end for a half). Half bars: click the top line to
-add the missing end there. Escape cancels, Backspace clears.
+interval (release past an end for a half) or click to get a small one (10 % of
+the bar) at the pointer. Half bars: click the top line to add the missing end
+there. Escape cancels, Backspace clears. A *click* is a press released within
+150 ms (`CLICK_MS`); a longer press is a drag — only then does the cursor
+change and pointer motion count (motion inside the dead zone is ignored), so
+a hesitant press-and-release changes nothing. The plain (non-`cmap`) variant
+used for the 3D crop ranges additionally clears a full interval when its band
+is clicked; clicking outside the band still jumps the interval there.
 
 Three **modes** are part of the selection and toggled by single clicks:
 * *included region* (inside the bracket): **stretch** — the colormap is

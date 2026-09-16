@@ -11,10 +11,13 @@
 //   half  (lo, null)    band [lo, max] fading out to the open end, one handle   (likewise (null, hi))
 //   none  (null, null)  empty bar
 //
-// Gestures
-//   full:  press a handle -> drag that end (clamped so lo <= hi); click it (no drag) -> destroy that end;
+// Gestures. A press is a CLICK if released within CLICK_MS (150 ms); until then nothing moves and the cursor keeps
+// its hover shape. Held longer it is a DRAG: the cursor changes and, from then on, pointer motion counts (movement
+// during the dead zone is ignored; jumps — press outside, alt-press — are applied when the drag arms or on the click).
+//   full:  press a handle -> drag that end (clamped so lo <= hi); click it -> destroy that end;
 //          dragging it off the bar's end also destroys it (-> half), live, until the pointer comes back
-//          press the band -> translate (width kept, clipped at the ends); press outside -> centre jumps there
+//          press the band -> translate (width kept, clipped at the ends); click it -> none
+//          press outside -> centre jumps there (a click does the same)
 //          alt-press -> symmetric resize about the centre (also the way to grow a point interval, whose
 //          handles overlap: a plain press there drags it whole)
 //          shift-hover -> preview: centre follows the pointer;  wheel translates, alt-wheel resizes;
@@ -24,14 +27,21 @@
 //          shift-hover -> preview: the existing end follows the pointer;  wheel / arrows move it
 //   none:  press and drag -> a new full interval spanning the dragged range, live; release commits;
 //          releasing past either end of the bar leaves that side open -> a half interval
+//          click -> a small full interval (CLICK_W = 10 % of the range) centred at the pointer
 //   any:   Escape cancels the drag (restores the committed ends);  Backspace -> none
 // Colormap variant (class "cmap", drawn as a bracket |‾‾‾| : a top line + the two edges): handles move ONLY by
 // dragging; a press anywhere else drags the interval / the existing end relatively (no jump). Single clicks:
 //   a handle -> destroy it;  the top line of a half -> the missing end appears there;
 //   inside the box -> 'modetoggle' event with detail "span";  outside -> 'modetoggle' with detail "low" / "high"
-//   (no event and no pointer cursor with data-notoggle). Dragging the top line translates the whole bracket,
-//   like dragging inside it. The consumer (cmapInterval.ts) owns what those toggles mean.
+//   (no event and no pointer cursor with data-notoggle);  an empty bar -> a small interval, as above.
+//   Dragging the top line translates the whole bracket, like dragging inside it. The consumer (cmapInterval.ts)
+//   owns what those toggles mean.
 // Events: 'input' while the shown interval moves (drag / preview), 'change' when it is committed.
+
+/** a press released within this many ms is a click, not a drag; until then motion is ignored and the cursor is unchanged */
+const CLICK_MS = 150;
+/** width of the interval a click on an empty bar creates, as a fraction of the range */
+const CLICK_W = 0.1;
 
 export interface IntervalEl extends HTMLElement {
   lo: number | null;
@@ -62,8 +72,10 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   let sLo = num(el.dataset.lo, min), sHi = num(el.dataset.hi, max);
   if (sLo !== null && sHi !== null && sHi < sLo) [sLo, sHi] = [sHi, sLo];
   let lo = sLo, hi = sHi;
-  let dragging = false, moved = false, mode: Mode = "band", region: Region = "out";
-  let downX = 0, downV = 0, downOff = 0, downW = 0, downC = 0;
+  // dragging: the button is down.  armed: the press has outlived the click dead zone (classes on, motion counts).
+  // moved: the shown interval was changed by the drag.  jump: a change to apply when the drag arms, or on a click.
+  let dragging = false, armed = false, moved = false, mode: Mode = "band", region: Region = "out";
+  let downT = 0, downV = 0, downOff = 0, downW = 0, downC = 0, armTimer = 0, jump: (() => void) | null = null;
   let settled = false, over = false, previewing = false, lastEv: PointerEvent | null = null;
 
   const mk = (cls: string) => { const d = document.createElement("div"); d.className = cls; el.appendChild(d); return d; };
@@ -117,7 +129,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   };
   const cursor = () => {
     if (!lastEv) return;
-    const h = dragging ? null : hit(lastEv), k = kindOf(sLo, sHi);
+    const h = armed ? null : hit(lastEv), k = kindOf(sLo, sHi); // an unarmed press keeps the hover cursor
     el.classList.toggle("onhandle", h === "lo" || h === "hi");
     el.classList.toggle("onband", h === "band" && k === "full" && !cmap);
     el.classList.toggle("onfill", h === "frame" || (h === "band" && k !== "full" && !cmap));
@@ -160,46 +172,62 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
 
   /* drags */
   const MODES = ["m-lo", "m-hi", "m-band", "m-scale", "m-create"];
-  const endDrag = () => {
-    if (!dragging) return;
-    dragging = false; settled = true; el.classList.remove("locked", ...MODES);
-    if (!moved) {
-      const k = kindOf(sLo, sHi);
-      const addEnd = () => { if (k === "lo") { lo = sLo; hi = quant(downV); } else { lo = quant(downV); hi = sHi; } commit(); };
-      if (region === "lo") { lo = null; hi = sHi; commit(); }                 // click a handle: destroy that end
-      else if (region === "hi") { lo = sLo; hi = null; commit(); }
-      else if (region === "frame") addEnd();                                   // cmap half: click the frame -> the other end appears there
-      else if (region === "band" && k !== "full" && !cmap) addEnd();           // plain half: click the filled part -> likewise
-      else if (cmap && k !== "none") {                                         // cmap: clicks toggle the consumer's modes
-        revert();
-        const what = region === "band" ? "span" : downV < (sLo ?? min) ? "low" : "high";
-        if (!notoggle) el.dispatchEvent(new CustomEvent("modetoggle", { detail: what }));
-      }
-      else revert();
-      cursor(); return;
-    }
-    commit(); cursor();
+  /** the press has outlived the click dead zone: it is a drag — show it (cursor, colours) and apply a pending jump */
+  const arm = () => {
+    if (!dragging || armed) return;
+    armed = true; clearTimeout(armTimer); el.classList.add("locked", `m-${mode}`);
+    if (jump) { jump(); jump = null; moved = true; }
+    cursor();
   };
-  const cancelDrag = () => { if (!dragging) return; dragging = false; settled = true; el.classList.remove("locked", ...MODES); revert(); fire("input"); cursor(); };
+  /** the press was released before arming: a click */
+  const click = () => {
+    const k = kindOf(sLo, sHi);
+    const addEnd = () => { if (k === "lo") { lo = sLo; hi = quant(downV); } else { lo = quant(downV); hi = sHi; } commit(); };
+    if (k === "none") showCentred(downV, CLICK_W * span());                  // empty bar: a small interval appears at the pointer
+    else if (region === "lo") { lo = null; hi = sHi; }                         // a handle: destroy that end
+    else if (region === "hi") { lo = sLo; hi = null; }
+    else if (region === "frame") { addEnd(); return; }                        // cmap half: the frame -> the other end appears there
+    else if (region === "band" && k !== "full" && !cmap) { addEnd(); return; } // plain half: the filled part -> likewise
+    else if (cmap) {                                                           // cmap: clicks toggle the consumer's modes
+      revert();
+      const what = region === "band" ? "span" : downV < (sLo ?? min) ? "low" : "high";
+      if (!notoggle) el.dispatchEvent(new CustomEvent("modetoggle", { detail: what }));
+      return;
+    }
+    else if (region === "band") lo = hi = null;                                // plain full: the band -> none
+    else if (jump) { jump(); jump = null; }                                    // plain full, outside / alt: the jump happens anyway
+    else { revert(); return; }
+    commit();
+  };
+  const endDrag = (asClick = true) => {
+    if (!dragging) return;
+    const wasArmed = armed;
+    dragging = false; armed = false; settled = true; clearTimeout(armTimer); el.classList.remove("locked", ...MODES);
+    if (!wasArmed) { if (asClick) click(); else revert(); }
+    else if (moved) commit();
+    else revert();
+    jump = null; cursor();
+  };
+  const cancelDrag = () => { if (!dragging) return; dragging = false; armed = false; settled = true; clearTimeout(armTimer); jump = null; el.classList.remove("locked", ...MODES); revert(); fire("input"); cursor(); };
   el.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     endPreview();
-    dragging = true; moved = false; downX = e.clientX; downV = atX(e.clientX); region = hit(e);
+    dragging = true; armed = false; moved = false; jump = null; downT = performance.now(); downV = atX(e.clientX); region = hit(e);
     const k = kindOf(sLo, sHi);
     if (k === "none") { mode = "create"; }
     else if (k === "lo" || k === "hi") { mode = k; downOff = (k === "lo" ? sLo! : sHi!) - downV; } // press anywhere: move the existing end, relatively
-    else if (e.altKey) { mode = "scale"; downC = (sLo! + sHi!) / 2; showScaled(downC, Math.abs(downV - downC)); moved = true; }
+    else if (e.altKey) { mode = "scale"; downC = (sLo! + sHi!) / 2; jump = () => showScaled(downC, Math.abs(downV - downC)); }
     else if (region === "lo" || region === "hi") { mode = region; downOff = (region === "lo" ? sLo! : sHi!) - downV; }
     else if (region === "band" || region === "frame" || cmap) { mode = "band"; downW = sHi! - sLo!; downOff = (sLo! + sHi!) / 2 - downV; } // drag the whole interval (band or frame), relatively
-    else { mode = "band"; downW = sHi! - sLo!; downOff = 0; showCentred(downV, downW); moved = true; } // plain, press outside: the centre jumps there
+    else { mode = "band"; downW = sHi! - sLo!; downOff = 0; jump = () => showCentred(downV, downW); } // plain, press outside: the centre jumps there
     try { el.setPointerCapture(e.pointerId); } catch { /* synthetic events have no active pointer */ }
-    el.classList.add("locked", `m-${mode}`); cursor();
+    armTimer = window.setTimeout(arm, CLICK_MS); cursor();
   });
   el.addEventListener("pointermove", (e) => {
     lastEv = e; cursor();
     if (dragging) {
       if (e.buttons === 0) { endDrag(); return; }
-      if (!moved && Math.abs(e.clientX - downX) <= 4) return; // dead zone: a click is not a drag
+      if (!armed) { if (performance.now() - downT < CLICK_MS) return; arm(); } // dead zone: motion within a click is ignored
       moved = true;
       const v = atX(e.clientX), r = rect(), offL = e.clientX < r.left, offR = e.clientX > r.right;
       if (mode === "lo" || mode === "hi") {
@@ -219,7 +247,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
     }
     if (!e.shiftKey) endPreview();
   });
-  el.addEventListener("pointerup", endDrag); el.addEventListener("pointercancel", endDrag);
+  el.addEventListener("pointerup", () => endDrag()); el.addEventListener("pointercancel", () => endDrag(false));
   el.addEventListener("pointerenter", (e) => { over = true; lastEv = e; cursor(); });
   el.addEventListener("pointerleave", () => { over = false; settled = false; el.classList.remove("onhandle", "onband", "onfill", "ontoggle"); });
   window.addEventListener("keydown", (e) => { if (e.key === "Shift" && over) startPreview(); });
@@ -228,7 +256,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   window.addEventListener("keydown", (e) => {
     if (e.key === "Backspace" && over && !dragging && kindOf(sLo, sHi) !== "none") { e.preventDefault(); lo = hi = null; paint(); fire("input"); commit(); cursor(); }
   });
-  window.addEventListener("blur", () => { endPreview(); endDrag(); });
+  window.addEventListener("blur", () => { endPreview(); endDrag(false); }); // losing focus is not a click
 
   /* wheel / arrows: full -> translate (alt: resize); half -> move the existing end */
   const stepBy = (dv: number, alt: boolean) => {
