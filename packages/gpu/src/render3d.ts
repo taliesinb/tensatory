@@ -156,6 +156,29 @@ fn param(value: f32, m: vec4<f32>) -> f32 {
   t = clamp(t, 0.0, 1.0);
   return select(t, 1.0 - t, m.w > 0.5);
 }
+// particle window brightness at arc along a line of length len with phase; -1.0 outside the window.
+// particles: tail (world), split, travel (world), enabled
+fn particleBright(arc: f32, len: f32, phase: f32, P: vec4<f32>) -> f32 {
+  let k = P.x; let split = P.y;
+  var bright: f32;
+  if (split <= 1.0) {
+    // one particle per line: head at t, tail behind it; t runs over len + k so the particle
+    // enters head-first at the start of the path and its tail slides off the end
+    let period = len + k;
+    let t = (P.z + phase * period) - floor((P.z + phase * period) / period) * period;
+    let a = arc - (t - k);
+    if (a < 0.0 || a > k) { return -1.0; }
+    bright = a / k;
+  } else {
+    let t = (P.z + phase * len) - floor((P.z + phase * len) / len) * len;
+    let span = len / split;
+    let kk = min(k, span); // a line shorter than split × tail still gets a full-brightness head
+    let dd = (arc - t) - floor((arc - t) / span) * span;
+    if (dd > kk) { return -1.0; }
+    bright = dd / kk;
+  }
+  return bright;
+}
 struct Rec { a: vec3<f32>, b: vec3<f32>, ca: f32, cb: f32, arc: f32, len: f32, phase: f32 }
 fn lift(q: vec2<f32>) -> vec3<f32> {
   let ax = i32(u.embed.x); let d = u.embed.y;
@@ -191,11 +214,15 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   let atB = (vi == 1u || vi == 4u || vi == 5u);
   let side = select(-1.0, 1.0, vi == 2u || vi == 3u || vi == 5u);
   let c = select(ca, cb, atB);
-  let off = n * side * 0.5 * u.style.x * u.viewport.z; // width in device px
+  let arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
+  var w = 0.5 * u.style.x * u.viewport.z; // half width in device px
+  // particles: the width tapers with the brightness ramp, to nothing at the tail
+  if (u.particles.w > 0.5 && s.len > 0.0) { w = w * max(particleBright(arc, s.len, s.phase, u.particles), 0.0); }
+  let off = n * side * w;
   o.pos = vec4<f32>(c.xy + off / (0.5 * vp) * c.w, c.zw);
   o.world = select(s.a, s.b, atB);
   o.value = select(s.ca, s.cb, atB);
-  o.arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
+  o.arc = arc;
   o.len = s.len; o.phase = s.phase;
   return o;
 }
@@ -203,21 +230,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
   var bright = 1.0;
   if (u.particles.w > 0.5 && in.len > 0.0) {
-    let k = u.particles.x; let split = u.particles.y;
-    if (split <= 1.0) {
-      let period = in.len + k;
-      let t = (u.particles.z + in.phase * period) - floor((u.particles.z + in.phase * period) / period) * period;
-      let a = in.arc - (t - k);
-      if (a < 0.0 || a > k) { discard; }
-      bright = a / k;
-    } else {
-      let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
-      let span = in.len / split;
-      let kk = min(k, span); // a line shorter than split × tail still gets a full-brightness head
-      let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
-      if (dd > kk) { discard; }
-      bright = dd / kk;
-    }
+    bright = particleBright(in.arc, in.len, in.phase, u.particles);
     if (bright <= 0.02) { discard; }
   }
   var rgb = u.color.rgb;

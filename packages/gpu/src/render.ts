@@ -105,6 +105,30 @@ fn readVal(i: i32, j: i32) -> f32 { return vals[(i * u.gridN.z + j * u.gridN.w) 
 
 const LINES = `${COMMON}
 ${SEG_WGSL}
+// particle window brightness at arc along a line of length len with phase; -1.0 outside the window.
+// particles: tail (world), split, travel (world), enabled
+fn particleBright(arc: f32, len: f32, phase: f32, P: vec4<f32>) -> f32 {
+  let k = P.x; let split = P.y;
+  var bright: f32;
+  if (split <= 1.0) {
+    // one particle per line: head at t, tail behind it; t runs over len + k so the particle
+    // enters head-first at the start of the path and its tail slides off the end
+    let period = len + k;
+    let t = (P.z + phase * period) - floor((P.z + phase * period) / period) * period;
+    let a = arc - (t - k);
+    if (a < 0.0 || a > k) { return -1.0; }
+    bright = a / k;
+  } else {
+    let t = (P.z + phase * len) - floor((P.z + phase * len) / len) * len;
+    let span = len / split;
+    let kk = min(k, span); // a line shorter than split × tail still gets a full-brightness head
+    let dd = (arc - t) - floor((arc - t) / span) * span;
+    if (dd > kk) { return -1.0; }
+    bright = dd / kk;
+  }
+  return bright;
+}
+
 struct LineU { view: View, style: vec4<f32>, color: vec4<f32>, particles: vec4<f32> }
 @group(0) @binding(0) var<uniform> u: LineU;
 @group(0) @binding(1) var<storage, read> segs: array<Seg>;
@@ -118,41 +142,26 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
   let sa = toScreen(s.a, u.view); let sb = toScreen(s.b, u.view);
   let d = sb - sa; let l = length(d);
   if (!(l > 0.0)) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return o; }
-  let n = vec2<f32>(-d.y, d.x) / l * (0.5 * u.style.x);
+  var n = vec2<f32>(-d.y, d.x) / l * (0.5 * u.style.x);
   // 0:(a,-) 1:(b,-) 2:(a,+) 3:(a,+) 4:(b,-) 5:(b,+)
   let atB = (vi == 1u || vi == 4u || vi == 5u);
   let side = select(-1.0, 1.0, vi == 2u || vi == 3u || vi == 5u);
+  let arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
+  // particles: the width tapers with the brightness ramp, to nothing at the tail
+  if (u.particles.w > 0.5 && s.len > 0.0) { n = n * max(particleBright(arc, s.len, s.phase, u.particles), 0.0); }
   let sp = select(sa, sb, atB) + n * side;
   o.pos = toClip(sp, u.view);
   o.world = select(s.a, s.b, atB);
   o.value = select(s.ca, s.cb, atB);
-  o.arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
+  o.arc = arc;
   o.len = s.len; o.phase = s.phase;
   return o;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
   if (!inClip(in.world, u.view)) { discard; }
   var alpha = u.style.y;
-  // particles: tail (world), split, travel (world), enabled
   if (u.particles.w > 0.5 && in.len > 0.0) {
-    let k = u.particles.x; let split = u.particles.y;
-    var bright: f32;
-    if (split <= 1.0) {
-      // one particle per line: head at t, tail behind it; t runs over len + k so the particle
-      // enters head-first at the start of the path and its tail slides off the end
-      let period = in.len + k;
-      let t = (u.particles.z + in.phase * period) - floor((u.particles.z + in.phase * period) / period) * period;
-      let a = in.arc - (t - k);
-      if (a < 0.0 || a > k) { discard; }
-      bright = a / k;
-    } else {
-      let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
-      let span = in.len / split;
-      let kk = min(k, span); // a line shorter than split × tail still gets a full-brightness head
-      let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
-      if (dd > kk) { discard; }
-      bright = dd / kk;
-    }
+    let bright = particleBright(in.arc, in.len, in.phase, u.particles);
     if (bright <= 0.02) { discard; }
     alpha = alpha * bright;
   }

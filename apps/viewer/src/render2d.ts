@@ -272,6 +272,7 @@ export class Renderer2D {
       // particle tails fade out through transparency (2D lets us), not to black
       const b = P ? bbin / (ALPHA_BINS - 1) : 1;
       ctx.strokeStyle = toCss(base, l.alpha * b);
+      ctx.lineWidth = l.width * (P ? b : 1); // particles taper to nothing at the tail (per brightness bin here)
       ctx.stroke(path);
     }
   }
