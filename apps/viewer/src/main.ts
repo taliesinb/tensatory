@@ -595,6 +595,7 @@ function view3dOf(): View3D | undefined {
     alpha: () => num("isoAlpha") ?? 1,
     resolution: () => num("res3") ?? 32,
     blur: () => num("metric"),
+    smoothing: () => num("line") ?? 0,
     compute: () => modes.compute,
     showIso: () => ui.showIso.checked,
     exact: () => ui.isoExact.checked,
@@ -618,6 +619,7 @@ function render3d(): void {
   $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
   $("res3v").textContent = ui.res3.value ?? "";
   $("metricv").textContent = ui.metric.value ?? "—";
+  $("linev").textContent = ui.line.value ?? "—";
   for (const a of ["x", "y", "z"] as const) $(`crop${a}v`).textContent = (num(`crop${a}`) ?? 1).toFixed(2);
   updateIsoNotches();
 }
@@ -953,6 +955,7 @@ function setSpace(id: string, fromUser: boolean): void {
   document.body.classList.toggle("dim3", m.numDims === 3);
   $("spaceTitle").textContent = `${m.numDims}D space`;
   $("isoTitle").textContent = m.numDims === 3 ? "isosurfaces" : "isolines";
+  $("lineLabel").textContent = m.numDims === 3 ? "surface" : "line";
   $("pickSpace").textContent = `${m.numDims}D (${m.dimNames.join(", ")}) — ${usable.scalars.length} scalar, ${usable.vectors.length} vector fields, ${spacePointSets().length} point sets`;
 
   // defaults: colorfield and isoline value on the first scalar field; colour slots none (white lines;

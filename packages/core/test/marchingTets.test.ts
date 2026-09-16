@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Box, DenseGrid, SymbolicVectorFieldData, buildScalarFieldData, contourField, marchingTetrahedra, projectToLevel, sliceScalarField } from "../src";
+import { Box, DenseGrid, SymbolicVectorFieldData, buildScalarFieldData, contourField, expandMesh, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, weldMesh, type IsoMesh } from "../src";
 
 const sphereGrid = (n: number) => new DenseGrid([n, n, n], new Box([-2, -2, -2], [2, 2, 2]));
 const sample = (g: DenseGrid, f: (x: number, y: number, z: number) => number) => {
@@ -91,5 +91,26 @@ describe("exact projection and slices", () => {
     const r = contourField(s, g2, s.sampleOn(g2), 1, { tolerance: 1e-3 });
     expect(r.method).not.toBe("linear");
     for (const l of r.lines) for (let i = 0; i + 1 < l.length; i += 2) expect(Math.abs(Math.hypot(l[i]!, l[i + 1]!) - Math.sqrt(0.75))).toBeLessThan(1e-6);
+  });
+});
+
+describe("mesh smoothing", () => {
+  const g = sphereGrid(33);
+  // grid-scale noise on the sphere (the discretization error of the sphere itself is ~h²/8 ≈ 2e-3, well below the ripple)
+  const noisy = sample(g, (x, y, z) => x * x + y * y + z * z + 0.08 * Math.sin(37 * x) * Math.cos(29 * y + 11 * z));
+  it("welding is lossless and Taubin smoothing keeps the sphere while removing the ripple", () => {
+    const m = marchingTetrahedra(g, noisy, 1);
+    const w = weldMesh(m);
+    expect(w.vertexCount).toBeLessThan(m.triangleCount * 3 / 2); // heavy sharing
+    expect(expandMesh(w).positions).toEqual(m.positions);
+    // ripple = spread of the vertex radii (the mean radius may drift a little: Taubin is not exactly volume-preserving)
+    const rough = (mesh: IsoMesh) => { const n = mesh.triangleCount * 3; let s = 0, s2 = 0; for (let v = 0; v < n; v++) { const r = Math.hypot(mesh.positions[v * 3]!, mesh.positions[v * 3 + 1]!, mesh.positions[v * 3 + 2]!); s += r; s2 += r * r; } return Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2)); };
+    const sm = smoothIsoMesh(m, 8);
+    expect(sm.triangleCount).toBe(m.triangleCount);
+    expect(rough(sm)).toBeLessThan(rough(m) * 0.75); // Taubin is a pass-band filter: it damps, it does not flatten
+    // normals follow the smoothed faces and still point outwards (towards increasing f)
+    let dot = 0;
+    for (let v = 0; v < sm.triangleCount * 3; v++) dot += sm.positions[v * 3]! * sm.normals[v * 3]! + sm.positions[v * 3 + 1]! * sm.normals[v * 3 + 1]! + sm.positions[v * 3 + 2]! * sm.normals[v * 3 + 2]!;
+    expect(dot / (sm.triangleCount * 3)).toBeGreaterThan(0.95);
   });
 });

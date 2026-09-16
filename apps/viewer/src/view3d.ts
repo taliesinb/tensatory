@@ -6,7 +6,7 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, DenseScalarFieldData, boxBlur, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, DenseScalarFieldData, boxBlur, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   allocMesh,
@@ -58,6 +58,8 @@ export interface View3DContext {
   resolution(): number;
   /** box-blur radius (cells) of the I_V field before contouring, or null */
   blur(): number | null;
+  /** Taubin iterations on the welded mesh (non-exact surfaces), 0 = none */
+  smoothing(): number;
   compute(): "cpu" | "gpu";
   showIso(): boolean;
   /** project vertices onto the true level set along the exact gradient (symbolic fields) */
@@ -198,15 +200,17 @@ export class View3D {
     const exact = this.isExact(iv);
     const grad = exact ? this.c.gradientOf(iv) : undefined; // blurred: normals from the blurred grid
     const maxDist = Math.hypot(...grid.spacing);
+    const smooth = exact ? 0 : this.c.smoothing();
     return levels.map((level) => {
-      const mk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}|${level}`;
+      const mk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : `lin|sm${smooth}`}|${level}`;
       let mesh = this.cpuMeshes.get(mk);
       if (!mesh) {
-        const m = marchingTetrahedra(grid, vals, level, {
+        let m = marchingTetrahedra(grid, vals, level, {
           gradient: grad ? (p) => grad.value(p) ?? undefined : undefined,
           project: exact ? (p) => projectToLevel(iv.data, p, level, maxDist) : undefined,
           colourAt: ic ? (p) => ic.data.value(p) ?? NaN : undefined,
         });
+        if (smooth > 0) m = smoothIsoMesh(m, smooth);
         this.cpuMeshes.set(mk, (mesh = uploadMesh(this.c.gpu, packMesh(m)))); lru(this.cpuMeshes, 24, (v) => v.destroy());
       }
       return mesh;
@@ -308,7 +312,9 @@ export class View3D {
       const ic = c.colourField();
       const grid = this.grid(box);
       const levels = c.levels(iv);
-      const sets = c.compute() === "gpu" ? this.meshesGpu(iv, ic, grid, levels) : this.meshesCpu(iv, ic, grid, levels);
+      // surface smoothing needs welded connectivity: CPU meshing (the fused kernel has none yet)
+      const gpuMesh = c.compute() === "gpu" && !(c.smoothing() > 0 && !this.isExact(iv));
+      const sets = gpuMesh ? this.meshesGpu(iv, ic, grid, levels) : this.meshesCpu(iv, ic, grid, levels);
       const alpha = c.alpha();
       const colour = ic ? c.colour(ic) : undefined;
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
