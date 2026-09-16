@@ -197,7 +197,7 @@ describe("bundle", () => {
 
   it("parses, resolves references lazily, detects cycles", () => {
     const b = Bundle.parse(spec);
-    expect(b.defaultManifold.dimNames).toEqual(["x", "y"]);
+    expect(b.defaultManifold!.dimNames).toEqual(["x", "y"]);
     expect(b.scalarField("twice").data.value([1, 0])).toBe(2);
     expect(b.scalarField("bowl").codomain.name).toBe("norm");
     const grad = b.vectorField("g").data.value([0, 1.5])!;
@@ -217,7 +217,7 @@ describe("bundle", () => {
 
   it("infers the manifold when none is declared", () => {
     const b = Bundle.parse({ tensatory: "0.1", fields: { f: { kind: "scalar", data: { type: "dense", samples: { type: "constant", shape: [2, 3], value: 1 } } } } });
-    expect(b.defaultManifold.numDims).toBe(2);
+    expect(b.defaultManifold!.numDims).toBe(2);
   });
 });
 

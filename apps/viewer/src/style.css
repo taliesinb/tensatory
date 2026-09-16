@@ -62,7 +62,7 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #picker .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
 #picker .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-#pickBundle { min-width: 0; flex: 1; }
+#pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }
 #picker .psep { border-top: 1px solid #2a2f3d; margin: 6px 0 4px; }
 
 #cursorPane { position: absolute; right: 12px; bottom: 12px; display: none; pointer-events: none; }
@@ -121,3 +121,6 @@ label[data-tip]:not(.tick) { cursor: help; }
 .isl.cmap.onhandle, .isl.cmap.locked.m-lo, .isl.cmap.locked.m-hi, .isl.cmap.locked.m-create { cursor: ew-resize; }
 .isl.cmap.locked.m-band { cursor: grabbing; }
 .isl.cmap.none { cursor: crosshair; }
+
+/* per-dimension panels: a 2D space shows .d2 panels, a 3D space .d3 panels */
+body.dim3 .panel.d2, body:not(.dim3) .panel.d3 { display: none; }

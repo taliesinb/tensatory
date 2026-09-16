@@ -13,7 +13,7 @@ shape; it is parsed into runtime classes that carry behaviour.
   "tensatory": "0.1",
   "name": "…", "description": "…",
   "manifolds": { "plane": { "numDims": 2, "dimNames": ["x", "y"], "dimWeights": [0.7, 0.3] } },
-  "defaultManifold": "plane",          // optional when there is exactly one
+  "defaultManifold": "plane",          // only needed by fields / point sets that omit `domain`
   "fields":    { "<fieldId>": FieldSpec, … },
   "pointSets": { "<id>": { "points": [[1, 1]], "labels": ["θ*"], "ordered": false } }
 }

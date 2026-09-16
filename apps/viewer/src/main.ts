@@ -30,6 +30,7 @@ import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lut
 import { makeIntervalSlider } from "./interval";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
+import type { Manifold, PointSet } from "@tensatory/core";
 import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
@@ -111,6 +112,8 @@ const SLOT_TIP: Record<Slot, string> = {
 interface State {
   bundle: Bundle | undefined;
   bundleFile: string; // for options storage
+  /** the selected space (manifold id) of the bundle; fields, point sets and the view belong to it */
+  space: string;
   sel: Sel; // shown (may be a hover preview)
   lockedSel: Sel;
   /** colormap index per scalar use id */
@@ -125,7 +128,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, bundleFile: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
+const state: State = { bundle: undefined, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: -1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -177,7 +180,7 @@ function useScalar(id: string | null | undefined): ScalarUse | undefined {
   if (!u) {
     const v = b.vectorField(id);
     // vector norms are heavy-tailed (gradient norms span orders of magnitude and vanish at critical points): log scale
-    u = { id: key, name: `|${v.name}|`, codomain: new Codomain({ min: 0, log: "10" }), data: new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, 2, { scalars: {}, vectors: { v: v.data } }) };
+    u = { id: key, name: `|${v.name}|`, codomain: new Codomain({ min: 0, log: "10" }), data: new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, v.data.dimCount, { scalars: {}, vectors: { v: v.data } }) };
     useCache.set(key, u);
   }
   return u;
@@ -195,7 +198,7 @@ function useVector(id: string | null | undefined): VectorUse | undefined {
   let u = useCache.get(key) as VectorUse | undefined;
   if (!u) {
     const f = b.scalarField(id);
-    u = { id: key, name: `∇${paren(f.name)}`, data: new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: f.data }, vectors: {} }) };
+    u = { id: key, name: `∇${paren(f.name)}`, data: new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, f.data.dimCount, { scalars: { f: f.data }, vectors: {} }) };
     useCache.set(key, u);
   }
   return u;
@@ -225,7 +228,7 @@ function rangeFrom(f: ScalarUse, st: { min: number; max: number }, posMin: () =>
 function rangeOf(f: ScalarUse): [number, number] {
   let r = rangeCache.get(f.id);
   if (r) return r;
-  if (f.data.kind === "symbolic" && modes.compute === "gpu" && sampler.gpu) {
+  if (f.data.kind === "symbolic" && f.data.dimCount === 2 && modes.compute === "gpu" && sampler.gpu) {
     const coarse = new DenseGrid([24, 24], f.data.box);
     const vals = f.data.sampleOn(coarse);
     r = rangeFrom(f, computeStats(vals), () => { let m = Infinity; for (const v of vals) if (v > 0 && v < m) m = v; return m; });
@@ -438,11 +441,26 @@ function integrableVector(v: VectorUse, grid: DenseGrid): VectorFieldData | unde
   return dense;
 }
 
+/**
+ * The grid streamlines are measured in — the step is ½ cell, `length` counts steps, `tail` counts cells — and
+ * that symbolic vectors are sampled on for integration. Same rule as `currentGrid` applies to the scalar fields
+ * (the field's own sample grid when `resolution` is deselected, else the resolution grid over the view box,
+ * symbolic fields falling back to 128) but derived from the vector field ALONE: `currentGrid` switches between
+ * a native grid and the 128 fallback depending on which scalar panels are enabled, which used to rescale the
+ * streamlines whenever the colourfield or the isolines were toggled.
+ */
+function streamGrid(v: VectorUse, box: Box): DenseGrid {
+  const res = num("res");
+  if (res === null && v.data.samplePoints) return v.data.samplePoints;
+  return squareGrid(box, res ?? 128);
+}
+
 let stream: StreamSet | undefined;
-function streamlines(grid: DenseGrid): StreamSet | undefined {
+function streamlines(view: Box): StreamSet | undefined {
   const v = streamVector();
   const count = num("lines");
   if (!v || count === null) { stream = undefined; return undefined; }
+  const grid = streamGrid(v, view);
   const maxSteps = num("slen")!;
   const sign = state.dir.stream;
   const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
@@ -488,14 +506,21 @@ function streamlines(grid: DenseGrid): StreamSet | undefined {
 /*******************************************************/
 /* render */
 
+function renderEmpty(): void {
+  renderer.render({ box: Box.unit(2), crop: [1, 1], showBox: false, lines: [], pointSets: [] });
+  if (modes.render === "gpu" && gpuRenderer) { gpuRenderer.resize(); gpuRenderer.render({ view: renderer.gpuView, clip: Box.unit(2), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], lines: [] }); }
+}
+
 function render(): void {
   state.dirty = false;
-  if (!state.bundle) { renderer.render({ box: Box.unit(2), crop: [1, 1], showBox: false, lines: [], pointSets: [] }); return; }
+  if (!state.bundle || !state.space) { renderEmpty(); return; }
+  if (spaceDims() === 3) { renderEmpty(); status("3D space: isosurfaces are next"); return; }
+  if ($("status").textContent?.startsWith("3D space")) status("");
   const box = currentViewBox();
   const grid = currentGrid(box);
   const scene: Scene = {
     box, crop: [1, 1], showBox: ui.showBox.checked, lines: [],
-    pointSets: ui.showPoints.checked ? [...state.bundle.pointSets.values()].filter((ps) => ps.domain.numDims === 2) : [],
+    pointSets: ui.showPoints.checked ? spacePointSets() : [],
   };
   const gpuDraw = modes.render === "gpu" && !!fused && !!gpuRenderer;
   const fusedCompute = gpuDraw && modes.compute === "gpu";
@@ -515,7 +540,7 @@ function render(): void {
     if (iso.values && ic) { layer.values = iso.values; layer.cmap = mapOf(ic); layer.select = selectOf(ic); }
     scene.lines.push(layer);
   }
-  const st = fusedCompute ? undefined : streamlines(grid);
+  const st = fusedCompute ? undefined : streamlines(box);
   if (st && !gpuDraw) {
     const layer: LineLayer = { lines: st.lines.map((l) => l.points), color: [1, 1, 1], width: 1.5, alpha: num("sAlpha") ?? 1 };
     const sc = slotScalar("sc");
@@ -595,23 +620,24 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
   if (v && count !== null) {
     const sc = slotScalar("sc");
     const colour = (sc ? { map: valueMap(sc), lut: lutOf(sc) } : {}) as Partial<GpuLineLayer>;
-    const cell = Math.min(grid.spacing[0]!, grid.spacing[1]!) || 1e-3;
     const tail = num("tail");
-    const particles = tail === null ? undefined : { tail: tail * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell };
+    const particlesIn = (cell: number) => (tail === null ? undefined : { tail: tail * cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * cell });
     if (fusedCompute) {
-      const vbox = v.data.box.intersect(grid.box) ?? v.data.box;
-      const size = [0, 1].map((d) => Math.max(2, Math.round(vbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
+      const sgrid = streamGrid(v, box); // NOT `grid`: that one depends on which scalar panels are enabled
+      const cell = Math.min(sgrid.spacing[0]!, sgrid.spacing[1]!) || 1e-3;
+      const vbox = v.data.box.intersect(sgrid.box) ?? v.data.box;
+      const size = [0, 1].map((d) => Math.max(2, Math.round(vbox.size[d]! / (sgrid.spacing[d]! || 1)) + 1));
       const vgrid = new DenseGrid(size, vbox);
       const vectors = F.grid(`vec:${gridKey(v, vgrid)}`, v.data, vgrid);
       const maxSteps = num("slen")!, step = 0.5 * cell, sign = state.dir.stream;
       const seeds = streamlineSeeds(vbox, count, 12345);
       const key = [v.id, gridKey(v, vgrid), count, maxSteps, sign, step.toExponential(4), sc?.id ?? ""].join("|");
       const segs = F.streamlines(key, vectors, seeds, { maxSteps, step, sign, box: vbox }, sc?.data);
-      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles, ...colour });
+      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(cell), ...colour });
     } else if (st) {
       const key = `stream|${v.id}|${st.lines.length}|${st.step}|${st.colourKey}|${st.lines[0]?.points[0] ?? 0}|${st.lines.length && st.lines[st.lines.length - 1]!.points.length}`;
       const segs = F.uploadedSegments(key, () => packStreamlines(st.lines, st.step, st.colours), true);
-      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles, ...(st.colours ? colour : {}) });
+      gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(st.cell), ...(st.colours ? colour : {}) });
     }
   }
   R.resize();
@@ -625,7 +651,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
 const fmt3 = (v: number) => formatReal(v, 3);
 const BLACK: Colormap = () => [0, 0, 0]; // the "colormap" of bars whose field is not used for colour
 function centerPoint(): number[] | undefined {
-  const ps = state.bundle && [...state.bundle.pointSets.values()].find((p) => p.points.length === 1 && p.domain.numDims === 2);
+  const ps = spacePointSets().find((p) => p.points.length === 1);
   return ps?.points[0];
 }
 /** the colour slots currently in use, in display order */
@@ -723,7 +749,7 @@ function showCursor(x: number, y: number): void {
   const b = state.bundle;
   if (!b || !viewBox.contains([x, y], 1e-12)) { hideCursor(); return; }
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  const lines: string[] = [`<b>${esc(b.defaultManifold.name)}:</b> ${fmt3(x)} ${fmt3(y)}`];
+  const lines: string[] = [`<b>${esc(currentSpace()?.name ?? "")}:</b> ${fmt3(x)} ${fmt3(y)}`];
   const vf = streamVector();
   if (vf) { const g = vf.data.value([x, y]); if (g) lines.push(`<b>${esc(vf.name)}:</b> ${g.map(fmt3).join(" ")}`); }
   const seen = new Set<string>();
@@ -802,20 +828,28 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
+interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"] }
+interface Opts { ui?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
+function readOpts(): Opts {
+  const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return {};
+  try { const o = JSON.parse(raw) as Opts & { sel?: unknown }; return "sel" in o ? {} : o; } catch { return {}; } // "sel" at the root: pre-space format, ignored
+}
 function saveOpts(): void {
   const key = optsKey(); if (!key || loadingOpts) return;
-  const o = {
+  const prev = readOpts();
+  const o: Opts = {
     ui: Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.map((id) => [id, ui[id].value])]),
-    sel: state.lockedSel, maps: state.maps, intervals: state.intervals, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir,
+    maps: state.maps, intervals: state.intervals, space: state.space,
+    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir } },
   };
   localStorage.setItem(key, JSON.stringify(o));
 }
 const saveOptsSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(saveOpts, 150); };
 const isUsable = (id: string) => usable.scalars.includes(id) || usable.vectors.includes(id);
+/** apply the saved options of the bundle (ui, maps, intervals) and of the current space (sel, view, dir) */
 function loadOpts(): boolean {
-  const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return false;
-  let o: { ui?: Record<string, unknown>; sel?: Sel; maps?: Record<string, number>; intervals?: Record<string, unknown>; view?: Partial<typeof renderer.view>; dir?: State["dir"] };
-  try { o = JSON.parse(raw); } catch { return false; }
+  const o = readOpts();
+  const so = o.spaces?.[state.space];
   loadingOpts = true;
   try {
     for (const [id, v] of Object.entries(o.ui ?? {})) {
@@ -825,29 +859,45 @@ function loadOpts(): boolean {
     syncTicks(); syncIsoRate();
     if (o.maps) state.maps = { ...o.maps };
     if (o.intervals) { state.intervals = {}; for (const [id, v] of Object.entries(o.intervals)) { const s = asSelection(v); if (!isNoSelection(s)) state.intervals[id] = s; } }
-    if (o.sel) for (const k of SLOTS) { const id = o.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
-    if (o.view) { renderer.view = { ...renderer.view, ...o.view }; viewCustom = o.view.scale !== undefined; }
-    if (o.dir) state.dir = { iso: o.dir.iso === -1 ? -1 : 1, stream: o.dir.stream === -1 ? -1 : 1 };
+    if (so?.sel) for (const k of SLOTS) { const id = so.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
+    if (so?.view) { renderer.view = { ...renderer.view, ...so.view }; viewCustom = so.view.scale !== undefined; }
+    if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: so.dir.stream === -1 ? -1 : 1 };
     syncPlayGlyphs();
   } finally { loadingOpts = false; }
-  return true;
+  return !!so;
 }
 
 /*******************************************************/
 /* bundle loading */
 
-function setBundle(bundle: Bundle, file: string): void {
-  state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
-  const errors = bundle.buildAll();
+/* spaces: the bundle's 2D and 3D manifolds that carry at least one buildable field */
+
+let buildErrors = new Map<string, Error>();
+function spaceList(): Manifold[] {
+  const b = state.bundle; if (!b) return [];
+  const has = (m: Manifold) => b.fieldIds.some((id) => !buildErrors.has(id) && b.field(id).domain === m);
+  return [...b.manifolds.values()].filter((m) => (m.numDims === 2 || m.numDims === 3) && has(m));
+}
+const currentSpace = (): Manifold | undefined => state.bundle?.manifolds.get(state.space);
+const spaceDims = (): number => currentSpace()?.numDims ?? 2;
+const spacePointSets = (): PointSet[] => (state.bundle ? [...state.bundle.pointSets.values()].filter((ps) => ps.domain.id === state.space) : []);
+const spaceSel = $<HTMLSelectElement>("pickSpaceSel");
+spaceSel.onchange = () => setSpace(spaceSel.value, true);
+
+/** switch to a space of the current bundle: fields, defaults, saved options and view */
+function setSpace(id: string, fromUser: boolean): void {
+  const bundle = state.bundle; if (!bundle) return;
+  const m = bundle.manifolds.get(id) ?? spaceList()[0]; if (!m) return;
+  if (fromUser) saveOpts(); // remember the space we are leaving
+  state.space = m.id;
+  spaceSel.value = m.id;
+  rangeCache.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
   usable = {
-    scalars: bundle.scalarFieldIds.filter((id) => !errors.has(id) && bundle.scalarField(id).domain.numDims === 2),
-    vectors: bundle.vectorFieldIds.filter((id) => !errors.has(id) && bundle.vectorField(id).domain.numDims === 2),
+    scalars: bundle.scalarFieldIds.filter((id) => !buildErrors.has(id) && bundle.scalarField(id).domain === m),
+    vectors: bundle.vectorFieldIds.filter((id) => !buildErrors.has(id) && bundle.vectorField(id).domain === m),
   };
-  $("pickAbout").textContent = [bundle.name, bundle.spec.description ?? ""].filter(Boolean).join(" — ");
-  $("pickSpace").textContent = [...bundle.manifolds.values()].map((m) => `${m.name}: ${m.numDims}D (${m.dimNames.join(", ")})`).join("\n") + `\n${usable.scalars.length} scalar, ${usable.vectors.length} vector fields, ${bundle.pointSets.size} point sets`;
-  $("pickErrRow").style.display = errors.size ? "" : "none";
-  $("pickErr").textContent = [...errors].map(([id, e]) => `${id}: ${e.message}`).join("\n");
+  document.body.classList.toggle("dim3", m.numDims === 3);
+  $("pickSpace").textContent = `${m.numDims}D (${m.dimNames.join(", ")}) — ${usable.scalars.length} scalar, ${usable.vectors.length} vector fields, ${spacePointSets().length} point sets`;
 
   // defaults: colorfield and isoline value on the first scalar field; colour slots none (white lines;
   // a colour slot equal to C would make lines vanish into the raster); streamline direction from the
@@ -859,24 +909,43 @@ function setBundle(bundle: Bundle, file: string): void {
   state.dir = { iso: 1, stream: -1 }; syncPlayGlyphs();
   viewCustom = false;
   renderer.view = { ...renderer.view, flipX: false, flipY: false, rot: 0 };
-  currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
+  if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
   loadOpts();
-  if (!viewCustom) fitView();
+  if (m.numDims === 2 && !viewCustom) fitView();
   $("streamBox").style.display = usable.scalars.length + usable.vectors.length ? "" : "none";
   buildMetrics(); updateInfo();
   $("flipx").classList.toggle("active", renderer.view.flipX);
   $("flipy").classList.toggle("active", renderer.view.flipY);
-  status("");
+  const params = new URLSearchParams(location.search); params.set("space", m.id); if (!state.bundleFile.startsWith("local:")) params.set("bundle", state.bundleFile);
+  history.replaceState(null, "", `?${params}`);
+  if (fromUser) saveOpts();
   state.dirty = true;
 }
 
-async function loadBundle(file: string): Promise<void> {
+function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
+  state.bundle = bundle; state.bundleFile = file;
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); useCache.clear(); STREAM_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
+  buildErrors = bundle.buildAll();
+  const errors = buildErrors;
+  $("pickAbout").textContent = [bundle.name, bundle.spec.description ?? ""].filter(Boolean).join(" — ");
+  $("pickErrRow").style.display = errors.size ? "" : "none";
+  $("pickErr").textContent = [...errors].map(([id, e]) => `${id}: ${e.message}`).join("\n");
+  const spaces = spaceList();
+  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: `${m.name} (${m.numDims}D)` })));
+  spaceSel.disabled = spaces.length < 2;
+  const saved = readOpts().space;
+  const pick = [wantSpace, saved, spaces.find((m) => m.numDims === 2)?.id, spaces[0]?.id].find((id) => id && spaces.some((m) => m.id === id));
+  if (!pick) { usable = { scalars: [], vectors: [] }; state.space = ""; $("pickSpace").textContent = "no 2D or 3D space with fields"; buildMetrics(); updateInfo(); status(""); state.dirty = true; return; }
+  setSpace(pick, false);
+  status("");
+}
+
+async function loadBundle(file: string, wantSpace?: string | null): Promise<void> {
   status(`loading ${file}…`);
   try {
     const res = await fetch(`bundles/${file}`, { cache: "no-cache" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText} for bundles/${file}`);
-    setBundle(Bundle.parse(await res.json()), file);
-    history.replaceState(null, "", `?bundle=${encodeURIComponent(file)}`);
+    setBundle(Bundle.parse(await res.json()), file, wantSpace);
   } catch (e) {
     console.error(e);
     status(e instanceof TensatoryError || e instanceof Error ? e.message : String(e));
@@ -1012,7 +1081,7 @@ function frame(now: number): void {
   const want = params.get("bundle");
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
   pickSel.value = file;
-  await loadBundle(file);
+  await loadBundle(file, params.get("space"));
   // UI overrides from the URL, e.g. &showIso=0&split=3&iv=loss&sg=lossGrad
   for (const [k, v] of params) {
     if ((CHECKS as readonly string[]).includes(k)) ui[k as CheckId].checked = v !== "0";

@@ -14,17 +14,20 @@ describe("example bundles", () => {
       expect([...errors.entries()].map(([id, e]) => `${id}: ${e.message}`)).toEqual([]);
       for (const id of b.scalarFieldIds) {
         const fd = b.scalarField(id).data;
-        const grid = fd.samplePoints ?? new DenseGrid([40, 40], fd.box);
+        const D = fd.box.dimCount;
+        const grid = fd.samplePoints ?? new DenseGrid(Array(D).fill(D === 2 ? 40 : 12), fd.box);
         const vals = fd.sampleOn(grid);
         const st = fd.stats();
         expect(Number.isFinite(st.min), `${id} has finite min`).toBe(true);
-        const lines = isoContours(grid, vals, 0.5 * (st.min + st.max));
-        expect(Array.isArray(lines)).toBe(true);
+        if (D === 2) {
+          const lines = isoContours(grid, vals, 0.5 * (st.min + st.max));
+          expect(Array.isArray(lines)).toBe(true);
+        }
       }
       for (const id of b.vectorFieldIds) {
         const fd = b.vectorField(id).data;
         const v = fd.value(fd.box.center);
-        expect(v?.length).toBe(2);
+        expect(v?.length).toBe(fd.box.dimCount);
       }
     });
   }

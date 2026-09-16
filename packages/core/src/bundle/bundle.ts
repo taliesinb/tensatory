@@ -96,7 +96,8 @@ export type Field = ScalarField | VectorField;
 export class Bundle {
   readonly name: string;
   readonly manifolds: ReadonlyMap<string, Manifold>;
-  readonly defaultManifold: Manifold;
+  /** the manifold of fields / point sets without `domain`; undefined when several manifolds exist and none is declared default */
+  readonly defaultManifold: Manifold | undefined;
   readonly pointSets: ReadonlyMap<string, PointSet>;
   private readonly built = new Map<string, Field>();
   private readonly building = new Set<string>();
@@ -110,11 +111,10 @@ export class Bundle {
       manifolds.set("default", new Manifold("default", { numDims: inferDims(spec) }));
     }
     this.manifolds = manifolds;
+    // the default manifold is only needed by fields / point sets that omit `domain`
     const dflt = spec.defaultManifold ?? (manifolds.size === 1 ? [...manifolds.keys()][0]! : undefined);
-    if (dflt === undefined) throw new SpecError("bundle with several manifolds needs `defaultManifold`");
-    const dm = manifolds.get(dflt);
-    if (!dm) throw new SpecError(`defaultManifold "${dflt}" is not defined`);
-    this.defaultManifold = dm;
+    if (dflt !== undefined && !manifolds.has(dflt)) throw new SpecError(`defaultManifold "${dflt}" is not defined`);
+    this.defaultManifold = dflt === undefined ? undefined : manifolds.get(dflt);
     const pointSets = new Map<string, PointSet>();
     for (const [id, ps] of Object.entries(spec.pointSets ?? {})) pointSets.set(id, new PointSet(id, ps, this.manifoldOf(ps.domain, ["pointSets", id])));
     this.pointSets = pointSets;
@@ -135,7 +135,10 @@ export class Bundle {
   get vectorFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "vector"); }
 
   private manifoldOf(id: string | undefined, path: string[]): Manifold {
-    if (id === undefined) return this.defaultManifold;
+    if (id === undefined) {
+      if (!this.defaultManifold) throw new SpecError("no `domain` and the bundle has several manifolds but no `defaultManifold`", path);
+      return this.defaultManifold;
+    }
     const m = this.manifolds.get(id);
     if (!m) throw new SpecError(`unknown manifold "${id}"`, [...path, "domain"]);
     return m;

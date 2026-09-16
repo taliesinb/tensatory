@@ -74,8 +74,15 @@ box (symbolic fields fall back to 128).
   wrapping past min/max; deselected split = one level. Exact lines for
   symbolic fields, marching squares while the level is moving (see
   [performance.md](performance.md)). Colour from I_C per vertex.
-* Streamlines: integrated through a sampled copy of the S_∇ field at the
-  current grid, ½ cell per step. Particles are always drawn at the current
+* Streamlines: integrated through a sampled copy of the S_∇ field on the
+  *streamline grid*, ½ cell per step; `length` counts steps and `tail` counts
+  cells of that grid. The streamline grid follows the same rule as the scalar
+  grid above (the vector field's own grid when `resolution` is deselected,
+  else `resolution` over the view box, symbolic → 128) but is derived from
+  the S_∇ field alone (`streamGrid`), never from `currentGrid`: that one flips
+  between a native grid and the 128 fallback as the colourfield / isolines
+  panels are toggled, which used to rescale the streamlines with them.
+  Particles are always drawn at the current
   phase; ▶ advances the clock, ◀ (shift-click) reverses the flow direction
   itself (◀ = against the field = descent). Plain click only toggles play.
   Space starts both animations when none is playing, otherwise pauses.
