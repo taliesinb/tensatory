@@ -31,6 +31,51 @@ export function f32(v: number): string {
   return s;
 }
 
+/*******************************************************/
+/* grid headers: a DenseGrid described in a f32 buffer, so kernels need not bake the grid into their WGSL
+   (one pipeline per field serves every resolution — an adaptive resolution or a moving crop compiles nothing) */
+
+/** floats per packed grid: [count, D, size×3, strides×3 (u32 bits), a×3, spacing×3, b×3, pad×2] */
+export const GRID_FLOATS = 20;
+
+/** pack `grid` into `f` at `off` (missing dimensions: size 1, stride 0, a = b = 0) */
+export function packGrid(grid: { sampleCount: number; dimCount: number; size: readonly number[]; strides: readonly number[]; box: { a: readonly number[]; b: readonly number[] }; spacing: readonly number[] }, f: Float32Array, off = 0): void {
+  const u = new Uint32Array(f.buffer, f.byteOffset, f.length);
+  u[off] = grid.sampleCount; u[off + 1] = grid.dimCount;
+  for (let d = 0; d < 3; d++) {
+    u[off + 2 + d] = grid.size[d] ?? 1; u[off + 5 + d] = grid.strides[d] ?? 0;
+    f[off + 8 + d] = grid.box.a[d] ?? 0; f[off + 11 + d] = grid.spacing[d] ?? 0; f[off + 14 + d] = grid.box.b[d] ?? 0;
+  }
+}
+
+/** a grid seen from WGSL: expressions for its size, stride, origin, spacing and end along a dimension `d` (a WGSL i32 expression) */
+export interface GridRef { count: string; n(d: string): string; s(d: string): string; a(d: string): string; h(d: string): string; b(d: string): string }
+
+/**
+ * WGSL accessors for a grid packed at `off` (a WGSL i32 expression) of the f32 array `buf`, named `${prefix}count()`,
+ * `${prefix}n(d)`, `${prefix}s(d)`, `${prefix}a(d)`, `${prefix}h(d)`, `${prefix}b(d)`; `ref` addresses them.
+ */
+export function gridWgsl(prefix: string, buf: string, off: string | number): { code: string; ref: GridRef } {
+  const code = `
+fn ${prefix}count() -> i32 { return bitcast<i32>(${buf}[${off}]); }
+fn ${prefix}n(d: i32) -> i32 { return bitcast<i32>(${buf}[${off} + 2 + d]); }
+fn ${prefix}s(d: i32) -> i32 { return bitcast<i32>(${buf}[${off} + 5 + d]); }
+fn ${prefix}a(d: i32) -> f32 { return ${buf}[${off} + 8 + d]; }
+fn ${prefix}h(d: i32) -> f32 { return ${buf}[${off} + 11 + d]; }
+fn ${prefix}b(d: i32) -> f32 { return ${buf}[${off} + 14 + d]; }`;
+  return { code, ref: { count: `${prefix}count()`, n: (d) => `${prefix}n(${d})`, s: (d) => `${prefix}s(${d})`, a: (d) => `${prefix}a(${d})`, h: (d) => `${prefix}h(${d})`, b: (d) => `${prefix}b(${d})` } };
+}
+
+/** a grid baked into the WGSL as literals (for grids intrinsic to a field's data, which never change with the view) */
+export function bakedGrid(grid: { sampleCount: number; size: readonly number[]; strides: readonly number[]; box: { a: readonly number[]; b: readonly number[] }; spacing: readonly number[] }): GridRef {
+  const pick = (arr: readonly number[], d: string, fmt: (v: number) => string, dflt: string) => { const i = Number(d); return Number.isInteger(i) ? (arr[i] === undefined ? dflt : fmt(arr[i]!)) : `select(select(${fmt(arr[2] ?? 0)}, ${fmt(arr[1] ?? 0)}, ${d} == 1), ${fmt(arr[0] ?? 0)}, ${d} == 0)`; };
+  return {
+    count: String(grid.sampleCount),
+    n: (d) => pick(grid.size, d, String, "1"), s: (d) => pick(grid.strides, d, String, "0"),
+    a: (d) => pick(grid.box.a, d, f32, "0.0"), h: (d) => pick(grid.spacing, d, f32, "0.0"), b: (d) => pick(grid.box.b, d, f32, "0.0"),
+  };
+}
+
 /** structural key (mirrors core's keyOf; kept local so the emitter has no private imports) */
 const keyCache = new WeakMap<object, string>();
 export function keyOf(e: SExpr | VExpr): string {

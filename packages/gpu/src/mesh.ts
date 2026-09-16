@@ -36,8 +36,8 @@ export interface GpuMesh {
 
 export function allocMesh(backend: GpuBackend, capacity: number): GpuMesh {
   const dev = backend.device;
-  const buffer = dev.createBuffer({ size: Math.max(32, capacity * 3 * VERT_FLOATS * 4), usage: RESIDENT_USAGE });
-  const indirect = dev.createBuffer({ size: 16, usage: RESIDENT_USAGE });
+  const buffer = backend.createBuffer({ size: Math.max(32, capacity * 3 * VERT_FLOATS * 4), usage: RESIDENT_USAGE });
+  const indirect = backend.createBuffer({ size: 16, usage: RESIDENT_USAGE });
   dev.queue.writeBuffer(indirect, 0, new Uint32Array([0, 1, 0, 0]));
   return { buffer, indirect, capacity, destroy: () => { buffer.destroy(); indirect.destroy(); } };
 }
@@ -184,6 +184,12 @@ export interface FusedIsosurface {
  * grid). With a symbolic `field` the vertices are projected onto the true level
  * set and the normals are the exact gradient there; otherwise normals come from
  * central differences of the values. `colour` is evaluated at every vertex.
+ *
+ * The grid (size, strides, origin, spacing) and the mesh capacity travel in the
+ * params buffer, not in the WGSL, so the shader — and its compiled pipeline —
+ * is the same for every resolution of a field: an adaptive resolution ramps
+ * without shader compiles. The kernel counts every triangle through the atomic
+ * even when the mesh is full, so the indirect counter is the true size.
  */
 export function fusedIsosurface(backend: GpuBackend, values: GpuGrid, opts: FusedIsosurfaceOptions = {}): FusedIsosurface {
   const grid = values.grid;
@@ -211,32 +217,30 @@ ${VERT_WGSL}
 @group(0) @binding(2) var<storage, read> vals: array<f32>;
 @group(0) @binding(3) var<storage, read_write> ind: MeshIndirect;
 @group(0) @binding(4) var<storage, read> params: array<f32>;
-const CAPV: u32 = ${capacity * 3}u;
-const NX: i32 = ${nx}; const NY: i32 = ${ny}; const NZ: i32 = ${nz};
-const SX: i32 = ${sx}; const SY: i32 = ${sy}; const SZ: i32 = ${sz};
-const CELLS: i32 = ${cells};
-const A: vec3<f32> = vec3<f32>(${f32(grid.box.a[0]!)}, ${f32(grid.box.a[1]!)}, ${f32(grid.box.a[2]!)});
-const H: vec3<f32> = vec3<f32>(${f32(hx)}, ${f32(hy)}, ${f32(hz)});
+// params: [level, capV(bits), nx, ny, nz, sx, sy, sz (bits), ax, ay, az, hx, hy, hz, maxDist]
+fn pi_(i: i32) -> i32 { return bitcast<i32>(params[i]); }
 const CUBE_: array<vec3<i32>, 8> = array<vec3<i32>, 8>(${CUBE.map(([a, b2, c]) => `vec3<i32>(${a}, ${b2}, ${c})`).join(", ")});
 const TETS_: array<vec4<i32>, 6> = array<vec4<i32>, 6>(${TETS.map((T) => `vec4<i32>(${T.join(", ")})`).join(", ")});
 const EDGE_A: array<i32, ${TET_EDGES.length}> = array<i32, ${TET_EDGES.length}>(${TET_EDGES.map(([a]) => a).join(", ")});
 const EDGE_B: array<i32, ${TET_EDGES.length}> = array<i32, ${TET_EDGES.length}>(${TET_EDGES.map(([, b2]) => b2).join(", ")});
 const TRI: array<i32, ${triTable.length}> = array<i32, ${triTable.length}>(${triTable.join(", ")});
-fn val_(i: i32, j: i32, k: i32) -> f32 { return vals[i * SX + j * SY + k * SZ]; }
+fn val_(i: i32, j: i32, k: i32) -> f32 { return vals[i * pi_(5) + j * pi_(6) + k * pi_(7)]; }
 // central differences (one-sided at the faces), world units
 fn gridGrad_(i: i32, j: i32, k: i32) -> vec3<f32> {
-  let i0 = max(i - 1, 0); let i1 = min(i + 1, NX - 1);
-  let j0 = max(j - 1, 0); let j1 = min(j + 1, NY - 1);
-  let k0 = max(k - 1, 0); let k1 = min(k + 1, NZ - 1);
+  let H = vec3<f32>(params[11], params[12], params[13]);
+  let i0 = max(i - 1, 0); let i1 = min(i + 1, pi_(2) - 1);
+  let j0 = max(j - 1, 0); let j1 = min(j + 1, pi_(3) - 1);
+  let k0 = max(k - 1, 0); let k1 = min(k + 1, pi_(4) - 1);
   return vec3<f32>(
     select((val_(i1, j, k) - val_(i0, j, k)) / (f32(i1 - i0) * H.x), 0.0, i1 == i0),
     select((val_(i, j1, k) - val_(i, j0, k)) / (f32(j1 - j0) * H.y), 0.0, j1 == j0),
     select((val_(i, j, k1) - val_(i, j, k0)) / (f32(k1 - k0) * H.z), 0.0, k1 == k0));
 }
 ${exact ? projection3Wgsl(fn, dx, dy, dz, symbolic!.box) : ""}
-const MAXD: f32 = ${f32(maxDist)};
 fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
+  let A = vec3<f32>(params[8], params[9], params[10]);
+  let H = vec3<f32>(params[11], params[12], params[13]);
   let a = EDGE_A[e]; let bb = EDGE_B[e];
   let va = v[a]; let vb = v[bb];
   var t: f32 = 0.0;
@@ -244,7 +248,7 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   let ca = CUBE_[a]; let cb = CUBE_[bb];
   let g = vec3<f32>(c) + vec3<f32>(ca) + (vec3<f32>(cb) - vec3<f32>(ca)) * t;
   var p = A + g * H;
-  ${exact ? `let pr = project3_(p, MAXD, level); if (pr.w > 0.5) { p = pr.xyz; }` : ""}
+  ${exact ? `let pr = project3_(p, params[14], level); if (pr.w > 0.5) { p = pr.xyz; }` : ""}
   var out: Vert;
   out.p = p;
   ${symbolic ? `let gr = vec3<f32>(${dx}(p, -1), ${dy}(p, -1), ${dz}(p, -1));` : `let ga = gridGrad_(c.x + ca.x, c.y + ca.y, c.z + ca.z); let gb = gridGrad_(c.x + cb.x, c.y + cb.y, c.z + cb.z); let gr = ga + (gb - ga) * t;`}
@@ -255,8 +259,11 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   return out;
 }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let NY = pi_(3); let NZ = pi_(4);
+  let cells = (pi_(2) - 1) * (NY - 1) * (NZ - 1);
   let cell = i32(id.x);
-  if (cell >= CELLS) { return; }
+  if (cell >= cells) { return; }
+  let capV = bitcast<u32>(params[1]);
   // cell index -> (i, j, k), k fastest like the grid
   let i = cell / ((NY - 1) * (NZ - 1));
   let r = cell - i * ((NY - 1) * (NZ - 1));
@@ -283,7 +290,7 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
       if (e0 < 0) { break; }
       let e1 = TRI[base + q + 1]; let e2 = TRI[base + q + 2];
       let at = atomicAdd(&ind.vertexCount, 3u);
-      if (at + 3u <= CAPV) {
+      if (at + 3u <= capV) {
         verts[at] = vertex_(cidx, v, e0, level);
         verts[at + 1u] = vertex_(cidx, v, e1, level);
         verts[at + 2u] = vertex_(cidx, v, e2, level);
@@ -291,6 +298,12 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
     }
   }
 }`;
+  const params = (mesh: GpuMesh, level: number) => {
+    const f = new Float32Array(16), u = new Uint32Array(f.buffer);
+    f[0] = level; u[1] = Math.min(0xffffffff, mesh.capacity * 3); u[2] = nx; u[3] = ny; u[4] = nz; u[5] = sx; u[6] = sy; u[7] = sz;
+    f[8] = grid.box.a[0]!; f[9] = grid.box.a[1]!; f[10] = grid.box.a[2]!; f[11] = hx; f[12] = hy; f[13] = hz; f[14] = maxDist;
+    return f;
+  };
   const kernel = (mesh: GpuMesh, level: number) => ({
     code,
     invocations: cells,
@@ -299,7 +312,7 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
       { role: "r" as const, data: lib.data },
       { role: "r" as const, buffer: values.buffer },
       { role: "rw" as const, buffer: mesh.indirect },
-      { role: "r" as const, data: new Float32Array([level, 0, 0, 0]) },
+      { role: "r" as const, data: params(mesh, level) },
     ],
   });
   return {

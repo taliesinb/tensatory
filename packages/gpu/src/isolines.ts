@@ -12,36 +12,42 @@ import {
 } from "@tensatory/core";
 import type { GpuBackend } from "./device";
 import { ProgramBuilder } from "./program";
-import { f32 } from "./wgsl";
+import { GRID_FLOATS, f32, gridWgsl, packGrid, type GridRef } from "./wgsl";
 
 /*******************************************************/
 /* marching squares */
 
 /**
  * WGSL for `fn cellSegments(c: i32, level: f32) -> CellSegs` — marching squares
- * of one cell of `grid` reading `vals` (bound as array<f32>): up to two
- * segments (a0-b0, a1-b1) and their count (0 for empty / NaN cells).
+ * of one cell of the grid `G` (read at runtime from a grid header, see `gridWgsl`:
+ * the kernel is the same for every grid) reading `vals` (bound as array<f32>):
+ * up to two segments (a0-b0, a1-b1) and their count (0 for empty / NaN cells).
+ * Also `msNX()`, `msNY()`, `msCells()`, `msH()` (spacing) and `msA()` (origin).
  * Needs `isnan_` in scope.
  */
-export function marchingSquaresWgsl(grid: DenseGrid): string {
-  const [nx, ny] = grid.size as [number, number];
-  const sx = grid.strides[0]!, sy = grid.strides[1]!;
+export function marchingSquaresWgsl(G: GridRef): string {
   return `
 struct CellSegs { a0: vec2<f32>, b0: vec2<f32>, a1: vec2<f32>, b1: vec2<f32>, n: u32 }
-const NX: i32 = ${nx}; const NY: i32 = ${ny}; const CELLS: i32 = ${(nx - 1) * (ny - 1)};
+fn msNX() -> i32 { return ${G.n("0")}; }
+fn msNY() -> i32 { return ${G.n("1")}; }
+fn msCells() -> i32 { return (msNX() - 1) * (msNY() - 1); }
+fn msH() -> vec2<f32> { return vec2<f32>(${G.h("0")}, ${G.h("1")}); }
+fn msA() -> vec2<f32> { return vec2<f32>(${G.a("0")}, ${G.a("1")}); }
 fn t_(v0: f32, v1: f32, level: f32) -> f32 { return select((level - v0) / (v1 - v0), 0.5, v0 == v1); }
 fn cellSegments(c: i32, level: f32) -> CellSegs {
   var r: CellSegs; r.n = 0u;
+  let NY = msNY(); let sx = ${G.s("0")}; let sy = ${G.s("1")};
   let i = c / (NY - 1); let j = c % (NY - 1);
-  let v00 = vals[i * ${sx} + j * ${sy}]; let v10 = vals[(i + 1) * ${sx} + j * ${sy}];
-  let v11 = vals[(i + 1) * ${sx} + (j + 1) * ${sy}]; let v01 = vals[i * ${sx} + (j + 1) * ${sy}];
+  let v00 = vals[i * sx + j * sy]; let v10 = vals[(i + 1) * sx + j * sy];
+  let v11 = vals[(i + 1) * sx + (j + 1) * sy]; let v01 = vals[i * sx + (j + 1) * sy];
   if (isnan_(v00) || isnan_(v10) || isnan_(v11) || isnan_(v01)) { return r; }
   var code: u32 = 0u;
   if (v00 >= level) { code |= 1u; } if (v10 >= level) { code |= 2u; } if (v11 >= level) { code |= 4u; } if (v01 >= level) { code |= 8u; }
   if (code == 0u || code == 15u) { return r; }
-  let x0 = ${f32(grid.box.a[0]!)} + f32(i) * ${f32(grid.spacing[0]!)};
-  let y0 = ${f32(grid.box.a[1]!)} + f32(j) * ${f32(grid.spacing[1]!)};
-  let hx = ${f32(grid.spacing[0]!)}; let hy = ${f32(grid.spacing[1]!)};
+  let H = msH(); let A = msA();
+  let x0 = A.x + f32(i) * H.x;
+  let y0 = A.y + f32(j) * H.y;
+  let hx = H.x; let hy = H.y;
   let B = vec2<f32>(x0 + t_(v00, v10, level) * hx, y0);
   let R = vec2<f32>(x0 + hx, y0 + t_(v10, v11, level) * hy);
   let T = vec2<f32>(x0 + t_(v01, v11, level) * hx, y0 + hy);
@@ -66,17 +72,19 @@ fn cellSegments(c: i32, level: f32) -> CellSegs {
 
 const ISNAN_WGSL = `fn isnan_(v: f32) -> bool { let b = bitcast<u32>(v); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }`;
 
-function marchingSquaresCode(grid: DenseGrid): string {
-  return `
+// params: [level, pad×3, grid header]
+const MS_GRID = gridWgsl("pg_", "lvl", 4);
+const marchingSquaresCode = `
 @group(0) @binding(0) var<storage, read_write> segs: array<f32>;
 @group(0) @binding(1) var<storage, read_write> counts: array<u32>;
 @group(0) @binding(2) var<storage, read> vals: array<f32>;
 @group(0) @binding(3) var<storage, read> lvl: array<f32>;
 ${ISNAN_WGSL}
-${marchingSquaresWgsl(grid)}
+${MS_GRID.code}
+${marchingSquaresWgsl(MS_GRID.ref)}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = i32(id.x);
-  if (c >= CELLS) { return; }
+  if (c >= msCells()) { return; }
   let r = cellSegments(c, lvl[0]);
   counts[c] = r.n;
   if (r.n == 0u) { return; }
@@ -84,19 +92,26 @@ ${marchingSquaresWgsl(grid)}
   segs[o] = r.a0.x; segs[o + 1] = r.a0.y; segs[o + 2] = r.b0.x; segs[o + 3] = r.b0.y;
   if (r.n == 2u) { segs[o + 4] = r.a1.x; segs[o + 5] = r.a1.y; segs[o + 6] = r.b1.x; segs[o + 7] = r.b1.y; }
 }`;
+
+/** [level, pad×3, grid header] for the marching-squares kernels */
+export function levelParams(level: number, grid: DenseGrid, extra: number[] = []): Float32Array {
+  const f = new Float32Array(4 + GRID_FLOATS);
+  f[0] = level; extra.forEach((v, i) => { f[1 + i] = v; });
+  packGrid(grid, f, 4);
+  return f;
 }
 
 /** GPU counterpart of core's `marchingSquaresSegments`: segments in the same cell order */
 export async function gpuMarchingSquaresSegments(backend: GpuBackend, grid: DenseGrid, values: ArrayLike<number>, level: number): Promise<Float32Array> {
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
   const { read: [segBuf, cntBuf] } = await backend.runKernel({
-    code: marchingSquaresCode(grid),
+    code: marchingSquaresCode,
     invocations: cells,
     buffers: [
       { role: "rw", size: cells * 8 * 4, readback: true },
       { role: "rw", size: cells * 4, readback: true },
       { role: "r", data: values instanceof Float32Array ? values : Float32Array.from(values as ArrayLike<number>) },
-      { role: "r", data: Float32Array.of(level) },
+      { role: "r", data: levelParams(level, grid) },
     ],
   });
   const segs = new Float32Array(segBuf!), counts = new Uint32Array(cntBuf!);

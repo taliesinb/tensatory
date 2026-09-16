@@ -32,8 +32,8 @@ export interface GpuSegments3 {
 
 export function allocSegments3(backend: GpuBackend, capacity: number, particles: boolean): GpuSegments3 {
   const dev = backend.device;
-  const buffer = dev.createBuffer({ size: Math.max(48, capacity * SEG3_FLOATS * 4), usage: RESIDENT_USAGE });
-  const indirect = dev.createBuffer({ size: 16, usage: RESIDENT_USAGE });
+  const buffer = backend.createBuffer({ size: Math.max(48, capacity * SEG3_FLOATS * 4), usage: RESIDENT_USAGE });
+  const indirect = backend.createBuffer({ size: 16, usage: RESIDENT_USAGE });
   dev.queue.writeBuffer(indirect, 0, new Uint32Array([6, 0, 0, 0]));
   return { buffer, indirect, capacity, particles, destroy: () => { buffer.destroy(); indirect.destroy(); } };
 }

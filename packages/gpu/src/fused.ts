@@ -11,12 +11,15 @@
 
 import { DenseGrid, type ScalarFieldData, type StreamlineSeeds } from "@tensatory/core";
 import type { GpuBackend } from "./device";
-import { marchingSquaresWgsl, projectionWgsl } from "./isolines";
+import { levelParams, marchingSquaresWgsl, projectionWgsl } from "./isolines";
 import { ProgramBuilder } from "./program";
 import type { GpuGrid } from "./resident";
 import { SEG_APPEND_WGSL, SEG_WGSL, type GpuSegments } from "./segments";
 import { SEED_FLOATS, integrateWgsl, packSeeds } from "./flow";
-import { f32 } from "./wgsl";
+import { f32, gridWgsl } from "./wgsl";
+
+/** the isoline kernels' grid header: params[4..] */
+const ISO_GRID = gridWgsl("pg_", "params", 4);
 
 export const ISO_MAXP = 17; // points per refined seed segment (16 pieces)
 
@@ -71,17 +74,23 @@ export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | unde
   lib.code += `\n${extra.join("\n")}`;
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
   const capacity = cells * 2 * (ISO_MAXP - 1);
-  const cell = Math.max(grid.spacing[0]!, grid.spacing[1]!);
   const code = `${lib.code}
 ${SEG_WGSL}
 @group(0) @binding(0) var<storage, read_write> segs: array<Seg>;
 @group(0) @binding(2) var<storage, read> vals: array<f32>;
 @group(0) @binding(3) var<storage, read_write> ind: Indirect;
 @group(0) @binding(4) var<storage, read> params: array<f32>;
-const CAP: u32 = ${capacity}u;
 const MAXP: i32 = ${ISO_MAXP};
-${SEG_APPEND_WGSL}
-${marchingSquaresWgsl(grid)}
+// params: [level, tol, depth, capacity (bits), grid header]. The set's real capacity comes with the params (sets
+// are sized from measured counts, smaller than the worst case); the atomic counts every segment regardless, so
+// the indirect counter is the true size even when the set is full. The grid header keeps the code the same for
+// every grid of a field: no compiles when the resolution or the crop changes.
+fn appendSeg(s: Seg) {
+  let i = atomicAdd(&ind.instanceCount, 1u);
+  if (i < bitcast<u32>(params[3])) { segs[i] = s; }
+}
+${ISO_GRID.code}
+${marchingSquaresWgsl(ISO_GRID.ref)}
 ${exact ? projectionWgsl(fn, dx, dy, slice ? sliceBox(slice) : field!.box) : ""}
 fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
@@ -96,8 +105,9 @@ fn emit(a0: vec2<f32>, b0: vec2<f32>, level: f32, tol: f32) {
   var n: i32 = 2;
   pts[0] = a0; pts[1] = b0;
 ${exact ? `
-  let pa = project_(a0, ${f32(1.5 * cell)}, level); if (pa.z > 0.0) { pts[0] = pa.xy; }
-  let pb = project_(b0, ${f32(1.5 * cell)}, level); if (pb.z > 0.0) { pts[1] = pb.xy; }
+  let cellMax = 1.5 * max(msH().x, msH().y);
+  let pa = project_(a0, cellMax, level); if (pa.z > 0.0) { pts[0] = pa.xy; }
+  let pb = project_(b0, cellMax, level); if (pb.z > 0.0) { pts[1] = pb.xy; }
   // adaptive midpoint refinement, in passes (each pass splits the chords still too coarse)
   for (var round = 0; round < 4; round++) {
     var inserted = false;
@@ -128,7 +138,7 @@ ${exact ? `
 }
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = i32(id.x);
-  if (c >= CELLS) { return; }
+  if (c >= msCells()) { return; }
   let level = params[0]; let tol = params[1];
   let r = cellSegments(c, level);
   if (r.n == 0u) { return; }
@@ -143,7 +153,7 @@ ${exact ? `
       { role: "r" as const, data: lib.data },
       { role: "r" as const, buffer: values.buffer },
       { role: "rw" as const, buffer: segs.indirect },
-      { role: "r" as const, data: Float32Array.of(level, tol, depth, 0) },
+      { role: "r" as const, data: (() => { const f = levelParams(level, grid, [tol, depth]); new Uint32Array(f.buffer)[3] = Math.min(0xffffffff, segs.capacity); return f; })() },
     ],
   });
   return {

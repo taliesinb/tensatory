@@ -21,11 +21,12 @@ import {
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
-import { FunctionEmitter, PRELUDE, expandGrad, f32, vecType, type ArgBindings } from "./wgsl";
+import { FunctionEmitter, GRID_FLOATS, PRELUDE, bakedGrid, expandGrad, f32, gridWgsl, packGrid, vecType, type ArgBindings, type GridRef } from "./wgsl";
 
 export interface GpuProgram {
   code: string;
-  /** every uploaded array, packed into one storage buffer (binding 1; binding 0 is the output) */
+  /** every uploaded array, packed into one storage buffer (binding 1; binding 0 is the output); the first
+   *  GRID_FLOATS describe the dispatch grid, so the code is the same for every grid a field is sampled on */
   data: Float32Array;
   /** number of output values per grid point (1 for scalars, D for vectors) */
   channels: number;
@@ -37,13 +38,18 @@ const NAN = "nan_()"; // WGSL rejects NaN constants; the prelude builds one at r
 export class ProgramBuilder {
   private readonly fns: string[] = [];
   private readonly chunks: Float32Array[] = [];
-  private dataLength = 0;
+  private dataLength = GRID_FLOATS; // the dispatch grid's header comes first
   private readonly emitted = new Map<object, Map<string, string>>();
   private n = 0;
   readonly D: number;
+  /** the dispatch grid as seen from WGSL (read from the header, never baked) */
+  readonly dg: GridRef;
+  private readonly dgCode: string;
 
   constructor(readonly grid: DenseGrid) {
     this.D = grid.dimCount;
+    const g = gridWgsl("dg_", "data", 0);
+    this.dg = g.ref; this.dgCode = g.code;
   }
 
   private name(prefix: string): string { return `${prefix}_${this.n++}`; }
@@ -68,27 +74,29 @@ export class ProgramBuilder {
     return offset;
   }
 
-  /** upload a grid-shaped array and emit a reader `fn name(p, pos) -> f32` for channel `ch` */
+  /**
+   * Upload a grid-shaped array and emit a reader `fn name(p, pos) -> f32` for channel `ch`. `grid` is baked into
+   * the reader when it is the data's own support (intrinsic to the field); data sampled on the dispatch grid
+   * (`grid === this.grid`) reads the grid from the header instead, so the code stays grid-independent.
+   */
   private bufferReader(data: ArrayLike<number>, grid: DenseGrid, channels: number, ch: number): string {
     const off = this.upload(data);
     const buf = "data";
     const nm = this.name("rd");
-    const direct = grid.equals(this.grid, 1e-12);
+    const onDispatch = grid === this.grid;
+    const direct = onDispatch || grid.equals(this.grid, 1e-12);
+    const G = onDispatch ? this.dg : bakedGrid(grid);
     const D = this.D;
     const P = (d: number) => (D === 1 ? "p" : `p[${d}]`);
     const lines: string[] = [];
     // interpolation (unrolled over dimensions and 2^D corners)
     for (let d = 0; d < D; d++) {
-      const n = grid.size[d]!, a = grid.box.a[d]!, b = grid.box.b[d]!, sp = grid.spacing[d]!;
-      const eps = 1e-6 * (b - a) + 1e-7; // f32-scale containment slack (core uses 1e-9 in f64)
-      lines.push(`  if (${P(d)} < ${f32(a - eps)} || ${P(d)} > ${f32(b + eps)}) { return ${NAN}; }`);
-      if (n > 1) {
-        lines.push(`  let g${d}: f32 = clamp((${P(d)} - ${f32(a)}) / ${f32(sp)}, 0.0, ${f32(n - 1)});`);
-        lines.push(`  var i${d}: i32 = i32(floor(g${d})); if (i${d} >= ${n - 1}) { i${d} = ${Math.max(0, n - 2)}; }`);
-        lines.push(`  let f${d}: f32 = g${d} - f32(i${d});`);
-      } else {
-        lines.push(`  let i${d}: i32 = 0; let f${d}: f32 = 0.0;`);
-      }
+      const ds = String(d);
+      lines.push(`  let n${d}: i32 = ${G.n(ds)}; let a${d}: f32 = ${G.a(ds)}; let b${d}: f32 = ${G.b(ds)};`);
+      lines.push(`  let eps${d}: f32 = 1e-6 * (b${d} - a${d}) + 1e-7;`); // f32-scale containment slack (core uses 1e-9 in f64)
+      lines.push(`  if (${P(d)} < a${d} - eps${d} || ${P(d)} > b${d} + eps${d}) { return ${NAN}; }`);
+      lines.push(`  var i${d}: i32 = 0; var f${d}: f32 = 0.0;`);
+      lines.push(`  if (n${d} > 1) { let g = clamp((${P(d)} - a${d}) / ${G.h(ds)}, 0.0, f32(n${d} - 1)); i${d} = i32(floor(g)); if (i${d} >= n${d} - 1) { i${d} = max(0, n${d} - 2); } f${d} = g - f32(i${d}); }`);
     }
     lines.push(`  var r: f32 = 0.0;`);
     for (let c = 0; c < 1 << D; c++) {
@@ -96,7 +104,7 @@ export class ProgramBuilder {
       for (let d = 0; d < D; d++) {
         const hi = (c >> d) & 1;
         w.push(hi ? `f${d}` : `(1.0 - f${d})`);
-        idx.push(`min(i${d} + ${hi}, ${grid.size[d]! - 1}) * ${grid.strides[d]}`);
+        idx.push(`min(i${d} + ${hi}, n${d} - 1) * ${G.s(String(d))}`);
       }
       lines.push(`  r = r + ${w.join(" * ")} * ${buf}[${off} + (${idx.join(" + ")}) * ${channels} + ${ch}];`);
     }
@@ -179,10 +187,11 @@ export class ProgramBuilder {
 
   /** everything emitted so far (prelude + field functions) and the packed data, for kernels that add their own entry point */
   library(): { code: string; data: Float32Array } {
-    const data = new Float32Array(Math.max(4, this.dataLength));
-    let o = 0;
+    const data = new Float32Array(Math.max(GRID_FLOATS, this.dataLength));
+    packGrid(this.grid, data, 0);
+    let o = GRID_FLOATS;
     for (const c of this.chunks) { data.set(c, o); o += c.length; }
-    return { code: [PRELUDE, "@group(0) @binding(1) var<storage, read> data: array<f32>;", ...this.fns].join("\n\n"), data };
+    return { code: [PRELUDE, "@group(0) @binding(1) var<storage, read> data: array<f32>;", this.dgCode, ...this.fns].join("\n\n"), data };
   }
 
   /** the complete program sampling `field` on the dispatch grid */
@@ -191,20 +200,20 @@ export class ProgramBuilder {
     const entry = field.rank === "scalar" ? this.scalar(field) : this.vector(field);
     const direct = field.samplePoints?.equals(grid, 1e-12) ?? false;
     const channels = field.rank === "scalar" ? 1 : D;
-    // grid position -> point, row-major (last axis fastest)
+    // grid position -> point, row-major (last axis fastest); the grid comes from the header
+    const G = this.dg;
     const idx: string[] = ["  var rem: i32 = i;"];
     const comps: string[] = [];
     for (let d = 0; d < D; d++) {
-      const s = grid.strides[d]!;
-      idx.push(`  let g${d}: i32 = rem / ${s}; rem = rem - g${d} * ${s};`);
-      comps.push(`${f32(grid.box.a[d]!)} + f32(g${d}) * ${f32(grid.spacing[d]!)}`);
+      idx.push(`  let s${d}: i32 = ${G.s(String(d))}; let g${d}: i32 = rem / s${d}; rem = rem - g${d} * s${d};`);
+      comps.push(`${G.a(String(d))} + f32(g${d}) * ${G.h(String(d))}`);
     }
     const p = D === 1 ? comps[0]! : `${vecType(D)}(${comps.join(", ")})`;
     const write = channels === 1 ? `  out[i] = ${entry}(p, pos);` : `  let v = ${entry}(p, pos);\n${Array.from({ length: D }, (_, d) => `  out[i * ${D} + ${d}] = v[${d}];`).join("\n")}`;
     const main = `@group(0) @binding(0) var<storage, read_write> out: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i: i32 = i32(id.x);
-  if (i >= ${grid.sampleCount}) { return; }
+  if (i >= ${G.count}) { return; }
 ${idx.join("\n")}
   let p = ${p};
   let pos: i32 = ${direct ? "i" : "-1"};

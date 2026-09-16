@@ -40,7 +40,7 @@ export function sampleResidentSync(backend: GpuBackend, field: ScalarFieldData |
 /** upload CPU values as a resident grid (for CPU-compute / GPU-render) */
 export function uploadGrid(backend: GpuBackend, grid: DenseGrid, values: ArrayLike<number>, channels: number): GpuGrid {
   const data = values instanceof Float32Array ? values : Float32Array.from(values as ArrayLike<number>);
-  const buffer = backend.device.createBuffer({ size: Math.max(16, data.byteLength), usage: RESIDENT_USAGE });
+  const buffer = backend.createBuffer({ size: Math.max(16, data.byteLength), usage: RESIDENT_USAGE });
   backend.device.queue.writeBuffer(buffer, 0, data as unknown as BufferSource);
   return { grid, channels, buffer, destroy: () => buffer.destroy() };
 }
