@@ -159,18 +159,19 @@ describe("example bundles agree on every field and derived use", () => {
       if (!gpu) return;
       const b = Bundle.parse(JSON.parse(readFileSync(join(dir, file), "utf8")));
       expect(b.buildAll().size).toBe(0);
+      const gridFor = (d: { samplePoints?: DenseGrid | undefined; box: Box }) => d.samplePoints ?? new DenseGrid(d.box.dimCount === 3 ? [14, 13, 12] : [48, 48], d.box);
       for (const id of b.scalarFieldIds) {
         const f = b.scalarField(id);
-        const g = f.data.samplePoints ?? new DenseGrid([48, 48], f.data.box);
+        const g = gridFor(f.data), D = f.data.dimCount;
         await agreeScalar(f.data, g, `${file}:${id}`, 5e-4);
-        const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: f.data }, vectors: {} });
+        const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, D, { scalars: { f: f.data }, vectors: {} });
         await agreeVector(grad, g, `${file}:∇${id}`, 2e-3);
       }
       for (const id of b.vectorFieldIds) {
         const v = b.vectorField(id);
-        const g = v.data.samplePoints ?? new DenseGrid([48, 48], v.data.box);
+        const g = gridFor(v.data), D = v.data.dimCount;
         await agreeVector(v.data, g, `${file}:${id}`, 5e-4);
-        const norm = new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, 2, { scalars: {}, vectors: { v: v.data } });
+        const norm = new SymbolicScalarFieldData({ k: "norm", v: { k: "argv", name: "v" } }, D, { scalars: {}, vectors: { v: v.data } });
         await agreeScalar(norm, g, `${file}:|${id}|`, 5e-4);
       }
     });

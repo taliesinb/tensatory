@@ -1,2 +1,12 @@
-export { integrateStreamlines, integrateFromSeeds, streamlineSeeds, lcg } from "./streamlines";
-export type { StreamlineOptions, Streamline, StreamlineSeeds } from "./streamlines";
+export {
+  integrateStreamlines,
+  integrateFromSeeds,
+  planStreamlines,
+  evenlySpacedStreamlines,
+  coverageStreamlines,
+  streamlineSeeds,
+  seedCellSide,
+  lcg,
+  STREAMLINE_MODES,
+} from "./streamlines";
+export type { StreamlineOptions, StreamlineMode, Streamline, StreamlineSeeds, StreamlinePlan } from "./streamlines";

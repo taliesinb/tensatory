@@ -22,3 +22,5 @@ export { GpuRenderer } from "./render";
 export type { GpuView, ValueMap, Lut, GpuRasterLayer, GpuLineLayer, GpuScene } from "./render";
 export { gpuStats, blurResidentSync, smoothedIsolines } from "./passes";
 export type { GpuStats, SmoothedIsolines } from "./passes";
+export { VERT_FLOATS, VERT_WGSL, allocMesh, resetMesh, packMesh, uploadMesh, readMesh, fusedIsosurface } from "./mesh";
+export type { GpuMesh, FusedIsosurface } from "./mesh";
