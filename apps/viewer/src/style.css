@@ -99,6 +99,29 @@ label[data-tip]:not(.tick) { cursor: help; }
 .loghead button { background: none; border: none; color: #aab; cursor: pointer; font-size: 14px; }
 #logText { margin: 0; padding: 10px 12px; overflow: auto; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
 
+/* interval slider (interval.ts), plain variant: the 3D crop ranges. The colormap variant below overrides. */
+.isl { flex: 1; min-width: 0; height: 14px; background: #222631; border-radius: 3px; position: relative; cursor: pointer; }
+.isl:hover, .isl.locked { background: #282e3e; }
+.isl.none, .isl.none:hover { background: #161a22; cursor: crosshair; }
+.isl.onhandle, .isl.locked.m-lo, .isl.locked.m-hi, .isl.locked.m-scale, .isl.locked.m-create { cursor: ew-resize; }
+.isl.onband { cursor: grab; }
+.isl.locked.m-band { cursor: grabbing; }
+.isl.onfill { cursor: cell; }
+.isl > div { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+.isl:not(.cmap) .band { background: rgba(59,130,246,.28); }
+.isl:not(.cmap).locked .band { background: rgba(96,165,250,.34); }
+.isl:not(.cmap).hover .band { background: rgba(147,197,253,.34); }
+.isl:not(.cmap).half-lo .band { background: linear-gradient(90deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
+.isl:not(.cmap).half-hi .band { background: linear-gradient(270deg, rgba(59,130,246,.28), rgba(59,130,246,.06)); }
+.isl:not(.cmap).half-lo.locked .band, .isl:not(.cmap).half-lo.hover .band { background: linear-gradient(90deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
+.isl:not(.cmap).half-hi.locked .band, .isl:not(.cmap).half-hi.hover .band { background: linear-gradient(270deg, rgba(96,165,250,.34), rgba(96,165,250,.08)); }
+.isl.half-lo .hi, .isl.half-hi .lo, .isl.none > div { display: none; }
+.isl .lo, .isl .hi { width: 3px; margin-left: -1.5px; background: #3b82f6; border-radius: 1px; }
+.isl.locked .lo, .isl.locked .hi { background: #60a5fa; }
+.isl.hover .lo, .isl.hover .hi { background: #93c5fd; }
+.isl .was { width: 3px; margin-left: -1.5px; background: repeating-linear-gradient(to bottom, #3b82f6 0 2px, transparent 2px 4px); display: none; }
+@media (min-resolution: 2dppx) { .isl .was { width: 1.5px; margin-left: -0.75px; } }
+
 /* colormap interval selection on the legend bars (interval.ts + cmapInterval.ts; prototyped in apps/ui-proto).
    The bar's background is the colormap painted through the selection (inline); the selection is a bracket
    |‾‾‾| : a 2px top line 2px above the bar and 2px edges down to the bar's bottom. Paint children only: the

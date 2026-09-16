@@ -31,7 +31,7 @@ import {
 } from "@tensatory/core";
 import { MAPS, cmap, type Colormap } from "./colormap";
 import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lutFor, makeCmapInterval, selectParam, selectionKey } from "./cmapInterval";
-import { makeIntervalSlider } from "./interval";
+import { makeIntervalSlider, type IntervalEl } from "./interval";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import type { Manifold, PointSet } from "@tensatory/core";
@@ -39,7 +39,7 @@ import { Renderer2D, type LineLayer, type Scene } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
-import { View3D, type Use3 } from "./view3d";
+import { View3D, type CropRange, type Use3 } from "./view3d";
 import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
@@ -66,6 +66,7 @@ installTooltips();
 installTicks();
 for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
+for (const el of document.querySelectorAll<HTMLElement>(".isl:not(.cmap)")) makeIntervalSlider(el); // the 3D crop ranges
 
 const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim"] as const;
 const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode"] as const;
@@ -618,6 +619,20 @@ function render(): void {
 /*******************************************************/
 /* the 3D arm (view3d.ts): isosurfaces of I_V coloured by I_C, WebGPU only */
 
+/* crop ranges: interval sliders whose drags / shift-previews only show a dotted box; the values are committed
+   (and the surfaces recomputed) on release */
+const CROP_IDS = ["cropx", "cropy", "cropz"] as const;
+const cropEl = (id: (typeof CROP_IDS)[number]) => ui[id] as unknown as IntervalEl;
+let cropCommitted: CropRange[] = [[null, null], [null, null], [null, null]];
+let cropPreviewing = false;
+const readCrop = () => { cropCommitted = CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange); };
+const fmtCrop = (r: CropRange) => (r[0] === null && r[1] === null ? "—" : `${r[0] === null ? "" : r[0].toFixed(2)}…${r[1] === null ? "" : r[1].toFixed(2)}`);
+for (const id of CROP_IDS) {
+  const el = cropEl(id);
+  el.addEventListener("input", () => { cropPreviewing = true; state.dirty = true; });
+  el.addEventListener("change", () => { cropPreviewing = false; readCrop(); state.dirty = true; saveOptsSoon(); });
+}
+
 let view3d: View3D | undefined;
 const gradCache = new Map<string, VectorFieldData>();
 function view3dOf(): View3D | undefined {
@@ -646,7 +661,8 @@ function view3dOf(): View3D | undefined {
     showOutline: () => ui.isoOutline.checked,
     showPoints: () => ui.showPoints.checked,
     showBox: () => ui.showBox.checked,
-    crop: () => [num("cropx") ?? 1, num("cropy") ?? 1, num("cropz") ?? 1],
+    crop: () => cropCommitted,
+    cropPreview: () => (cropPreviewing ? CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange) : undefined),
     pointSets: spacePointSets,
     colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
   });
@@ -664,7 +680,7 @@ function render3d(): void {
   $("res3v").textContent = ui.res3.value ?? "";
   $("metricv").textContent = ui.metric.value ?? "—";
   $("linev").textContent = ui.line.value ?? "—";
-  for (const a of ["x", "y", "z"] as const) $(`crop${a}v`).textContent = (num(`crop${a}`) ?? 1).toFixed(2);
+  CROP_IDS.forEach((id, d) => { $(`${id}v`).textContent = fmtCrop(cropPreviewing ? [cropEl(id).lo, cropEl(id).hi] : cropCommitted[d]!); });
   updateIsoNotches();
 }
 
@@ -965,7 +981,7 @@ function loadOpts(): boolean {
       if ((CHECKS as readonly string[]).includes(id)) ui[id as CheckId].checked = Boolean(v);
       else if ((VALUES as readonly string[]).includes(id)) ui[id as ValueId].value = v as string | null;
     }
-    syncTicks(); syncIsoRate();
+    syncTicks(); syncIsoRate(); readCrop();
     if (o.maps) state.maps = { ...o.maps };
     if (o.intervals) { state.intervals = {}; for (const [id, v] of Object.entries(o.intervals)) { const s = asSelection(v); if (!isNoSelection(s)) state.intervals[id] = s; } }
     if (so?.sel) for (const k of SLOTS) { const id = so.sel[k]; if (id === null || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id ?? NONE; }
@@ -1214,7 +1230,7 @@ function frame(now: number): void {
     else if ((VALUES as readonly string[]).includes(k)) ui[k as ValueId].value = v === "null" ? null : v;
     else if ((SLOTS as readonly string[]).includes(k)) { const id = v === "none" ? NONE : isUsable(v) ? v : undefined; if (id !== undefined) setSel({ [k]: id }, true); }
   }
-  syncTicks(); syncIsoRate(); buildMetrics(); updateInfo(); fitLeftColumn();
+  syncTicks(); syncIsoRate(); readCrop(); buildMetrics(); updateInfo(); fitLeftColumn();
   state.dirty = true;
   requestAnimationFrame(frame);
 })();

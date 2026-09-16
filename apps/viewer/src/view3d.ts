@@ -41,6 +41,7 @@ import {
 } from "@tensatory/gpu";
 
 export interface Use3 { id: string; data: ScalarFieldData }
+export type CropRange = [number | null, number | null];
 
 export interface View3DContext {
   gpu: GpuBackend;
@@ -68,8 +69,10 @@ export interface View3DContext {
   showOutline(): boolean;
   showPoints(): boolean;
   showBox(): boolean;
-  /** crop fractions per axis (0..1]: the box is cut at a + crop · size */
-  crop(): [number, number, number];
+  /** committed crop range per axis as fractions of the box, null = the box's own end */
+  crop(): CropRange[];
+  /** the range being dragged / shift-previewed (not committed): drawn as a dotted box only */
+  cropPreview(): CropRange[] | undefined;
   pointSets(): PointSet[];
   colour(u: Use3): { map: ValueMap; lut: Lut; key: string };
 }
@@ -217,10 +220,10 @@ export class View3D {
     });
   }
 
-  /** the cropped box: a … a + crop · size */
-  private cropped(box: Box): Box {
-    const crop = this.c.crop();
-    return new Box([...box.a], box.a.map((a, d) => a + Math.max(0.02, Math.min(1, crop[d]!)) * box.size[d]!));
+  /** the box cut to the crop ranges (fractions of the box; an open end is the box's own end) */
+  private cropped(box: Box, crop: CropRange[]): Box {
+    const f = (v: number | null, dflt: number) => Math.max(0, Math.min(1, v ?? dflt));
+    return new Box(box.a.map((a, d) => a + f(crop[d]?.[0] ?? null, 0) * box.size[d]!), box.a.map((a, d) => a + Math.max(f(crop[d]?.[0] ?? null, 0) + 0.01, f(crop[d]?.[1] ?? null, 1)) * box.size[d]!));
   }
 
   /**
@@ -299,7 +302,9 @@ export class View3D {
     const box = iv?.data.box ?? this.box;
     const key = box.intervals.flat().join(",");
     if (key !== this.boxKey) { this.boxKey = key; this.box = box; if (!this.cameraCustom) this.fit(box); }
-    const cbox = this.cropped(box);
+    const cbox = this.cropped(box, c.crop());
+    const preview = c.cropPreview();
+    const pbox = preview ? this.cropped(box, preview) : undefined;
     const meshes: GpuMeshLayer[] = [];
     const lines: GpuLineLayer3D[] = [];
     if (c.showBox()) lines.push({ segs: this.segs3(`box|${cbox.intervals.flat().join(",")}`, () => boxEdges(cbox.a, cbox.b)), width: 1.2, color: [0.5, 0.56, 0.72], uncropped: true });
@@ -321,8 +326,8 @@ export class View3D {
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
     this.renderer.resize();
-    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMax: cbox.b as [number, number, number] });
-    this.overlay(cbox);
+    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
+    this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);
   }
 
   /** world → css px on the overlay */
@@ -330,16 +335,29 @@ export class View3D {
     return project(this.renderer.viewProj, p, this.c.overlay.clientWidth, this.c.overlay.clientHeight);
   }
 
-  private overlay(box: Box): void {
+  private overlay(box: Box, preview: Box | undefined): void {
     const cv = this.c.overlay, ctx = this.ctx2d;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = Math.max(1, Math.round(cv.clientWidth * dpr)), h = Math.max(1, Math.round(cv.clientHeight * dpr));
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cv.clientWidth, cv.clientHeight);
+    if (preview) {
+      // the box a crop drag / shift-preview would commit: a dotted outline, nothing recomputed
+      const [a, b] = [preview.a, preview.b];
+      const corner = (m: number) => [m & 1 ? b[0]! : a[0]!, m & 2 ? b[1]! : a[1]!, m & 4 ? b[2]! : a[2]!];
+      ctx.strokeStyle = "#93c5fd"; ctx.lineWidth = 1.2; ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      for (let m = 0; m < 8; m++) for (const bit of [1, 2, 4]) {
+        if (m & bit) continue;
+        const p = this.project(corner(m)), q = this.project(corner(m | bit));
+        if (p && q) { ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); }
+      }
+      ctx.stroke(); ctx.setLineDash([]);
+    }
     if (this.c.showPoints()) {
       for (const ps of this.c.pointSets()) {
-        const inside = (p: ArrayLike<number>) => p[0]! <= box.b[0]! + 1e-9 && p[1]! <= box.b[1]! + 1e-9 && p[2]! <= box.b[2]! + 1e-9;
+        const inside = (p: ArrayLike<number>) => box.contains(p, 1e-9);
         const pts = ps.points.map((p) => (inside(p) ? this.project(p) : undefined));
         const single = pts.length === 1;
         pts.forEach((p, i) => {

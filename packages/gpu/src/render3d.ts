@@ -43,7 +43,8 @@ export interface GpuScene3D {
   background: [number, number, number];
   meshes: GpuMeshLayer[];
   lines?: GpuLineLayer3D[];
-  /** fragments with any coordinate above this are discarded (crop planes); default: none */
+  /** fragments outside [cropMin, cropMax] are discarded (crop planes); default: none */
+  cropMin?: [number, number, number];
   cropMax?: [number, number, number];
 }
 
@@ -95,7 +96,7 @@ export function project(vp: Mat4, p: ArrayLike<number>, width: number, height: n
 }
 
 const MESH_COMMON = `${VERT_WGSL}
-struct MeshU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32> }
+struct MeshU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, cropLo: vec4<f32> }
 @group(0) @binding(0) var<uniform> u: MeshU;
 @group(0) @binding(1) var<storage, read> verts: array<Vert>;
 @group(0) @binding(2) var lut: texture_2d<f32>;
@@ -118,7 +119,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
 }
 // two-sided headlight shading; style: alpha, useLut, 0, 0
 fn shade(in: VOut) -> vec4<f32> {
-  if (any(in.world > u.crop.xyz)) { discard; }
+  if (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz)) { discard; }
   var rgb = u.color.rgb;
   if (u.style.y > 0.5) {
     if (isnan_(in.value)) { discard; }
@@ -142,7 +143,7 @@ fn shade(in: VOut) -> vec4<f32> {
 // width in pixels; records are read as raw floats so one pipeline serves Seg3 (12 floats) and embedded 2D Seg
 // (10 floats + the face plane in u.embed). Particles as in the 2D renderer (head at t, tail behind).
 const LINES3 = `
-struct LineU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, particles: vec4<f32>, embed: vec4<f32>, viewport: vec4<f32> }
+struct LineU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, particles: vec4<f32>, embed: vec4<f32>, viewport: vec4<f32>, cropLo: vec4<f32> }
 @group(0) @binding(0) var<uniform> u: LineU;
 @group(0) @binding(1) var<storage, read> segs: array<f32>;
 @group(0) @binding(2) var lut: texture_2d<f32>;
@@ -199,7 +200,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   return o;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
-  if (u.crop.w > 0.5 && any(in.world > u.crop.xyz)) { discard; }
+  if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
   var bright = 1.0;
   if (u.particles.w > 0.5 && in.len > 0.0) {
     let k = u.particles.x; let split = u.particles.y;
@@ -364,7 +365,7 @@ export class GpuRenderer3D {
     return b;
   }
 
-  private bind(pipeline: GPURenderPipeline, L: GpuMeshLayer, viewProj: Mat4, eye: number[], crop: number[]): GPUBindGroup {
+  private bind(pipeline: GPURenderPipeline, L: GpuMeshLayer, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[]): GPUBindGroup {
     const f = new Float32Array(64);
     f.set(viewProj, 0);
     f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
@@ -372,6 +373,7 @@ export class GpuRenderer3D {
     f.set([L.color[0], L.color[1], L.color[2], 1], 24);
     f.set([L.map?.lo ?? 0, L.map?.hi ?? 1, L.map?.log ? 1 : 0, L.map?.flip ? 1 : 0], 28);
     f.set([crop[0]!, crop[1]!, crop[2]!, 1], 32);
+    f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 36);
     return this.backend.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
@@ -383,7 +385,7 @@ export class GpuRenderer3D {
     });
   }
 
-  private bindLines(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], w: number, h: number): GPUBindGroup {
+  private bindLines(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[], w: number, h: number): GPUBindGroup {
     const f = new Float32Array(64);
     f.set(viewProj, 0);
     f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
@@ -396,6 +398,7 @@ export class GpuRenderer3D {
     f.set([L.embed?.axis ?? 0, L.embed?.depth ?? 0, L.embed ? 1 : 0, 0], 40);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     f.set([w, h, dpr, 0], 44);
+    f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 48);
     return this.backend.device.createBindGroup({
       layout: this.lines.getBindGroupLayout(0),
       entries: [
@@ -414,7 +417,7 @@ export class GpuRenderer3D {
     const T = this.ensureTargets(w, h);
     const { viewProj, eye } = cameraMatrices(scene.camera, w / h, scene.radius);
     this.viewProj = viewProj;
-    const crop = scene.cropMax ?? [Infinity, Infinity, Infinity];
+    const crop = scene.cropMax ?? [Infinity, Infinity, Infinity], cropLo = scene.cropMin ?? [-Infinity, -Infinity, -Infinity];
     const [r, g, b] = scene.background;
     const opaque = scene.meshes.filter((m) => m.alpha >= 0.999), trans = scene.meshes.filter((m) => m.alpha < 0.999);
     const enc = dev.createCommandEncoder();
@@ -425,8 +428,8 @@ export class GpuRenderer3D {
       colorAttachments: [{ view: colour, clearValue: { r, g, b, a: 1 }, loadOp: "clear", storeOp: "store" }],
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
-    for (const L of scene.lines ?? []) { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
-    for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop)); p1.drawIndirect(L.mesh.indirect, 0); }
+    for (const L of scene.lines ?? []) { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
+    for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop, cropLo)); p1.drawIndirect(L.mesh.indirect, 0); }
     p1.end();
     if (trans.length) {
       const p2 = enc.beginRenderPass({
@@ -436,7 +439,7 @@ export class GpuRenderer3D {
         ],
         depthStencilAttachment: { view: depth, depthLoadOp: "load", depthStoreOp: "store" },
       });
-      for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye, crop)); p2.drawIndirect(L.mesh.indirect, 0); }
+      for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye, crop, cropLo)); p2.drawIndirect(L.mesh.indirect, 0); }
       p2.end();
       const p3 = enc.beginRenderPass({ colorAttachments: [{ view: colour, loadOp: "load", storeOp: "store" }] });
       p3.setPipeline(this.composite);
