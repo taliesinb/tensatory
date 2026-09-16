@@ -6,22 +6,34 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, marchingTetrahedra, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, isoContours, marchingTetrahedra, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   allocMesh,
+  allocSegments,
+  boxEdges,
+  fusedIsolines,
   fusedIsosurface,
   packMesh,
+  packPolylines,
+  packPolylines3,
   project,
   resetMesh,
+  resetSegments,
   sampleResidentSync,
   uploadMesh,
+  uploadSegments,
+  uploadSegments3,
   type Camera3D,
+  type FusedIsolines,
   type FusedIsosurface,
   type GpuBackend,
   type GpuGrid,
+  type GpuLineLayer3D,
   type GpuMesh,
   type GpuMeshLayer,
+  type GpuSegments,
+  type GpuSegments3,
   type Lut,
   type ValueMap,
 } from "@tensatory/gpu";
@@ -44,8 +56,12 @@ export interface View3DContext {
   resolution(): number;
   compute(): "cpu" | "gpu";
   showIso(): boolean;
+  /** isolines of I_V on the (cropped) box faces */
+  showOutline(): boolean;
   showPoints(): boolean;
   showBox(): boolean;
+  /** crop fractions per axis (0..1]: the box is cut at a + crop · size */
+  crop(): [number, number, number];
   pointSets(): PointSet[];
   colour(u: Use3): { map: ValueMap; lut: Lut; key: string };
 }
@@ -65,6 +81,12 @@ export class View3D {
   private readonly meshes = new Map<string, { mesh: GpuMesh; stamp: string }>();
   private readonly cpuMeshes = new Map<string, GpuMesh>();
   private readonly cpuValues = new Map<string, Float64Array>();
+  // face isolines: per face a sampled face grid (resident or CPU), the 2D kernel and one segment set per level
+  private readonly faceGrids = new Map<string, GpuGrid>();
+  private readonly faceKernels = new Map<string, FusedIsolines>();
+  private readonly faceSets = new Map<string, { segs: GpuSegments; stamp: string }>();
+  private readonly faceCpu = new Map<string, GpuSegments>();
+  private readonly lines3 = new Map<string, GpuSegments3>();
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
@@ -77,7 +99,13 @@ export class View3D {
     for (const k of this.kernels.values()) k.destroy();
     for (const m of this.meshes.values()) m.mesh.destroy();
     for (const m of this.cpuMeshes.values()) m.destroy();
+    for (const g of this.faceGrids.values()) g.destroy();
+    for (const k of this.faceKernels.values()) k.destroy();
+    for (const f of this.faceSets.values()) f.segs.destroy();
+    for (const f of this.faceCpu.values()) f.destroy();
+    for (const l of this.lines3.values()) l.destroy();
     this.grids.clear(); this.kernels.clear(); this.meshes.clear(); this.cpuMeshes.clear(); this.cpuValues.clear();
+    this.faceGrids.clear(); this.faceKernels.clear(); this.faceSets.clear(); this.faceCpu.clear(); this.lines3.clear();
     this.boxKey = "";
   }
 
@@ -153,13 +181,89 @@ export class View3D {
     });
   }
 
+  /** the cropped box: a … a + crop · size */
+  private cropped(box: Box): Box {
+    const crop = this.c.crop();
+    return new Box([...box.a], box.a.map((a, d) => a + Math.max(0.02, Math.min(1, crop[d]!)) * box.size[d]!));
+  }
+
+  /**
+   * Isolines of the I_V field on the six faces of the cropped box (the prototype's "outline"): where each
+   * isosurface meets the faces. Each face is sampled on a grid with the volume grid's spacing (so on the
+   * uncropped faces the lines coincide with the mesh boundary), contoured by marching squares, and drawn
+   * as 2D segments embedded on the face plane.
+   */
+  private faceLines(iv: Use3, grid: DenseGrid, cbox: Box, levels: number[], width: number): GpuLineLayer3D[] {
+    const out: GpuLineLayer3D[] = [];
+    const gpu = this.c.compute() === "gpu";
+    for (let axis = 0; axis < 3; axis++) for (const hi of [false, true]) {
+      const depth = hi ? cbox.b[axis]! : cbox.a[axis]!;
+      const oa = [0, 1, 2].filter((d) => d !== axis) as [number, number];
+      const size2 = oa.map((d) => Math.max(2, Math.round(cbox.size[d]! / (grid.spacing[d]! || 1)) + 1));
+      const box2 = new Box(oa.map((d) => cbox.a[d]!), oa.map((d) => cbox.b[d]!));
+      const grid2 = new DenseGrid(size2, box2);
+      // the same points as a degenerate 3D grid (size 1 along the axis): what the field is sampled on
+      const size3 = [0, 0, 0], a3 = [0, 0, 0], b3 = [0, 0, 0];
+      size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
+      oa.forEach((d, i) => { size3[d] = size2[i]!; a3[d] = box2.a[i]!; b3[d] = box2.b[i]!; });
+      const grid3 = new DenseGrid(size3, new Box(a3, b3));
+      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}`;
+      const embed = { axis, depth };
+      if (gpu) {
+        let values = this.faceGrids.get(fkey);
+        if (!values) {
+          const v3 = sampleResidentSync(this.c.gpu, iv.data, grid3);
+          values = { grid: grid2, channels: 1, buffer: v3.buffer, destroy: () => v3.destroy() };
+          this.faceGrids.set(fkey, values); lru(this.faceGrids, 12, (g) => g.destroy());
+        }
+        let kernel = this.faceKernels.get(fkey);
+        if (!kernel) { this.faceKernels.set(fkey, (kernel = fusedIsolines(this.c.gpu, undefined, values, undefined, { exact: false }))); lru(this.faceKernels, 12, (k) => k.destroy()); }
+        const capacity = Math.min(kernel.capacity, Math.max(4096, (size2[0]! - 1) * (size2[1]! - 1) * 2));
+        levels.forEach((level, k) => {
+          const sk = `${fkey}|${k}`;
+          let set = this.faceSets.get(sk);
+          if (set && set.segs.capacity !== capacity) { set.segs.destroy(); this.faceSets.delete(sk); set = undefined; }
+          if (!set) { this.faceSets.set(sk, (set = { segs: allocSegments(this.c.gpu, capacity, false), stamp: "" })); lru(this.faceSets, 96, (v) => v.segs.destroy()); }
+          const stamp = `${fkey}|${level}`;
+          if (set.stamp !== stamp) { resetSegments(this.c.gpu, set.segs); kernel!.dispatch(set.segs, level, 0); set.stamp = stamp; }
+          out.push({ segs: set.segs, embed, width, color: [0.92, 0.92, 0.92] });
+        });
+      } else {
+        let vals = this.cpuValues.get(fkey);
+        if (!vals) { this.cpuValues.set(fkey, (vals = Float64Array.from(iv.data.sampleOn(grid3)))); lru(this.cpuValues, 16, () => {}); }
+        for (const level of levels) {
+          const sk = `${fkey}|${level}`;
+          let segs = this.faceCpu.get(sk);
+          if (!segs) { this.faceCpu.set(sk, (segs = uploadSegments(this.c.gpu, packPolylines(isoContours(grid2, vals!, level)), false))); lru(this.faceCpu, 96, (v) => v.destroy()); }
+          out.push({ segs, embed, width, color: [0.92, 0.92, 0.92] });
+        }
+      }
+    }
+    return out;
+  }
+
+  /** a cached uploaded 3D segment set */
+  private segs3(key: string, make: () => Float32Array): GpuSegments3 {
+    let s = this.lines3.get(key);
+    if (!s) { this.lines3.set(key, (s = uploadSegments3(this.c.gpu, make(), false))); lru(this.lines3, 16, (v) => v.destroy()); }
+    return s;
+  }
+
   render(): void {
     const c = this.c;
     const iv = c.showIso() ? c.isoField() : undefined;
     const box = iv?.data.box ?? this.box;
     const key = box.intervals.flat().join(",");
     if (key !== this.boxKey) { this.boxKey = key; this.box = box; if (!this.cameraCustom) this.fit(box); }
+    const cbox = this.cropped(box);
     const meshes: GpuMeshLayer[] = [];
+    const lines: GpuLineLayer3D[] = [];
+    if (c.showBox()) lines.push({ segs: this.segs3(`box|${cbox.intervals.flat().join(",")}`, () => boxEdges(cbox.a, cbox.b)), width: 1.2, color: [0.5, 0.56, 0.72], uncropped: true });
+    if (c.showPoints()) {
+      for (const ps of c.pointSets()) {
+        if (ps.ordered && ps.points.length > 1) lines.push({ segs: this.segs3(`ps|${ps.id}`, () => packPolylines3([ps.points.flat()])), width: 1.5, color: [1, 1, 1] });
+      }
+    }
     if (iv) {
       const ic = c.colourField();
       const grid = this.grid(box);
@@ -168,10 +272,11 @@ export class View3D {
       const alpha = c.alpha();
       const colour = ic ? c.colour(ic) : undefined;
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
+      if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
     this.renderer.resize();
-    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes });
-    this.overlay(box);
+    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMax: cbox.b as [number, number, number] });
+    this.overlay(cbox);
   }
 
   /** world → css px on the overlay */
@@ -186,28 +291,11 @@ export class View3D {
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cv.clientWidth, cv.clientHeight);
-    if (this.c.showBox()) {
-      const [a, b] = [box.a, box.b];
-      const corner = (m: number) => [m & 1 ? b[0]! : a[0]!, m & 2 ? b[1]! : a[1]!, m & 4 ? b[2]! : a[2]!];
-      ctx.strokeStyle = "#7f8fb8"; ctx.lineWidth = 1.2; ctx.globalAlpha = 0.8;
-      ctx.beginPath();
-      for (let m = 0; m < 8; m++) for (const bit of [1, 2, 4]) {
-        if (m & bit) continue;
-        const p = this.project(corner(m)), q = this.project(corner(m | bit));
-        if (p && q) { ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); }
-      }
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
     if (this.c.showPoints()) {
       for (const ps of this.c.pointSets()) {
-        const pts = ps.points.map((p) => this.project(p));
+        const inside = (p: ArrayLike<number>) => p[0]! <= box.b[0]! + 1e-9 && p[1]! <= box.b[1]! + 1e-9 && p[2]! <= box.b[2]! + 1e-9;
+        const pts = ps.points.map((p) => (inside(p) ? this.project(p) : undefined));
         const single = pts.length === 1;
-        if (ps.ordered && pts.length > 1) {
-          ctx.beginPath(); let started = false;
-          for (const p of pts) { if (!p) continue; if (started) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); started = true; }
-          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5; ctx.stroke();
-        }
         pts.forEach((p, i) => {
           if (!p) return;
           const head = single || (ps.ordered && i === pts.length - 1);

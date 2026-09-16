@@ -7,8 +7,10 @@
 // projects with `Camera3D`.
 
 import type { GpuBackend } from "./device";
+import { SEG3_FLOATS, type GpuSegments3 } from "./lines3d";
 import { VERT_WGSL, type GpuMesh } from "./mesh";
 import type { Lut, ValueMap } from "./render";
+import { SEG_FLOATS, type GpuSegments } from "./segments";
 
 /** orbit camera: looks at `target` from `distance` along (yaw, pitch); perspective with vertical `fov` */
 export interface Camera3D { target: [number, number, number]; distance: number; yaw: number; pitch: number; fov: number }
@@ -21,12 +23,28 @@ export interface GpuMeshLayer {
   map?: ValueMap;
   lut?: Lut;
 }
+/** thick screen-space lines with depth: Seg3 records, or 2D Seg records embedded on the plane `embed.axis = embed.depth` */
+export interface GpuLineLayer3D {
+  segs: GpuSegments3 | GpuSegments;
+  embed?: { axis: number; depth: number };
+  /** css px */
+  width: number;
+  color: [number, number, number];
+  map?: ValueMap;
+  lut?: Lut;
+  particles?: { tail: number; split: number; travel: number };
+  /** ignore the crop planes (the box outline itself) */
+  uncropped?: boolean;
+}
 export interface GpuScene3D {
   camera: Camera3D;
   /** the world box the camera frames (near / far planes are derived from it) */
   radius: number;
   background: [number, number, number];
   meshes: GpuMeshLayer[];
+  lines?: GpuLineLayer3D[];
+  /** fragments with any coordinate above this are discarded (crop planes); default: none */
+  cropMax?: [number, number, number];
 }
 
 /** column-major 4×4 helpers */
@@ -77,7 +95,7 @@ export function project(vp: Mat4, p: ArrayLike<number>, width: number, height: n
 }
 
 const MESH_COMMON = `${VERT_WGSL}
-struct MeshU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32> }
+struct MeshU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32> }
 @group(0) @binding(0) var<uniform> u: MeshU;
 @group(0) @binding(1) var<storage, read> verts: array<Vert>;
 @group(0) @binding(2) var lut: texture_2d<f32>;
@@ -100,6 +118,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
 }
 // two-sided headlight shading; style: alpha, useLut, 0, 0
 fn shade(in: VOut) -> vec4<f32> {
+  if (any(in.world > u.crop.xyz)) { discard; }
   var rgb = u.color.rgb;
   if (u.style.y > 0.5) {
     if (isnan_(in.value)) { discard; }
@@ -117,6 +136,96 @@ fn shade(in: VOut) -> vec4<f32> {
   let side = select(1.0, 0.8, facing < 0.0);
   let lit = rgb * (0.28 + 0.72 * diff) * side + vec3<f32>(spec);
   return vec4<f32>(lit, u.style.x);
+}`;
+
+// thick lines: 6 vertices per segment, offset perpendicular to the segment's screen direction by half the
+// width in pixels; records are read as raw floats so one pipeline serves Seg3 (12 floats) and embedded 2D Seg
+// (10 floats + the face plane in u.embed). Particles as in the 2D renderer (head at t, tail behind).
+const LINES3 = `
+struct LineU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, particles: vec4<f32>, embed: vec4<f32>, viewport: vec4<f32> }
+@group(0) @binding(0) var<uniform> u: LineU;
+@group(0) @binding(1) var<storage, read> segs: array<f32>;
+@group(0) @binding(2) var lut: texture_2d<f32>;
+@group(0) @binding(3) var lutSampler: sampler;
+fn isnan_(x: f32) -> bool { let b = bitcast<u32>(x); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+fn param(value: f32, m: vec4<f32>) -> f32 {
+  let v = clamp(value, min(m.x, m.y), max(m.x, m.y));
+  var t: f32;
+  if (m.z > 0.5) { t = (log(v) - log(m.x)) / (log(m.y) - log(m.x)); } else { t = (v - m.x) / (m.y - m.x); }
+  t = clamp(t, 0.0, 1.0);
+  return select(t, 1.0 - t, m.w > 0.5);
+}
+struct Rec { a: vec3<f32>, b: vec3<f32>, ca: f32, cb: f32, arc: f32, len: f32, phase: f32 }
+fn lift(q: vec2<f32>) -> vec3<f32> {
+  let ax = i32(u.embed.x); let d = u.embed.y;
+  if (ax == 0) { return vec3<f32>(d, q.x, q.y); }
+  if (ax == 1) { return vec3<f32>(q.x, d, q.y); }
+  return vec3<f32>(q.x, q.y, d);
+}
+fn record(i: u32) -> Rec {
+  var r: Rec;
+  if (u.embed.z > 0.5) {
+    let o = i * ${SEG_FLOATS}u;
+    r.a = lift(vec2<f32>(segs[o], segs[o + 1u])); r.b = lift(vec2<f32>(segs[o + 2u], segs[o + 3u]));
+    r.ca = segs[o + 4u]; r.cb = segs[o + 5u]; r.arc = segs[o + 6u]; r.len = segs[o + 7u]; r.phase = segs[o + 8u];
+  } else {
+    let o = i * ${SEG3_FLOATS}u;
+    r.a = vec3<f32>(segs[o], segs[o + 1u], segs[o + 2u]); r.ca = segs[o + 3u];
+    r.b = vec3<f32>(segs[o + 4u], segs[o + 5u], segs[o + 6u]); r.cb = segs[o + 7u];
+    r.arc = segs[o + 8u]; r.len = segs[o + 9u]; r.phase = segs[o + 10u];
+  }
+  return r;
+}
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) value: f32, @location(2) arc: f32, @location(3) len: f32, @location(4) phase: f32 }
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut;
+  let s = record(ii);
+  let ca = u.viewProj * vec4<f32>(s.a, 1.0); let cb = u.viewProj * vec4<f32>(s.b, 1.0);
+  if (ca.w <= 1e-6 || cb.w <= 1e-6) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return o; }
+  let vp = u.viewport.xy;
+  let sa = ca.xy / ca.w * 0.5 * vp; let sb = cb.xy / cb.w * 0.5 * vp;
+  let d = sb - sa; let l = length(d);
+  var n = vec2<f32>(1.0, 0.0);
+  if (l > 1e-6) { n = vec2<f32>(-d.y, d.x) / l; }
+  let atB = (vi == 1u || vi == 4u || vi == 5u);
+  let side = select(-1.0, 1.0, vi == 2u || vi == 3u || vi == 5u);
+  let c = select(ca, cb, atB);
+  let off = n * side * 0.5 * u.style.x * u.viewport.z; // width in device px
+  o.pos = vec4<f32>(c.xy + off / (0.5 * vp) * c.w, c.zw);
+  o.world = select(s.a, s.b, atB);
+  o.value = select(s.ca, s.cb, atB);
+  o.arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
+  o.len = s.len; o.phase = s.phase;
+  return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+  if (u.crop.w > 0.5 && any(in.world > u.crop.xyz)) { discard; }
+  var bright = 1.0;
+  if (u.particles.w > 0.5 && in.len > 0.0) {
+    let k = u.particles.x; let split = u.particles.y;
+    if (split <= 1.0) {
+      let period = in.len + k;
+      let t = (u.particles.z + in.phase * period) - floor((u.particles.z + in.phase * period) / period) * period;
+      let a = in.arc - (t - k);
+      if (a < 0.0 || a > k) { discard; }
+      bright = a / k;
+    } else {
+      let t = (u.particles.z + in.phase * in.len) - floor((u.particles.z + in.phase * in.len) / in.len) * in.len;
+      let span = in.len / split;
+      let dd = (in.arc - t) - floor((in.arc - t) / span) * span;
+      if (dd > k) { discard; }
+      bright = dd / k;
+    }
+    if (bright <= 0.02) { discard; }
+  }
+  var rgb = u.color.rgb;
+  if (u.style.z > 0.5) {
+    if (isnan_(in.value)) { discard; }
+    let c = textureSample(lut, lutSampler, vec2<f32>(param(in.value, u.map), 0.5));
+    if (c.a < 0.5) { discard; }
+    rgb = c.rgb;
+  }
+  return vec4<f32>(rgb * bright, 1.0);
 }`;
 
 const OPAQUE = `${MESH_COMMON}
@@ -162,6 +271,7 @@ export class GpuRenderer3D {
   private readonly opaque: GPURenderPipeline;
   private readonly transparent: GPURenderPipeline;
   private readonly composite: GPURenderPipeline;
+  private readonly lines: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly luts = new WeakMap<Lut, GPUTexture>();
   private readonly uniformPool: GPUBuffer[] = [];
@@ -197,6 +307,14 @@ export class GpuRenderer3D {
       },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less" },
+    });
+    const lineMod = dev.createShaderModule({ code: LINES3 });
+    this.lines = dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: lineMod, entryPoint: "vs" },
+      fragment: { module: lineMod, entryPoint: "fs", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
     });
     const compMod = dev.createShaderModule({ code: COMPOSITE });
     this.composite = dev.createRenderPipeline({
@@ -246,18 +364,43 @@ export class GpuRenderer3D {
     return b;
   }
 
-  private bind(pipeline: GPURenderPipeline, L: GpuMeshLayer, viewProj: Mat4, eye: number[]): GPUBindGroup {
+  private bind(pipeline: GPURenderPipeline, L: GpuMeshLayer, viewProj: Mat4, eye: number[], crop: number[]): GPUBindGroup {
     const f = new Float32Array(64);
     f.set(viewProj, 0);
     f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
     f.set([L.alpha, L.lut && L.map ? 1 : 0, 0, 0], 20);
     f.set([L.color[0], L.color[1], L.color[2], 1], 24);
     f.set([L.map?.lo ?? 0, L.map?.hi ?? 1, L.map?.log ? 1 : 0, L.map?.flip ? 1 : 0], 28);
+    f.set([crop[0]!, crop[1]!, crop[2]!, 1], 32);
     return this.backend.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform(f) } },
         { binding: 1, resource: { buffer: L.mesh.buffer } },
+        { binding: 2, resource: this.lutTexture(L.lut ?? WHITE_LUT).createView() },
+        { binding: 3, resource: this.sampler },
+      ],
+    });
+  }
+
+  private bindLines(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], w: number, h: number): GPUBindGroup {
+    const f = new Float32Array(64);
+    f.set(viewProj, 0);
+    f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
+    f.set([L.width, 1, L.lut && L.map ? 1 : 0, 0], 20);
+    f.set([L.color[0], L.color[1], L.color[2], 1], 24);
+    f.set([L.map?.lo ?? 0, L.map?.hi ?? 1, L.map?.log ? 1 : 0, L.map?.flip ? 1 : 0], 28);
+    f.set([crop[0]!, crop[1]!, crop[2]!, L.uncropped ? 0 : 1], 32);
+    const P = L.particles;
+    f.set([P?.tail ?? 0, P?.split ?? 1, P?.travel ?? 0, P && L.segs.particles ? 1 : 0], 36);
+    f.set([L.embed?.axis ?? 0, L.embed?.depth ?? 0, L.embed ? 1 : 0, 0], 40);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    f.set([w, h, dpr, 0], 44);
+    return this.backend.device.createBindGroup({
+      layout: this.lines.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniform(f) } },
+        { binding: 1, resource: { buffer: L.segs.buffer } },
         { binding: 2, resource: this.lutTexture(L.lut ?? WHITE_LUT).createView() },
         { binding: 3, resource: this.sampler },
       ],
@@ -271,6 +414,7 @@ export class GpuRenderer3D {
     const T = this.ensureTargets(w, h);
     const { viewProj, eye } = cameraMatrices(scene.camera, w / h, scene.radius);
     this.viewProj = viewProj;
+    const crop = scene.cropMax ?? [Infinity, Infinity, Infinity];
     const [r, g, b] = scene.background;
     const opaque = scene.meshes.filter((m) => m.alpha >= 0.999), trans = scene.meshes.filter((m) => m.alpha < 0.999);
     const enc = dev.createCommandEncoder();
@@ -281,7 +425,8 @@ export class GpuRenderer3D {
       colorAttachments: [{ view: colour, clearValue: { r, g, b, a: 1 }, loadOp: "clear", storeOp: "store" }],
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
-    for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye)); p1.drawIndirect(L.mesh.indirect, 0); }
+    for (const L of scene.lines ?? []) { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
+    for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop)); p1.drawIndirect(L.mesh.indirect, 0); }
     p1.end();
     if (trans.length) {
       const p2 = enc.beginRenderPass({
@@ -291,7 +436,7 @@ export class GpuRenderer3D {
         ],
         depthStencilAttachment: { view: depth, depthLoadOp: "load", depthStoreOp: "store" },
       });
-      for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye)); p2.drawIndirect(L.mesh.indirect, 0); }
+      for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye, crop)); p2.drawIndirect(L.mesh.indirect, 0); }
       p2.end();
       const p3 = enc.beginRenderPass({ colorAttachments: [{ view: colour, loadOp: "load", storeOp: "store" }] });
       p3.setPipeline(this.composite);

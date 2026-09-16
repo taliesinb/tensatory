@@ -34,11 +34,12 @@ export interface FusedIsolines {
  * fields are projected exactly, sampled fields keep the marching-squares
  * segments.
  */
-export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData, values: GpuGrid, colour?: ScalarFieldData, opts: { exact?: boolean } = {}): FusedIsolines {
+export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData, opts: { exact?: boolean } = {}): FusedIsolines {
   const grid = values.grid;
-  const exact = opts.exact ?? field.kind === "symbolic";
+  const exact = opts.exact ?? field?.kind === "symbolic";
+  if (exact && !field) throw new Error("fusedIsolines: exact projection needs the field");
   const b = new ProgramBuilder(grid);
-  const fn = exact ? b.scalar(field) : "", dx = exact ? b.scalar(field, [0]) : "", dy = exact ? b.scalar(field, [1]) : "";
+  const fn = exact ? b.scalar(field!) : "", dx = exact ? b.scalar(field!, [0]) : "", dy = exact ? b.scalar(field!, [1]) : "";
   const col = colour ? b.scalar(colour) : undefined;
   const lib = b.library();
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
@@ -54,7 +55,7 @@ const CAP: u32 = ${capacity}u;
 const MAXP: i32 = ${ISO_MAXP};
 ${SEG_APPEND_WGSL}
 ${marchingSquaresWgsl(grid)}
-${exact ? projectionWgsl(fn, dx, dy, field.box) : ""}
+${exact ? projectionWgsl(fn, dx, dy, field!.box) : ""}
 fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
   let d = b - a; let l2 = dot(d, d);

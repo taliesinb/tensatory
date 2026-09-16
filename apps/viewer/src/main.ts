@@ -61,8 +61,8 @@ installTicks();
 for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
 
-const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "showStream", "anim"] as const;
-const VALUES = ["res", "res3", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
+const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "showStream", "anim"] as const;
+const VALUES = ["res", "res3", "cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -596,8 +596,10 @@ function view3dOf(): View3D | undefined {
     resolution: () => num("res3") ?? 32,
     compute: () => modes.compute,
     showIso: () => ui.showIso.checked,
+    showOutline: () => ui.isoOutline.checked,
     showPoints: () => ui.showPoints.checked,
     showBox: () => ui.showBox.checked,
+    crop: () => [num("cropx") ?? 1, num("cropy") ?? 1, num("cropz") ?? 1],
     pointSets: spacePointSets,
     colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
   });
@@ -613,6 +615,7 @@ function render3d(): void {
   $("splitv").textContent = ui.split.value ?? "—";
   $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
   $("res3v").textContent = ui.res3.value ?? "";
+  for (const a of ["x", "y", "z"] as const) $(`crop${a}v`).textContent = (num(`crop${a}`) ?? 1).toFixed(2);
   updateIsoNotches();
 }
 
