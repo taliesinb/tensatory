@@ -1,7 +1,11 @@
 [
   {
-    "file": "symbolic.json",
-    "name": "symbolic playground"
+    "file": "symbolic2d.json",
+    "name": "symbolic 2D"
+  },
+  {
+    "file": "symbolic3d.json",
+    "name": "symbolic 3D"
   },
   {
     "file": "dense.json",

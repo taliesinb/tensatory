@@ -1,40 +1,8 @@
 {
  "tensatory": "0.1",
- "name": "symbolic playground",
- "description": "Fields defined by expressions only, on several 2D planes and 3D volumes: bowl and saddle, Rosenbrock, Gaussian mixtures, waves, spheres, tori, the gyroid.",
+ "name": "symbolic 3D",
+ "description": "Fields defined by expressions only, on several 3D volumes: spheres and tori, a Gaussian mixture, the gyroid, 3D Rosenbrock.",
  "manifolds": {
-  "plane": {
-   "name": "bowl plane",
-   "numDims": 2,
-   "dimNames": [
-    "x",
-    "y"
-   ]
-  },
-  "rosen": {
-   "name": "Rosenbrock plane",
-   "numDims": 2,
-   "dimNames": [
-    "x",
-    "y"
-   ]
-  },
-  "mix": {
-   "name": "mixture plane",
-   "numDims": 2,
-   "dimNames": [
-    "x",
-    "y"
-   ]
-  },
-  "wavy": {
-   "name": "waves plane",
-   "numDims": 2,
-   "dimNames": [
-    "x",
-    "y"
-   ]
-  },
   "volume": {
    "name": "spheres and tori",
    "numDims": 3,
@@ -73,402 +41,6 @@
   }
  },
  "fields": {
-  "bowl": {
-   "kind": "scalar",
-   "name": "x² + y²",
-   "codomain": "norm",
-   "exactGradient": "bowlGrad",
-   "data": {
-    "type": "symbolic",
-    "box": [
-     [
-      -2,
-      2
-     ],
-     [
-      -2,
-      2
-     ]
-    ],
-    "expr": {
-     "op": "add",
-     "vals": [
-      {
-       "op": "square",
-       "val": {
-        "op": "coord",
-        "index": 0
-       }
-      },
-      {
-       "op": "square",
-       "val": {
-        "op": "coord",
-        "index": 1
-       }
-      }
-     ]
-    }
-   },
-   "domain": "plane"
-  },
-  "bowlGrad": {
-   "kind": "vector",
-   "name": "∇(x² + y²)",
-   "data": {
-    "type": "symbolicv",
-    "box": [
-     [
-      -2,
-      2
-     ],
-     [
-      -2,
-      2
-     ]
-    ],
-    "expr": {
-     "op": "compv",
-     "coeffs": [
-      {
-       "op": "mul",
-       "vals": [
-        2,
-        {
-         "op": "coord",
-         "index": 0
-        }
-       ]
-      },
-      {
-       "op": "mul",
-       "vals": [
-        2,
-        {
-         "op": "coord",
-         "index": 1
-        }
-       ]
-      }
-     ]
-    }
-   },
-   "domain": "plane"
-  },
-  "saddle": {
-   "kind": "scalar",
-   "name": "x² − y²",
-   "domain": "plane",
-   "description": "A saddle: the bowl's companion on the same plane.",
-   "data": {
-    "type": "symbolic",
-    "box": [
-     [
-      -2,
-      2
-     ],
-     [
-      -2,
-      2
-     ]
-    ],
-    "expr": {
-     "op": "sub",
-     "vals": [
-      {
-       "op": "square",
-       "val": {
-        "op": "coord",
-        "index": 0
-       }
-      },
-      {
-       "op": "square",
-       "val": {
-        "op": "coord",
-        "index": 1
-       }
-      }
-     ]
-    }
-   }
-  },
-  "rosenbrock": {
-   "kind": "scalar",
-   "name": "Rosenbrock",
-   "codomain": "log",
-   "description": "(a - x)² + b (y - x²)², a = 1, b = 100; log-scaled codomain",
-   "data": {
-    "type": "symbolic",
-    "box": [
-     [
-      -2,
-      2
-     ],
-     [
-      -1,
-      3
-     ]
-    ],
-    "consts": {
-     "a": 1,
-     "b": 100
-    },
-    "expr": {
-     "op": "add",
-     "vals": [
-      {
-       "op": "square",
-       "val": {
-        "op": "sub",
-        "vals": [
-         "a",
-         {
-          "op": "coord",
-          "index": 0
-         }
-        ]
-       }
-      },
-      {
-       "op": "mul",
-       "vals": [
-        "b",
-        {
-         "op": "square",
-         "val": {
-          "op": "sub",
-          "vals": [
-           {
-            "op": "coord",
-            "index": 1
-           },
-           {
-            "op": "square",
-            "val": {
-             "op": "coord",
-             "index": 0
-            }
-           }
-          ]
-         }
-        }
-       ]
-      }
-     ]
-    }
-   },
-   "domain": "rosen"
-  },
-  "rosenbrockGrad": {
-   "kind": "vector",
-   "name": "∇ Rosenbrock (symbolic grad)",
-   "data": {
-    "type": "pointwisev",
-    "expr": {
-     "op": "grad",
-     "val": "f"
-    },
-    "scalars": {
-     "f": "rosenbrock"
-    }
-   },
-   "domain": "rosen"
-  },
-  "mixture": {
-   "kind": "scalar",
-   "name": "Gaussian mixture",
-   "codomain": "p",
-   "data": {
-    "type": "symbolic",
-    "box": [
-     [
-      -3,
-      3
-     ],
-     [
-      -3,
-      3
-     ]
-    ],
-    "expr": {
-     "op": "clamp",
-     "min": 0,
-     "max": 1,
-     "val": {
-      "op": "add",
-      "vals": [
-       {
-        "op": "gaussKernel",
-        "val": {
-         "op": "norm",
-         "vec": {
-          "op": "subv",
-          "vecs": [
-           {
-            "op": "coordv"
-           },
-           {
-            "op": "constv",
-            "value": [
-             -1,
-             -0.5
-            ]
-           }
-          ]
-         }
-        },
-        "mu": 0,
-        "sigma": 0.7
-       },
-       {
-        "op": "mul",
-        "vals": [
-         0.6,
-         {
-          "op": "gaussKernel",
-          "val": {
-           "op": "norm",
-           "vec": {
-            "op": "subv",
-            "vecs": [
-             {
-              "op": "coordv"
-             },
-             {
-              "op": "constv",
-              "value": [
-               1.2,
-               1
-              ]
-             }
-            ]
-           }
-          },
-          "mu": 0,
-          "sigma": 0.5
-         }
-        ]
-       },
-       {
-        "op": "mul",
-        "vals": [
-         0.4,
-         {
-          "op": "gaussKernel",
-          "val": {
-           "op": "norm",
-           "vec": {
-            "op": "subv",
-            "vecs": [
-             {
-              "op": "coordv"
-             },
-             {
-              "op": "constv",
-              "value": [
-               0.5,
-               -1.8
-              ]
-             }
-            ]
-           }
-          },
-          "mu": 0,
-          "sigma": 0.4
-         }
-        ]
-       }
-      ]
-     }
-    }
-   },
-   "domain": "mix"
-  },
-  "mixtureGradNorm": {
-   "kind": "scalar",
-   "name": "|∇ mixture|",
-   "codomain": "norm",
-   "data": {
-    "type": "pointwise",
-    "expr": {
-     "op": "norm",
-     "vec": {
-      "op": "grad",
-      "val": "m"
-     }
-    },
-    "scalars": {
-     "m": "mixture"
-    }
-   },
-   "domain": "mix"
-  },
-  "waves": {
-   "kind": "scalar",
-   "name": "sin(3x) cos(2y)",
-   "codomain": "similarity",
-   "data": {
-    "type": "symbolic",
-    "box": [
-     [
-      -3.14159,
-      3.14159
-     ],
-     [
-      -3.14159,
-      3.14159
-     ]
-    ],
-    "expr": {
-     "op": "mul",
-     "vals": [
-      {
-       "op": "sin",
-       "val": {
-        "op": "mul",
-        "vals": [
-         3,
-         {
-          "op": "coord",
-          "index": 0
-         }
-        ]
-       }
-      },
-      {
-       "op": "cos",
-       "val": {
-        "op": "mul",
-        "vals": [
-         2,
-         {
-          "op": "coord",
-          "index": 1
-         }
-        ]
-       }
-      }
-     ]
-    }
-   },
-   "domain": "wavy"
-  },
-  "wavesGrad": {
-   "kind": "vector",
-   "name": "∇ waves",
-   "data": {
-    "type": "pointwisev",
-    "expr": {
-     "op": "grad",
-     "val": "w"
-    },
-    "scalars": {
-     "w": "waves"
-    }
-   },
-   "domain": "wavy"
-  },
   "ball": {
    "kind": "scalar",
    "name": "x² + y² + z²",
@@ -601,7 +173,7 @@
   },
   "mixture3": {
    "kind": "scalar",
-   "name": "Gaussian mixture (3D)",
+   "name": "Gaussian mixture",
    "domain": "mix3",
    "codomain": "p",
    "description": "Three Gaussian bumps in a volume; A, B, C mark their centres.",
@@ -719,7 +291,7 @@
   },
   "mixture3GradNorm": {
    "kind": "scalar",
-   "name": "|∇ mixture (3D)|",
+   "name": "|∇ mixture|",
    "domain": "mix3",
    "codomain": "norm",
    "data": {
@@ -738,7 +310,7 @@
   },
   "mixture3Grad": {
    "kind": "vector",
-   "name": "∇ mixture (3D)",
+   "name": "∇ mixture",
    "domain": "mix3",
    "data": {
     "type": "pointwisev",
@@ -853,7 +425,7 @@
   },
   "rosenbrock3": {
    "kind": "scalar",
-   "name": "Rosenbrock (3D)",
+   "name": "Rosenbrock",
    "domain": "rosen3",
    "codomain": "log",
    "description": "(1 − x)² + 100 (y − x²)² + (1 − y)² + 100 (z − y²)²; minimum at (1, 1, 1).",
@@ -958,7 +530,7 @@
   },
   "rosenbrock3Grad": {
    "kind": "vector",
-   "name": "∇ Rosenbrock (3D)",
+   "name": "∇ Rosenbrock",
    "domain": "rosen3",
    "data": {
     "type": "pointwisev",
@@ -973,41 +545,6 @@
   }
  },
  "pointSets": {
-  "minima": {
-   "domain": "rosen",
-   "points": [
-    [
-     1,
-     1
-    ]
-   ],
-   "labels": [
-    "Rosenbrock min"
-   ]
-  },
-  "centres": {
-   "domain": "mix",
-   "points": [
-    [
-     -1,
-     -0.5
-    ],
-    [
-     1.2,
-     1
-    ],
-    [
-     0.5,
-     -1.8
-    ]
-   ],
-   "labels": [
-    "A",
-    "B",
-    "C"
-   ],
-   "ordered": true
-  },
   "centres3": {
    "domain": "mix3",
    "points": [

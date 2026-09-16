@@ -16,7 +16,7 @@ const count = (e: SExpr | VExpr): number => {
 const time = (label: string, f: () => unknown, reps = 1) => { const t0 = performance.now(); let r; for (let i = 0; i < reps; i++) r = f(); console.log(label.padEnd(44), ((performance.now() - t0) / reps).toFixed(1), "ms"); return r; };
 
 it.runIf(process.env.PERF)("perf: |∇ mixture| pipeline (PERF=1 to run)", { timeout: 60000 }, () => {
-  const b = Bundle.parse(JSON.parse(readFileSync(__dirname + "/../../../apps/viewer/public/bundles/symbolic.json", "utf8")));
+  const b = Bundle.parse(JSON.parse(readFileSync(__dirname + "/../../../apps/viewer/public/bundles/symbolic2d.json", "utf8")));
   const m = b.scalarField("mixture").data as SymbolicScalarFieldData;
   const gn = b.scalarField("mixtureGradNorm").data as SymbolicScalarFieldData;
   console.log("nodes: mixture", count(m.ast), " |∇m| (pointwise ast)", count(gn.ast));

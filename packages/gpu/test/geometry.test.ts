@@ -196,14 +196,14 @@ describe("streamline kernel", () => {
 });
 
 describe("example bundle fields contour identically", () => {
-  it("dense.json loss (sampled: marching squares path) and symbolic.json rosenbrock (exact path)", async () => {
+  it("dense.json loss (sampled: marching squares path) and symbolic2d.json rosenbrock (exact path)", async () => {
     if (!gpu) return;
     const dir = join(__dirname, "../../../apps/viewer/public/bundles");
     const d = Bundle.parse(JSON.parse(readFileSync(join(dir, "dense.json"), "utf8")));
     const loss = d.scalarField("loss").data;
     const vals = loss.sampleOn(loss.samplePoints!);
     expect(canon(await gpuMarchingSquaresSegments(gpu, loss.samplePoints!, vals, 1.5))).toEqual(canon(marchingSquaresSegments(loss.samplePoints!, vals, 1.5)));
-    const s = Bundle.parse(JSON.parse(readFileSync(join(dir, "symbolic.json"), "utf8")));
+    const s = Bundle.parse(JSON.parse(readFileSync(join(dir, "symbolic2d.json"), "utf8")));
     const ros = s.scalarField("rosenbrock").data;
     const g = new DenseGrid([64, 64], ros.box);
     const rv = ros.sampleOn(g);

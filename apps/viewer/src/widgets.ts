@@ -20,6 +20,7 @@ export function installTooltips(root: ParentNode = document): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   for (const el of root.querySelectorAll<HTMLElement>("[data-tip]")) {
     el.addEventListener("pointerenter", () => {
+      if (!el.dataset.tip) return; // data-tip="" reserves a tooltip whose text is set later
       timer = setTimeout(() => {
         tip.textContent = el.dataset.tip ?? "";
         tip.style.display = "block";
@@ -35,7 +36,8 @@ export function installTooltips(root: ParentNode = document): void {
 }
 
 /*******************************************************/
-/* collapsible panels: click the strip title; remembered globally */
+/* collapsible panels: click the strip title; remembered globally. A panel that is `.collapsed` in
+   the HTML starts closed until the user has toggled it once. */
 
 export function installCollapsiblePanels(storageKey: string, onToggle?: () => void): void {
   let saved: Record<string, boolean> = {};
@@ -44,7 +46,7 @@ export function installCollapsiblePanels(storageKey: string, onToggle?: () => vo
     const title = panel.querySelector<HTMLElement>(".strip .title");
     if (!title) continue;
     const key = title.textContent!.trim();
-    if (saved[key]) panel.classList.add("collapsed");
+    if (key in saved) panel.classList.toggle("collapsed", saved[key]);
     title.addEventListener("click", () => {
       panel.classList.toggle("collapsed");
       saved[key] = panel.classList.contains("collapsed");
