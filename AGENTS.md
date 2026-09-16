@@ -158,9 +158,15 @@ profiling test.
   fused GPU kernel in `gpu/src/mesh.ts`) into a triangle soup with gradient
   normals (exact for symbolic fields) pointing towards increasing values;
   `GpuRenderer3D` = orbit camera, vertex-pulled meshes via drawIndirect,
-  two-sided headlight, weighted-blended OIT for translucent levels; box /
-  points / labels on the Canvas 2D overlay. WebGPU only; compute cpu / gpu as
-  in 2D. Matrix columns absent in a space are hidden (`SlotDef.present`).
+  two-sided headlight, weighted-blended OIT for translucent levels, depth-
+  tested thick lines (box, trajectories, face outlines, streamlines); points /
+  labels on the Canvas 2D overlay. Exact vertices via ∇f projection (flag ∇),
+  isolines of I_V on the cropped box faces (`outline`), crop ranges x / y / z
+  as interval sliders that only preview (dotted box) until released, metric
+  blur and Taubin `surface` smoothing (CPU), 3D streamlines with the 2D
+  panel's dir / mode (JL planning is dimension-generic). WebGPU only; compute
+  cpu / gpu as in 2D. Matrix columns absent in a space are hidden
+  (`SlotDef.present`).
 * WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
   by Metal's fast-math.
 * Performance: the compiler does
