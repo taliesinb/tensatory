@@ -20,7 +20,7 @@ export type { FusedIsolines, FusedIsolineOptions, FusedStreamlines, FusedStreaml
 export { marchingSquaresWgsl, projectionWgsl } from "./isolines";
 export { GpuRenderer } from "./render";
 export type { GpuView, ValueMap, Lut, GpuRasterLayer, GpuLineLayer, GpuScene } from "./render";
-export { gpuStats, blurResidentSync, smoothedIsolines } from "./passes";
+export { gpuStats, blurResidentSync, smoothedIsolines, sliceResidentSync } from "./passes";
 export type { GpuStats, SmoothedIsolines } from "./passes";
 export { VERT_FLOATS, VERT_WGSL, allocMesh, resetMesh, packMesh, uploadMesh, readMesh, fusedIsosurface } from "./mesh";
 export type { GpuMesh, FusedIsosurface, FusedIsosurfaceOptions } from "./mesh";

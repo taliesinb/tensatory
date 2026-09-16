@@ -6,11 +6,12 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, DenseScalarFieldData, boxBlur, contourField, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, type PointSet, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   allocMesh,
   allocSegments,
+  blurResidentSync,
   boxEdges,
   fusedIsolines,
   fusedIsosurface,
@@ -21,6 +22,7 @@ import {
   resetMesh,
   resetSegments,
   sampleResidentSync,
+  sliceResidentSync,
   uploadMesh,
   uploadSegments,
   uploadSegments3,
@@ -54,6 +56,8 @@ export interface View3DContext {
   alpha(): number;
   /** grid points along the longest box side */
   resolution(): number;
+  /** box-blur radius (cells) of the I_V field before contouring, or null */
+  blur(): number | null;
   compute(): "cpu" | "gpu";
   showIso(): boolean;
   /** project vertices onto the true level set along the exact gradient (symbolic fields) */
@@ -143,14 +147,38 @@ export class View3D {
     return new DenseGrid(box.size.map((s) => Math.max(2, Math.round((n * s) / mx) || 2)), box);
   }
 
-  private meshesGpu(iv: Use3, ic: Use3 | undefined, grid: DenseGrid, levels: number[]): GpuMesh[] {
+  /** the resident I_V grid, blurred when `metric` is set */
+  private volumeGpu(iv: Use3, grid: DenseGrid): { values: GpuGrid; key: string } {
     const gk = gridKey(iv, grid);
     let values = this.grids.get(gk);
     if (!values) { this.grids.set(gk, (values = sampleResidentSync(this.c.gpu, iv.data, grid))); lru(this.grids, 4, (g) => g.destroy()); }
-    const exact = this.c.exact() && iv.data.kind === "symbolic";
+    const r = this.c.blur();
+    if (r === null || r <= 0) return { values, key: gk };
+    const bk = `${gk}|blur${r}`;
+    let blurred = this.grids.get(bk);
+    if (!blurred) { this.grids.set(bk, (blurred = blurResidentSync(this.c.gpu, values, r))); lru(this.grids, 4, (g) => g.destroy()); }
+    return { values: blurred, key: bk };
+  }
+  private volumeCpu(iv: Use3, grid: DenseGrid): { values: Float64Array; key: string } {
+    const gk = gridKey(iv, grid);
+    let vals = this.cpuValues.get(gk);
+    if (!vals) { this.cpuValues.set(gk, (vals = Float64Array.from(iv.data.sampleOn(grid)))); lru(this.cpuValues, 4, () => {}); }
+    const r = this.c.blur();
+    if (r === null || r <= 0) return { values: vals, key: gk };
+    const bk = `${gk}|blur${r}`;
+    let blurred = this.cpuValues.get(bk);
+    if (!blurred) { this.cpuValues.set(bk, (blurred = boxBlur(grid, vals, r))); lru(this.cpuValues, 4, () => {}); }
+    return { values: blurred, key: bk };
+  }
+  /** exact projection applies to symbolic fields contoured as they are (a blurred field is only known on the grid) */
+  private isExact(iv: Use3): boolean { return this.c.exact() && iv.data.kind === "symbolic" && !(this.c.blur()! > 0); }
+
+  private meshesGpu(iv: Use3, ic: Use3 | undefined, grid: DenseGrid, levels: number[]): GpuMesh[] {
+    const { values, key: gk } = this.volumeGpu(iv, grid);
+    const exact = this.isExact(iv);
     const kk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`;
     let kernel = this.kernels.get(kk);
-    if (!kernel) { this.kernels.set(kk, (kernel = fusedIsosurface(this.c.gpu, values, { field: iv.data, exact, colour: ic?.data }))); lru(this.kernels, 8, (k) => k.destroy()); }
+    if (!kernel) { this.kernels.set(kk, (kernel = fusedIsosurface(this.c.gpu, values, { field: exact ? iv.data : undefined, exact, colour: ic?.data }))); lru(this.kernels, 8, (k) => k.destroy()); }
     // triangle budget: surfaces touch O(n²) of the n³ cells; overflow drops triangles silently
     const cells = grid.size.reduce((a, s) => a * (s - 1), 1);
     const capacity = Math.min(kernel.capacity, Math.max(65536, Math.min(1 << 20, Math.round(cells * 0.5))));
@@ -166,17 +194,15 @@ export class View3D {
   }
 
   private meshesCpu(iv: Use3, ic: Use3 | undefined, grid: DenseGrid, levels: number[]): GpuMesh[] {
-    const gk = gridKey(iv, grid);
-    let vals = this.cpuValues.get(gk);
-    if (!vals) { this.cpuValues.set(gk, (vals = Float64Array.from(iv.data.sampleOn(grid)))); lru(this.cpuValues, 4, () => {}); }
-    const grad = this.c.gradientOf(iv);
-    const exact = this.c.exact() && iv.data.kind === "symbolic";
+    const { values: vals, key: gk } = this.volumeCpu(iv, grid);
+    const exact = this.isExact(iv);
+    const grad = exact ? this.c.gradientOf(iv) : undefined; // blurred: normals from the blurred grid
     const maxDist = Math.hypot(...grid.spacing);
     return levels.map((level) => {
       const mk = `${gk}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}|${level}`;
       let mesh = this.cpuMeshes.get(mk);
       if (!mesh) {
-        const m = marchingTetrahedra(grid, vals!, level, {
+        const m = marchingTetrahedra(grid, vals, level, {
           gradient: grad ? (p) => grad.value(p) ?? undefined : undefined,
           project: exact ? (p) => projectToLevel(iv.data, p, level, maxDist) : undefined,
           colourAt: ic ? (p) => ic.data.value(p) ?? NaN : undefined,
@@ -213,15 +239,15 @@ export class View3D {
       size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
       oa.forEach((d, i) => { size3[d] = size2[i]!; a3[d] = box2.a[i]!; b3[d] = box2.b[i]!; });
       const grid3 = new DenseGrid(size3, new Box(a3, b3));
-      const exact = this.c.exact() && iv.data.kind === "symbolic";
-      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}|${exact ? "exact" : "lin"}`;
+      const exact = this.isExact(iv);
+      const fkey = `${iv.id}|face${axis}${hi ? "+" : "-"}|${depth}|${size2.join("x")}|${box2.intervals.flat().join(",")}|${exact ? "exact" : `lin|blur${this.c.blur() ?? 0}|${grid.size.join("x")}`}`;
       const embed = { axis, depth };
       const tol = 0.25 * Math.min(...grid.spacing); // world tolerance of the exact chords
       if (gpu) {
         let values = this.faceGrids.get(fkey);
         if (!values) {
-          const v3 = sampleResidentSync(this.c.gpu, iv.data, grid3);
-          values = { grid: grid2, channels: 1, buffer: v3.buffer, destroy: () => v3.destroy() };
+          if (exact) { const v3 = sampleResidentSync(this.c.gpu, iv.data, grid3); values = { grid: grid2, channels: 1, buffer: v3.buffer, destroy: () => v3.destroy() }; }
+          else values = sliceResidentSync(this.c.gpu, this.volumeGpu(iv, grid).values, axis, depth, grid2); // the (blurred) volume's face: matches the mesh boundary
           this.faceGrids.set(fkey, values); lru(this.faceGrids, 12, (g) => g.destroy());
         }
         let kernel = this.faceKernels.get(fkey);
@@ -238,7 +264,10 @@ export class View3D {
         });
       } else {
         let vals = this.cpuValues.get(fkey);
-        if (!vals) { this.cpuValues.set(fkey, (vals = Float64Array.from(iv.data.sampleOn(grid3)))); lru(this.cpuValues, 16, () => {}); }
+        if (!vals) {
+          vals = exact ? Float64Array.from(iv.data.sampleOn(grid3)) : Float64Array.from(new DenseScalarFieldData(grid, this.volumeCpu(iv, grid).values).sampleOn(grid3));
+          this.cpuValues.set(fkey, vals); lru(this.cpuValues, 16, () => {});
+        }
         for (const level of levels) {
           const sk = `${fkey}|${level}`;
           let segs = this.faceCpu.get(sk);

@@ -106,6 +106,51 @@ export function blurResidentSync(backend: GpuBackend, src: GpuGrid, radius: numb
 }
 
 /*******************************************************/
+/* plane slice of a resident 3D grid */
+
+/**
+ * Sample a resident 3D scalar grid on the plane `axis = depth` at the points of the 2D grid
+ * `grid2` (trilinear, like core's interpolation of dense data): the face values of a sampled or
+ * blurred volume, so the face outlines match the mesh boundary by construction.
+ */
+export function sliceResidentSync(backend: GpuBackend, src: GpuGrid, axis: number, depth: number, grid2: DenseGrid): GpuGrid {
+  const g = src.grid;
+  if (g.dimCount !== 3 || src.channels !== 1) throw new Error("sliceResidentSync needs a resident 3D scalar grid");
+  const keep = [0, 1, 2].filter((d) => d !== axis) as [number, number];
+  const n = grid2.sampleCount;
+  const [n0, n1, n2] = g.size as [number, number, number], [s0, s1, s2] = g.strides as [number, number, number];
+  // grid position (fractional) of a world coordinate along each axis, clamped like the reader in program.ts
+  const coord = (d: number, expr: string) => {
+    const nd = g.size[d]!, a = g.box.a[d]!, sp = g.spacing[d]!;
+    return nd > 1 ? `clamp((${expr} - ${f32(a)}) / ${f32(sp)}, 0.0, ${f32(nd - 1)})` : "0.0";
+  };
+  const code = `
+@group(0) @binding(0) var<storage, read_write> dst: array<f32>;
+@group(0) @binding(1) var<storage, read> src: array<f32>;
+fn at(i: i32, j: i32, k: i32) -> f32 { return src[min(i, ${n0 - 1}) * ${s0} + min(j, ${n1 - 1}) * ${s1} + min(k, ${n2 - 1}) * ${s2}]; }
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let v = i32(id.x);
+  if (v >= ${n}) { return; }
+  let u0 = v / ${grid2.strides[0]}; let u1 = v - u0 * ${grid2.strides[0]};
+  let w0 = ${f32(grid2.box.a[0]!)} + f32(u0) * ${f32(grid2.spacing[0]!)};
+  let w1 = ${f32(grid2.box.a[1]!)} + f32(u1) * ${f32(grid2.spacing[1]!)};
+  var gp: vec3<f32>;
+  gp[${axis}] = ${coord(axis, f32(depth))};
+  gp[${keep[0]}] = ${coord(keep[0], "w0")};
+  gp[${keep[1]}] = ${coord(keep[1], "w1")};
+  let i0 = vec3<i32>(floor(gp)); let f = gp - vec3<f32>(i0);
+  let c00 = mix(at(i0.x, i0.y, i0.z), at(i0.x + 1, i0.y, i0.z), f.x);
+  let c10 = mix(at(i0.x, i0.y + 1, i0.z), at(i0.x + 1, i0.y + 1, i0.z), f.x);
+  let c01 = mix(at(i0.x, i0.y, i0.z + 1), at(i0.x + 1, i0.y, i0.z + 1), f.x);
+  let c11 = mix(at(i0.x, i0.y + 1, i0.z + 1), at(i0.x + 1, i0.y + 1, i0.z + 1), f.x);
+  dst[v] = mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}`;
+  const [out] = backend.dispatch({ code, invocations: n, buffers: [{ role: "rw", size: Math.max(16, n * 4), keep: true }, { role: "r", buffer: src.buffer }] });
+  const buffer = out!;
+  return { grid: grid2, channels: 1, buffer, destroy: () => buffer.destroy() };
+}
+
+/*******************************************************/
 /* Taubin-smoothed marching squares on the edge graph */
 
 export interface SmoothedIsolines {

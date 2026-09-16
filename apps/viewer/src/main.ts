@@ -594,6 +594,7 @@ function view3dOf(): View3D | undefined {
     levels: (u: Use3) => { const f = u as ScalarUse; const [lo, hi] = rangeOf(f); return isoLevelParams().map((t) => f.codomain.fromParam(t, lo, hi)); },
     alpha: () => num("isoAlpha") ?? 1,
     resolution: () => num("res3") ?? 32,
+    blur: () => num("metric"),
     compute: () => modes.compute,
     showIso: () => ui.showIso.checked,
     exact: () => ui.isoExact.checked,
@@ -616,6 +617,7 @@ function render3d(): void {
   $("splitv").textContent = ui.split.value ?? "—";
   $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
   $("res3v").textContent = ui.res3.value ?? "";
+  $("metricv").textContent = ui.metric.value ?? "—";
   for (const a of ["x", "y", "z"] as const) $(`crop${a}v`).textContent = (num(`crop${a}`) ?? 1).toFixed(2);
   updateIsoNotches();
 }

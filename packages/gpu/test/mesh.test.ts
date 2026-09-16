@@ -1,8 +1,8 @@
 // Fused marching tetrahedra: the appended triangle set equals core's (as a multiset of vertices).
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DenseGrid, DenseScalarFieldData, SymbolicVectorFieldData, buildScalarFieldData, marchingTetrahedra, projectToLevel, type IsoMesh } from "@tensatory/core";
-import { GpuBackend, allocMesh, fusedIsosurface, readMesh, sampleResident, uploadGrid, gpuStats } from "../src";
+import { Box, DenseGrid, DenseScalarFieldData, SymbolicVectorFieldData, buildScalarFieldData, marchingTetrahedra, projectToLevel, type IsoMesh } from "@tensatory/core";
+import { GpuBackend, allocMesh, fusedIsosurface, readMesh, sampleResident, uploadGrid, gpuStats, sliceResidentSync, readGrid } from "../src";
 
 let gpu: GpuBackend | undefined;
 beforeAll(async () => { gpu = await GpuBackend.create(); });
@@ -93,6 +93,22 @@ describe("fused isosurface", () => {
     }
     expectSame(want, got, 3);
     mesh.destroy(); values.destroy();
+  });
+
+  it("sliceResidentSync equals core's interpolation of the dense volume on a plane", async () => {
+    if (!gpu) return;
+    const g = new DenseGrid([13, 11, 9], gyroid.box);
+    const vals = gyroid.sampleOn(g);
+    const dense = new DenseScalarFieldData(g, vals);
+    const values = uploadGrid(gpu, g, vals, 1);
+    const grid2 = new DenseGrid([17, 15], new Box([-2.5, -1], [2, 2.8]));
+    const sliced = sliceResidentSync(gpu, values, 1, 0.37, grid2);
+    const got = await readGrid(gpu, sliced);
+    for (let p = 0; p < grid2.sampleCount; p++) {
+      const [u, w] = grid2.point(p) as [number, number];
+      expect(got[p]!).toBeCloseTo(dense.value([u, 0.37, w])!, 4);
+    }
+    sliced.destroy(); values.destroy();
   });
 
   it("gpuStats works on a 3D resident grid", async () => {
