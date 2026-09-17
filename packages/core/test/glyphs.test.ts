@@ -104,12 +104,11 @@ describe("arrow glyphs", () => {
     expect(c[1]).toBeCloseTo(0.55); expect(c[5]).toBeCloseTo(0.55); // barbs L back from the tip: centred on p
     expect(c[0]).toBeCloseTo(1 - CHEVRON_SPREAD * 0.9); expect(c[4]).toBeCloseTo(1 + CHEVRON_SPREAD * 0.9);
     const t = arrowGlyphs(pts, vec, 2, 1, { style: "triangle" });
-    expect(t.lines.length).toBe(1);
-    const r = t.lines[0]!; // [base, apex, base', base] closed
-    expect(r[1]).toBeCloseTo(1); expect(r[5]).toBeCloseTo(1); // base on the point's line
-    expect(Math.abs(r[0]! - r[4]!)).toBeCloseTo(2 * TRIANGLE_HALF_WIDTH * 0.45); // narrow: 0.15 of its length
-    expect(r[2]).toBeCloseTo(1); expect(r[3]).toBeCloseTo(1.45); // apex where the arrow's tip is
-    expect(r[6]).toBe(r[0]); expect(r[7]).toBe(r[1]);
+    expect(t.lines.length).toBe(0); expect(t.triangles.length).toBe(6); expect(Array.from(t.triPoint)).toEqual([0]);
+    const r = t.triangles; // [baseLeft, baseRight, apex]
+    expect(r[1]).toBeCloseTo(1); expect(r[3]).toBeCloseTo(1); // the base is centred on the point
+    expect(Math.abs(r[0]! - r[2]!)).toBeCloseTo(2 * TRIANGLE_HALF_WIDTH * 0.45); // narrow: its half-width is 0.22 of its length
+    expect(r[4]).toBeCloseTo(1); expect(r[5]).toBeCloseTo(1.45); // apex where the arrow's tip is
   });
   it("3D barbs are perpendicular to the shaft", () => {
     const g = arrowGlyphs([0, 0, 0], [1, 2, 3], 3, 1);

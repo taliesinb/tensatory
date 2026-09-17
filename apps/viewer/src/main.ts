@@ -40,14 +40,14 @@ import { makeIntervalSlider, type IntervalEl } from "./interval";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import type { Manifold, PointSet } from "@tensatory/core";
-import { Renderer2D, type LineLayer, type Scene } from "./render2d";
+import { Renderer2D, type LineLayer, type Scene, type TriangleLayer } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
 import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, type MemoryUser } from "./cache";
-import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
+import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -648,7 +648,8 @@ function glyphLattice(v: VectorUse, region: Box, spacing: number): Lattice | und
 }
 const latticeKey = (l: Lattice): string => `${l.spacing.toExponential(6)}|${l.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}`;
 
-interface GlyphSet { lines: Float64Array[]; colours?: (Float64Array | undefined)[]; maxNorm: number; key: string }
+/** arrow / head styles fill `lines` (+ per-vertex colours), the triangle style `triangles` (+ one colour per triangle) */
+interface GlyphSet { lines: Float64Array[]; colours?: (Float64Array | undefined)[]; triangles: Float64Array; triColours?: Float64Array; maxNorm: number; key: string }
 let glyphCache: GlyphSet | undefined;
 /** the last normalizing norm shown in the panel (CPU paths set it directly, the fused path reads it back) */
 let glyphMaxShown = NaN;
@@ -672,12 +673,14 @@ function glyphs2d(): GlyphSet | undefined {
   for (const p of parts) { vectors.set(p!, o); o += p!.length; }
   const points = latticePoints(lat);
   const g = arrowGlyphs(points, vectors, 2, lat.spacing, { style });
-  let colours: (Float64Array | undefined)[] | undefined;
+  let colours: (Float64Array | undefined)[] | undefined, triColours: Float64Array | undefined;
   if (vc) {
     const toParam = paramOf(vc);
-    colours = g.lines.map((l, k) => { const p = g.point[k]!, val = vc.data.value([points[2 * p]!, points[2 * p + 1]!]); return new Float64Array(l.length / 2).fill(val === undefined ? NaN : toParam(val)); });
+    const at = (p: number) => { const val = vc.data.value([points[2 * p]!, points[2 * p + 1]!]); return val === undefined ? NaN : toParam(val); };
+    colours = g.lines.map((l, k) => new Float64Array(l.length / 2).fill(at(g.point[k]!)));
+    triColours = Float64Array.from(g.triPoint, at);
   }
-  glyphCache = { lines: g.lines, colours, maxNorm: g.maxNorm, key };
+  glyphCache = { lines: g.lines, colours, triangles: g.triangles, triColours, maxNorm: g.maxNorm, key };
   return glyphCache;
 }
 
@@ -732,10 +735,16 @@ function render(): void {
   if (gl) {
     glyphMaxShown = gl.maxNorm;
     if (!gpuDraw) {
-      const layer: LineLayer = { lines: gl.lines, color: [1, 1, 1], width: 1.5, alpha: num("vAlpha") ?? 1 };
-      const vc = slotScalar("vc");
-      if (gl.colours && vc) { layer.values = gl.colours; layer.cmap = mapOf(vc); layer.select = selectOf(vc); }
-      scene.lines.push(layer);
+      const vc = slotScalar("vc"), alpha = num("vAlpha") ?? 1;
+      if (gl.triangles.length) {
+        const layer: TriangleLayer = { tris: gl.triangles, color: [1, 1, 1], alpha };
+        if (gl.triColours && vc) { layer.values = gl.triColours; layer.cmap = mapOf(vc); layer.select = selectOf(vc); }
+        (scene.triangles ??= []).push(layer);
+      } else {
+        const layer: LineLayer = { lines: gl.lines, color: [1, 1, 1], width: 1.5, alpha };
+        if (gl.colours && vc) { layer.values = gl.colours; layer.cmap = mapOf(vc); layer.select = selectOf(vc); }
+        scene.lines.push(layer);
+      }
     }
   }
   if (modes.render === "gpu" && fused && gpuRenderer) renderGpu(grid, box, scene, iso, st, gl);
@@ -943,12 +952,14 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
     if (fusedCompute) {
       const lat = glyphLattice(gv, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
       if (lat) {
-        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), glyphStyle(), vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
-        gs.lines.push({ segs, width: 1.5, alpha, color: [1, 1, 1], ...colour });
+        const style = glyphStyle();
+        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), style, vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
+        gs.lines.push({ segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, alpha, color: [1, 1, 1], ...colour });
       }
     } else if (gl) {
-      const segs = F.uploadedSegments(`glyph|${gl.key}`, () => packPolylines(gl.lines, gl.colours), false);
-      gs.lines.push({ segs, width: 1.5, alpha, color: [1, 1, 1], ...(gl.colours ? colour : {}) });
+      const tri = gl.triangles.length > 0;
+      const segs = F.uploadedSegments(`glyph|${gl.key}`, () => (tri ? packTriangles(gl.triangles, gl.triColours) : packPolylines(gl.lines, gl.colours)), false);
+      gs.lines.push({ segs, kind: tri ? "triangles" : "lines", width: 1.5, alpha, color: [1, 1, 1], ...(gl.colours || gl.triColours ? colour : {}) });
     }
   }
   R.resize();

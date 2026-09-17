@@ -54,6 +54,17 @@ export interface LineLayer {
   particles?: Particles;
 }
 
+/** filled triangles (vector glyphs): flat [baseLeft, baseRight, apex] per triangle, one colour value per triangle */
+export interface TriangleLayer {
+  tris: ArrayLike<number>;
+  /** per-triangle codomain parameters, or undefined for a solid colour */
+  values?: ArrayLike<number>;
+  cmap?: Colormap;
+  select?: (t: number) => number;
+  color: RGB;
+  alpha: number;
+}
+
 export interface Scene {
   box: Box;
   /** kept fraction along each axis from corner a */
@@ -61,6 +72,7 @@ export interface Scene {
   showBox: boolean;
   raster?: RasterLayer;
   lines: LineLayer[];
+  triangles?: TriangleLayer[];
   pointSets: PointSet[];
 }
 
@@ -156,6 +168,7 @@ export class Renderer2D {
     if (!overlay) {
       if (s.raster) this.drawRaster(s.raster, s.box);
       for (const l of s.lines) this.drawLines(l);
+      for (const t of s.triangles ?? []) this.drawTriangles(t);
     }
     this.drawPointSets(s.pointSets);
     ctx.restore();
@@ -274,6 +287,31 @@ export class Renderer2D {
       ctx.strokeStyle = toCss(base, l.alpha * b);
       ctx.lineWidth = l.width * (P ? b : 1); // particles taper to nothing at the tail (per brightness bin here)
       ctx.stroke(path);
+    }
+  }
+
+  /** filled triangles, binned by colour like the lines (one fill per bin) */
+  private drawTriangles(t: TriangleLayer): void {
+    const ctx = this.ctx;
+    const paths = new Map<number, Path2D>();
+    const n = Math.floor(t.tris.length / 6);
+    for (let i = 0; i < n; i++) {
+      let bin = 0;
+      if (t.values && t.cmap) {
+        let v = t.values[i]!;
+        if (t.select) v = t.select(v);
+        if (Number.isNaN(v)) continue; // outside the colour field or masked: not drawn
+        bin = Math.max(0, Math.min(COLOR_BINS - 1, Math.round(v * (COLOR_BINS - 1))));
+      }
+      let path = paths.get(bin);
+      if (!path) paths.set(bin, (path = new Path2D()));
+      const o = i * 6;
+      const [x0, y0] = this.toScreen([t.tris[o]!, t.tris[o + 1]!]), [x1, y1] = this.toScreen([t.tris[o + 2]!, t.tris[o + 3]!]), [x2, y2] = this.toScreen([t.tris[o + 4]!, t.tris[o + 5]!]);
+      path.moveTo(x0, y0); path.lineTo(x1, y1); path.lineTo(x2, y2); path.closePath();
+    }
+    for (const [bin, path] of paths) {
+      ctx.fillStyle = toCss(t.cmap ? t.cmap(bin / (COLOR_BINS - 1)) : t.color, t.alpha);
+      ctx.fill(path);
     }
   }
 

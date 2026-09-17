@@ -3,6 +3,10 @@
 //         arc: arc length at a | len: total line length (0 = no particles) | phase }
 // Fused kernels append segments through an atomic counter in an indirect-draw
 // buffer; CPU polylines are packed into the same layout and uploaded.
+//
+// The same record also carries a FILLED TRIANGLE for the renderers' triangle
+// pipelines (glyphs): a, b = the base's ends, (arc, len) = the apex, ca = cb =
+// the colour. A set is one or the other; the layer's `kind` says which.
 
 import type { Polyline, Streamline } from "@tensatory/core";
 import { RESIDENT_USAGE, type GpuBackend } from "./device";
@@ -76,6 +80,18 @@ export function packStreamlines(lines: Streamline[], step: number, values?: (Arr
       o += SEG_FLOATS;
     }
   });
+  return out;
+}
+
+/** pack filled triangles (flat [baseLeft, baseRight, apex], 6 floats each) with an optional colour value per triangle */
+export function packTriangles(tris: ArrayLike<number>, values?: ArrayLike<number>): Float32Array {
+  const count = Math.floor(tris.length / 6);
+  const out = new Float32Array(count * SEG_FLOATS);
+  for (let i = 0; i < count; i++) {
+    const o = i * SEG_FLOATS, t = i * 6, c = values ? values[i]! : 0;
+    out[o] = tris[t]!; out[o + 1] = tris[t + 1]!; out[o + 2] = tris[t + 2]!; out[o + 3] = tris[t + 3]!;
+    out[o + 4] = c; out[o + 5] = c; out[o + 6] = tris[t + 4]!; out[o + 7] = tris[t + 5]!;
+  }
   return out;
 }
 

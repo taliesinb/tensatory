@@ -44,7 +44,7 @@ pipelines and either draw with Canvas 2D or upload their results. See
   flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
   ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
   strat / JL / cover; lines, length, opacity, tail, split, ▶), `vector field`
-  (off by default: spacing in px, glyph: arrow / head / triangle, opacity,
+  (off by default: spacing in px, glyph: arrow / head / solid triangle, opacity,
   the `longest` readout; see [glyphs.md](glyphs.md)).
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).

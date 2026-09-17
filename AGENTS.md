@@ -138,10 +138,11 @@ profiling test.
   have length budget `L = 0.9 · spacing · |v| / max |v|` with the maximum
   over the vectors ACTUALLY sampled (the `longest` readout) and three styles
   (`glyph`: arrow = centred shaft + head; head = a chevron of length L
-  centred on the point; triangle = narrow outlined triangle, base on the
-  point, apex at the arrow's tip), all within L/2 of the point so none
-  overlaps; ≤ 3 `Seg` / `Seg3` records each, drawn by the line pipelines,
-  coloured by V_C. Fused path:
+  centred on the point; triangle = solid narrow triangle, base on the point,
+  apex at the arrow's tip), all within L/2 of the point so none overlaps;
+  ≤ 3 `Seg` / `Seg3` records each — lines, or one filled-triangle record
+  (base in a / b, apex in arc / len / phase) for the renderers' triangle
+  pipelines (`kind: "triangles"`) — coloured by V_C. Fused path:
   one kernel per (field, colour) — measure (`atomicMax` on norm bits) + emit
   — with the lattice as a dispatch parameter. Linear normalization only;
   rescaling for heavy-tailed norms is the planned follow-up. No animation.

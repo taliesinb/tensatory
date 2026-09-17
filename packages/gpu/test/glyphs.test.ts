@@ -79,19 +79,29 @@ describe("fused glyphs", () => {
     let nonzero = 0;
     for (let i = 0; i < fine.pointCount; i++) if (Math.hypot(...grad.value([fp[2 * i]!, fp[2 * i + 1]!])!) > 0) nonzero++;
     expect((await readSegments(gpu, segs2)).length / SEG_FLOATS).toBe(3 * nonzero);
-    // the other styles through the same kernel: exactly core's segments, 2 (head) / 3 (triangle) per glyph
-    for (const style of ["head", "triangle"] as const) {
-      resetSegments(gpu, segs);
-      await kernel.run(segs, lattice, style);
-      const o2 = await readSegments(gpu, segs);
-      const cpu2 = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style });
-      expect(o2.length / SEG_FLOATS).toBe(cpu2.lines.length * (style === "head" ? 2 : 3));
-      const w2 = cpuKeys(cpu2.lines, 2), g2 = new Map<string, number>();
-      for (let i = 0; i < o2.length / SEG_FLOATS; i++) { const o = i * SEG_FLOATS; const k = segKey([o2[o]!, o2[o + 1]!], [o2[o + 2]!, o2[o + 3]!]); g2.set(k, (g2.get(k) ?? 0) + 1); }
-      let miss = 0;
-      for (const [k, c] of w2) if ((g2.get(k) ?? 0) !== c) miss++;
-      expect(miss).toBeLessThan(w2.size * 0.01 + 1);
-    }
+    // head through the same kernel: exactly core's segments, 2 per glyph
+    resetSegments(gpu, segs);
+    await kernel.run(segs, lattice, "head");
+    const o2 = await readSegments(gpu, segs);
+    const cpu2 = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style: "head" });
+    expect(o2.length / SEG_FLOATS).toBe(cpu2.lines.length * 2);
+    const w2 = cpuKeys(cpu2.lines, 2), g2 = new Map<string, number>();
+    for (let i = 0; i < o2.length / SEG_FLOATS; i++) { const o = i * SEG_FLOATS; const k = segKey([o2[o]!, o2[o + 1]!], [o2[o + 2]!, o2[o + 3]!]); g2.set(k, (g2.get(k) ?? 0) + 1); }
+    let miss = 0;
+    for (const [k, c] of w2) if ((g2.get(k) ?? 0) !== c) miss++;
+    expect(miss).toBeLessThan(w2.size * 0.01 + 1);
+    // triangle: one filled record per glyph — base in a / b, apex in (arc, len) — equal to core's triangles
+    resetSegments(gpu, segs);
+    await kernel.run(segs, lattice, "triangle");
+    const o3 = await readSegments(gpu, segs);
+    const cpu3 = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style: "triangle" });
+    expect(o3.length / SEG_FLOATS).toBe(cpu3.triangles.length / 6);
+    const triKey = (t: ArrayLike<number>, o: number) => [t[o], t[o + 1], t[o + 2], t[o + 3], t[o + 4], t[o + 5]].map((v) => v!.toFixed(4)).join(",");
+    const w3 = new Set<string>();
+    for (let i = 0; i < cpu3.triangles.length; i += 6) w3.add(triKey(cpu3.triangles, i));
+    let found = 0;
+    for (let i = 0; i < o3.length / SEG_FLOATS; i++) { const o = i * SEG_FLOATS; if (w3.has(triKey([o3[o]!, o3[o + 1]!, o3[o + 2]!, o3[o + 3]!, o3[o + 6]!, o3[o + 7]!], 0))) found++; }
+    expect(found).toBeGreaterThan(w3.size * 0.99 - 1);
     segs.destroy(); segs2.destroy(); kernel.destroy();
   });
   it("3D: Seg3 arrows on an FCC lattice equal core's", async () => {

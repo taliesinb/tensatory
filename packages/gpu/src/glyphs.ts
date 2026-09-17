@@ -111,8 +111,13 @@ ${latticeWgsl(D)}
   return select(c / l, c, l == 0.0);
 }`;
   const seg = D === 2
-    ? { structs: SEG_WGSL, append: SEG_APPEND_WGSL, arr: "Seg", ind: "Indirect", make: `fn rec(a: vec2<f32>, b: vec2<f32>, c: f32) -> Seg { var s: Seg; s.a = a; s.b = b; s.ca = c; s.cb = c; s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0; return s; }`, call: "appendSeg" }
-    : { structs: SEG3_WGSL, append: SEG3_APPEND_WGSL, arr: "Seg3", ind: "Indirect3", make: `fn rec(a: vec3<f32>, b: vec3<f32>, c: f32) -> Seg3 { var s: Seg3; s.a = a; s.b = b; s.ca = c; s.cb = c; s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0; return s; }`, call: "appendSeg3" };
+    ? { structs: SEG_WGSL, append: SEG_APPEND_WGSL, arr: "Seg", ind: "Indirect", call: "appendSeg", make: `
+fn rec(a: vec2<f32>, b: vec2<f32>, c: f32) -> Seg { var s: Seg; s.a = a; s.b = b; s.ca = c; s.cb = c; s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0; return s; }
+// a filled triangle: base a-b, apex in (arc, len) — read by the renderer's triangle pipeline
+fn tri(a: vec2<f32>, b: vec2<f32>, apex: vec2<f32>, c: f32) -> Seg { var s = rec(a, b, c); s.arc = apex.x; s.len = apex.y; return s; }` }
+    : { structs: SEG3_WGSL, append: SEG3_APPEND_WGSL, arr: "Seg3", ind: "Indirect3", call: "appendSeg3", make: `
+fn rec(a: vec3<f32>, b: vec3<f32>, c: f32) -> Seg3 { var s: Seg3; s.a = a; s.b = b; s.ca = c; s.cb = c; s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0; return s; }
+fn tri(a: vec3<f32>, b: vec3<f32>, apex: vec3<f32>, c: f32) -> Seg3 { var s = rec(a, b, c); s.arc = apex.x; s.len = apex.y; s.phase = apex.z; return s; }` };
   const emit = `${lib.code}
 ${seg.structs}
 @group(0) @binding(0) var<storage, read_write> segs: array<${seg.arr}>;
@@ -153,12 +158,9 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
     ${seg.call}(rec(back + CHEVRON * L * nrm, tip, c));
     ${seg.call}(rec(tip, back - CHEVRON * L * nrm, c));
   } else if (style == 2u) {
-    // triangle: base centred on p, apex at the arrow's tip
+    // triangle: one filled record, base centred on p, apex at the arrow's tip
     let w = TRI_W * 0.5 * L;
-    let bl = p + w * nrm; let br = p - w * nrm;
-    ${seg.call}(rec(bl, tip, c));
-    ${seg.call}(rec(tip, br, c));
-    ${seg.call}(rec(br, bl, c));
+    ${seg.call}(tri(p + w * nrm, p - w * nrm, tip, c));
   } else {
     let tail = p - 0.5 * L * u;
     let back = tip - head * L * u;

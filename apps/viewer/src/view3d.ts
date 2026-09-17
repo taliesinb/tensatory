@@ -24,6 +24,7 @@ import {
   packPolylines,
   packPolylines3,
   packStreamlines3,
+  packTriangles3,
   project,
   regionAspect,
   resetMesh,
@@ -515,13 +516,16 @@ export class View3D implements MemoryUser {
         let o = 0;
         for (const g of lat.cosets) { const s = v.data.sampleOn(g); vectors.set(s, o); o += s.length; }
         const g = arrowGlyphs(pts, vectors, 3, lat.spacing, { style });
-        const colours = vc ? g.lines.map((l, k) => { const p = g.point[k]!; return new Float64Array(l.length / 3).fill(vc.data.value([pts[3 * p]!, pts[3 * p + 1]!, pts[3 * p + 2]!]) ?? NaN); }) : undefined;
-        return { segs: uploadSegments3(c.gpu, packPolylines3(g.lines, colours), false), max: g.maxNorm };
+        const at = (p: number) => vc!.data.value([pts[3 * p]!, pts[3 * p + 1]!, pts[3 * p + 2]!]) ?? NaN;
+        const packed = style === "triangle"
+          ? packTriangles3(g.triangles, vc ? Float64Array.from(g.triPoint, at) : undefined)
+          : packPolylines3(g.lines, vc ? g.lines.map((l, k) => new Float64Array(l.length / 3).fill(at(g.point[k]!))) : undefined);
+        return { segs: uploadSegments3(c.gpu, packed, false), max: g.maxNorm };
       });
       segs = entry.segs; this.glyphMaxNorm = entry.max;
     }
     const colour = vc ? c.colour(vc) : undefined;
-    return { segs, width: 1.5, color: [1, 1, 1], ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
+    return { segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, color: [1, 1, 1], ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
   }
   /** one readback of the normalizing norm in flight per set; a newer dispatch is read after it */
   private readGlyphMax(e: { stamp: string; pending: boolean; read: string }, kernel: FusedGlyphs): void {

@@ -83,6 +83,19 @@ export function packStreamlines3(lines: Streamline[], step: number, values?: (Ar
   return out;
 }
 
+/** pack filled 3D triangles (flat [baseLeft, baseRight, apex], 9 floats each) as Seg3 records: a, b = the base, (arc, len, phase) = the apex */
+export function packTriangles3(tris: ArrayLike<number>, values?: ArrayLike<number>): Float32Array {
+  const count = Math.floor(tris.length / 9);
+  const out = new Float32Array(count * SEG3_FLOATS);
+  for (let i = 0; i < count; i++) {
+    const o = i * SEG3_FLOATS, t = i * 9, c = values ? values[i]! : 0;
+    out[o] = tris[t]!; out[o + 1] = tris[t + 1]!; out[o + 2] = tris[t + 2]!; out[o + 3] = c;
+    out[o + 4] = tris[t + 3]!; out[o + 5] = tris[t + 4]!; out[o + 6] = tris[t + 5]!; out[o + 7] = c;
+    out[o + 8] = tris[t + 6]!; out[o + 9] = tris[t + 7]!; out[o + 10] = tris[t + 8]!;
+  }
+  return out;
+}
+
 /** the 12 edges of a box as one polyline set */
 export function boxEdges(a: ArrayLike<number>, b: ArrayLike<number>): Float32Array {
   const corner = (m: number) => [m & 1 ? b[0]! : a[0]!, m & 2 ? b[1]! : a[1]!, m & 4 ? b[2]! : a[2]!];

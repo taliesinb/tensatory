@@ -26,6 +26,8 @@ export interface GpuMeshLayer {
 /** thick screen-space lines with depth: Seg3 records, or 2D Seg records embedded on the plane `embed.axis = embed.depth` */
 export interface GpuLineLayer3D {
   segs: GpuSegments3 | GpuSegments;
+  /** thick lines (default), or filled triangles read from Seg3 records (a, b = base, arc / len / phase = apex) */
+  kind?: "lines" | "triangles";
   embed?: { axis: number; depth: number };
   /** css px */
   width: number;
@@ -265,6 +267,46 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   return vec4<f32>(rgb * bright, 1.0);
 }`;
 
+// filled triangles from Seg3 records (glyphs): a, b = the base, (arc, len, phase) = the apex; two halves per instance
+// (apex-a-mid, apex-mid-b) so the six vertices cover the triangle once. Same uniform block as the lines.
+const TRIANGLES3 = `
+struct LineU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, particles: vec4<f32>, embed: vec4<f32>, viewport: vec4<f32>, cropLo: vec4<f32> }
+@group(0) @binding(0) var<uniform> u: LineU;
+@group(0) @binding(1) var<storage, read> segs: array<f32>;
+@group(0) @binding(2) var lut: texture_2d<f32>;
+@group(0) @binding(3) var lutSampler: sampler;
+fn isnan_(x: f32) -> bool { let b = bitcast<u32>(x); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+fn param(value: f32, m: vec4<f32>) -> f32 {
+  let v = clamp(value, min(m.x, m.y), max(m.x, m.y));
+  var t: f32;
+  if (m.z > 0.5) { t = (log(v) - log(m.x)) / (log(m.y) - log(m.x)); } else { t = (v - m.x) / (m.y - m.x); }
+  t = clamp(t, 0.0, 1.0);
+  return select(t, 1.0 - t, m.w > 0.5);
+}
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) value: f32 }
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  let o = ii * ${SEG3_FLOATS}u;
+  let a = vec3<f32>(segs[o], segs[o + 1u], segs[o + 2u]); let b = vec3<f32>(segs[o + 4u], segs[o + 5u], segs[o + 6u]);
+  let apex = vec3<f32>(segs[o + 8u], segs[o + 9u], segs[o + 10u]); let m = 0.5 * (a + b);
+  var p = apex;
+  if (vi == 1u) { p = a; } else if (vi == 2u || vi == 4u) { p = m; } else if (vi == 5u) { p = b; }
+  var out: VOut;
+  out.pos = u.viewProj * vec4<f32>(p, 1.0);
+  out.world = p; out.value = segs[o + 3u];
+  return out;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+  if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
+  var rgb = u.color.rgb;
+  if (u.style.z > 0.5) {
+    if (isnan_(in.value)) { discard; }
+    let c = textureSample(lut, lutSampler, vec2<f32>(param(in.value, u.map), 0.5));
+    if (c.a < 0.5) { discard; }
+    rgb = c.rgb;
+  }
+  return vec4<f32>(rgb, 1.0);
+}`;
+
 const OPAQUE = `${MESH_COMMON}
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> { let c = shade(in); return vec4<f32>(c.rgb, 1.0); }`;
 
@@ -309,6 +351,7 @@ export class GpuRenderer3D {
   private readonly transparent: GPURenderPipeline;
   private readonly composite: GPURenderPipeline;
   private readonly lines: GPURenderPipeline;
+  private readonly triangles: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly luts = new WeakMap<Lut, GPUTexture>();
   private readonly uniformPool: GPUBuffer[] = [];
@@ -350,6 +393,14 @@ export class GpuRenderer3D {
       layout: "auto",
       vertex: { module: lineMod, entryPoint: "vs" },
       fragment: { module: lineMod, entryPoint: "fs", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    const triMod = dev.createShaderModule({ code: TRIANGLES3 });
+    this.triangles = dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: triMod, entryPoint: "vs" },
+      fragment: { module: triMod, entryPoint: "fs", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
     });
@@ -436,7 +487,7 @@ export class GpuRenderer3D {
     f.set([w, h, dpr, 0], 44);
     f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 48);
     return this.backend.device.createBindGroup({
-      layout: this.lines.getBindGroupLayout(0),
+      layout: (L.kind === "triangles" ? this.triangles : this.lines).getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform(f) } },
         { binding: 1, resource: { buffer: L.segs.buffer } },
@@ -464,7 +515,7 @@ export class GpuRenderer3D {
       colorAttachments: [{ view: colour, clearValue: { r, g, b, a: 1 }, loadOp: "clear", storeOp: "store" }],
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
-    for (const L of scene.lines ?? []) { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
+    for (const L of scene.lines ?? []) { p1.setPipeline(L.kind === "triangles" ? this.triangles : this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
     for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop, cropLo)); p1.drawIndirect(L.mesh.indirect, 0); }
     p1.end();
     if (trans.length) {

@@ -49,16 +49,25 @@ never overlap in any of them (the `glyph` control, `?vglyph=`):
 * **head** — the arrowhead alone: a chevron of length `L` centred on the
   point, tip at `p + L/2·u`, a 44° opening (`CHEVRON_SPREAD`, narrower than
   the arrowhead so the direction reads); one polyline, two segments;
-* **triangle** — a long, narrow outlined triangle with its base centred on
-  the point (half-width `TRIANGLE_HALF_WIDTH` = 0.15 of its length) and its
-  apex where the arrow's tip would be, `p + L/2·u`; one closed polyline,
-  three segments. (The line pipelines cannot fill it; a filled variant would
-  need a small triangle pipeline.)
+* **triangle** — a solid, narrow triangle with its base centred on the
+  point (half-width `TRIANGLE_HALF_WIDTH` = 0.22 of its length) and its
+  apex where the arrow's tip would be, `p + L/2·u`; ONE record, filled.
 
 3D barbs / bases lie in the plane of the vector and the axis it is least
-aligned with (`glyphNormal`). The line pipelines of both renderers draw the
-segments as they are (`Seg` / `Seg3` records). Zero and non-finite vectors
-get no glyph.
+aligned with (`glyphNormal`). Zero and non-finite vectors get no glyph.
+
+**Records.** Arrow and head are line segments in `Seg` / `Seg3` records for
+the line pipelines. A triangle reuses the same record for a *triangle*
+pipeline: `a`, `b` = the base's ends, the apex in the spare floats (`arc`,
+`len`[, `phase`]), `ca = cb` = the colour (`packTriangles` /
+`packTriangles3`; the kernel's `tri()`). `GpuLineLayer.kind` /
+`GpuLineLayer3D.kind` = `"triangles"` selects the pipeline, which draws each
+record as two halves (apex–a–mid, apex–mid–b) so the six instance vertices
+cover the triangle exactly once — no double blending in 2D. The Canvas 2D
+renderer fills `TriangleLayer`s binned by colour like its lines. In 3D a flat
+triangle seen edge-on is a sliver (the arrow, extruded in screen space, is
+not): a fatter 3D glyph (two crossed triangles, or a tetrahedron) is a
+possible follow-up.
 
 **Normalization** is against the longest vector *actually sampled* (this
 lattice, this view), the `longest` readout: zooming into a flat region
@@ -80,8 +89,9 @@ packed grid per coset).
    u32, so the maximum of the bits is the maximum norm; NaN / ∞ are skipped
    by `isfinite_`, as core's `maxNorm` skips them.
 2. **emit** — one thread per point reads its vector and the maximum and
-   appends the records of the style in `params[6]` with the same formulas as
-   core; `capacityFor` is 3 per point (the most any style appends), the
+   appends the records of the style in `params[6]` (three segments, two, or
+   one triangle) with the same formulas as core; `capacityFor` is 3 per point
+   (the most any style appends), the
    counter is the true count. The style is a dispatch parameter like the
    lattice, so switching it compiles nothing.
 

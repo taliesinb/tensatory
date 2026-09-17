@@ -27,6 +27,8 @@ export interface GpuRasterLayer {
 }
 export interface GpuLineLayer {
   segs: GpuSegments;
+  /** how the records are read: thick lines (default), or filled triangles (a, b = base, arc / len = apex; see segments.ts) */
+  kind?: "lines" | "triangles";
   width: number;
   alpha: number;
   color: [number, number, number];
@@ -175,11 +177,46 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, 
   return vec4<f32>(rgb * alpha, alpha);
 }`;
 
+// filled triangles from Seg records (glyphs): a, b = the base, (arc, len) = the apex; drawn as two halves
+// (apex-a-mid, apex-mid-b) so the six instance vertices cover the triangle once, with no double blending
+const TRIANGLES = `${COMMON}
+${SEG_WGSL}
+struct LineU { view: View, style: vec4<f32>, color: vec4<f32>, particles: vec4<f32> }
+@group(0) @binding(0) var<uniform> u: LineU;
+@group(0) @binding(1) var<storage, read> segs: array<Seg>;
+@group(0) @binding(2) var lut: texture_2d<f32>;
+@group(0) @binding(3) var lutSampler: sampler;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32>, @location(1) value: f32 }
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut;
+  if (ii >= arrayLength(&segs)) { o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return o; }
+  let s = segs[ii];
+  let apex = vec2<f32>(s.arc, s.len); let m = 0.5 * (s.a + s.b);
+  var p = apex;
+  if (vi == 1u) { p = s.a; } else if (vi == 2u || vi == 4u) { p = m; } else if (vi == 5u) { p = s.b; }
+  o.pos = toClip(toScreen(p, u.view), u.view);
+  o.world = p; o.value = s.ca;
+  return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+  if (!inClip(in.world, u.view)) { discard; }
+  let alpha = u.style.y;
+  var rgb = u.color.rgb;
+  if (u.style.z > 0.5) {
+    if (isnan_(in.value)) { discard; }
+    let c = textureSample(lut, lutSampler, vec2<f32>(param(in.value, u.view.map), 0.5));
+    if (c.a < 0.5) { discard; }
+    rgb = c.rgb;
+  }
+  return vec4<f32>(rgb * alpha, alpha);
+}`;
+
 export class GpuRenderer {
   private readonly ctx: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
   private readonly rasterPipeline: GPURenderPipeline;
   private readonly linePipeline: GPURenderPipeline;
+  private readonly trianglePipeline: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly luts = new WeakMap<Lut, GPUTexture>();
   private readonly uniformPool: GPUBuffer[] = [];
@@ -203,6 +240,7 @@ export class GpuRenderer {
     };
     this.rasterPipeline = make(RASTER);
     this.linePipeline = make(LINES);
+    this.trianglePipeline = make(TRIANGLES);
   }
 
   /** match the backing store to the element size */
@@ -274,8 +312,9 @@ export class GpuRenderer {
       f.set([L.color[0], L.color[1], L.color[2], 1], 20);
       const P = L.particles;
       f.set([P?.tail ?? 0, P?.split ?? 1, P?.travel ?? 0, P && L.segs.particles ? 1 : 0], 24);
+      const pipeline = L.kind === "triangles" ? this.trianglePipeline : this.linePipeline;
       const bg = dev.createBindGroup({
-        layout: this.linePipeline.getBindGroupLayout(0),
+        layout: pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.uniform(f) } },
           { binding: 1, resource: { buffer: L.segs.buffer } },
@@ -283,7 +322,7 @@ export class GpuRenderer {
           { binding: 3, resource: this.sampler },
         ],
       });
-      pass.setPipeline(this.linePipeline);
+      pass.setPipeline(pipeline);
       pass.setBindGroup(0, bg);
       pass.drawIndirect(L.segs.indirect, 0);
     }

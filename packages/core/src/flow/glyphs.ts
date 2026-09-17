@@ -81,8 +81,8 @@ export function latticePoints(l: Lattice): Float64Array {
  * Glyph shapes, all within the same length budget L (so neighbours never overlap in any style):
  *  * `arrow` — a shaft of length L centred on the point with two barbs at its tip (3 segments);
  *  * `head` — only the arrowhead: a chevron of length L centred on the point, its tip at `p + L/2·u` (2 segments);
- *  * `triangle` — a long, narrow triangle with its base centred on the point and its apex where the arrow's tip
- *    would be, `p + L/2·u` (3 segments, outlined).
+ *  * `triangle` — a solid, narrow triangle with its base centred on the point and its apex where the arrow's tip
+ *    would be, `p + L/2·u` (one filled triangle record, not lines).
  */
 export type GlyphStyle = "arrow" | "head" | "triangle";
 export const GLYPH_STYLES: readonly GlyphStyle[] = ["arrow", "head", "triangle"];
@@ -100,10 +100,10 @@ export const GLYPH_FILL = 0.9, GLYPH_HEAD = 0.3;
 export const HEAD_SPREAD = 0.55;
 /** the `head` chevron: back L from the tip, out `CHEVRON_SPREAD·L` sideways (a 44° opening — narrower than the arrowhead, so the direction reads) */
 export const CHEVRON_SPREAD = 0.4;
-/** the `triangle` base's half-width as a fraction of its length L/2 */
-export const TRIANGLE_HALF_WIDTH = 0.15;
-/** segments a glyph of `style` appends at most */
-export const glyphSegments = (style: GlyphStyle): number => (style === "head" ? 2 : 3);
+/** the `triangle` base's half-width as a fraction of its length L/2 (base : length = 0.44) */
+export const TRIANGLE_HALF_WIDTH = 0.22;
+/** records (segments, or one filled triangle) a glyph of `style` appends at most */
+export const glyphSegments = (style: GlyphStyle): number => (style === "head" ? 2 : style === "triangle" ? 1 : 3);
 
 /** the largest finite norm among `vectors` (flat, D per point); 0 when there is none */
 export function maxNorm(vectors: ArrayLike<number>, D: number): number {
@@ -130,10 +130,14 @@ export function glyphNormal(u: ArrayLike<number>, D: number): number[] {
 }
 
 export interface Glyphs {
-  /** the polylines, flat D-dimensional: arrow [tail, tip, barb] + [tip, barb']; head [barb, tip, barb']; triangle [base, apex, base', base] */
+  /** the polylines (arrow / head styles), flat D-dimensional: arrow [tail, tip, barb] + [tip, barb']; head [barb, tip, barb'] */
   lines: Float64Array[];
   /** the lattice point (index into `points`) each polyline belongs to */
   point: Int32Array;
+  /** filled triangles (triangle style), flat `[baseLeft, baseRight, apex]` — 3·D floats per glyph */
+  triangles: Float64Array;
+  /** the lattice point of each triangle */
+  triPoint: Int32Array;
   /** the normalizing norm used (the longest vector sampled), 0 when nothing was drawn */
   maxNorm: number;
 }
@@ -147,8 +151,9 @@ export interface Glyphs {
 export function arrowGlyphs(points: ArrayLike<number>, vectors: ArrayLike<number>, D: number, spacing: number, opts: GlyphOptions & { maxNorm?: number } = {}): Glyphs {
   const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, style = opts.style ?? "arrow";
   const vmax = opts.maxNorm ?? maxNorm(vectors, D);
-  const lines: Float64Array[] = [], point: number[] = [];
-  if (!(vmax > 0)) return { lines, point: new Int32Array(0), maxNorm: 0 };
+  const lines: Float64Array[] = [], point: number[] = [], tris: number[] = [], triPoint: number[] = [];
+  const done = (): Glyphs => ({ lines, point: Int32Array.from(point), triangles: Float64Array.from(tris), triPoint: Int32Array.from(triPoint), maxNorm: vmax > 0 ? vmax : 0 });
+  if (!(vmax > 0)) return done();
   const n = Math.floor(Math.min(points.length, vectors.length) / D);
   const u = new Array<number>(D);
   for (let i = 0; i < n; i++) {
@@ -176,14 +181,14 @@ export function arrowGlyphs(points: ArrayLike<number>, vectors: ArrayLike<number
       }
       lines.push(chevron); point.push(i);
     } else {
-      const tri = new Float64Array(4 * D);
+      const w = TRIANGLE_HALF_WIDTH * 0.5 * L, o = tris.length;
+      tris.length = o + 3 * D;
       for (let d = 0; d < D; d++) {
         const c = points[i * D + d]!, ud = u[d]!, nd = nrm[d]!;
-        const w = TRIANGLE_HALF_WIDTH * 0.5 * L;
-        tri[d] = c + w * nd; tri[D + d] = c + 0.5 * L * ud; tri[2 * D + d] = c - w * nd; tri[3 * D + d] = tri[d]!;
+        tris[o + d] = c + w * nd; tris[o + D + d] = c - w * nd; tris[o + 2 * D + d] = c + 0.5 * L * ud;
       }
-      lines.push(tri); point.push(i);
+      triPoint.push(i);
     }
   }
-  return { lines, point: Int32Array.from(point), maxNorm: vmax };
+  return done();
 }
