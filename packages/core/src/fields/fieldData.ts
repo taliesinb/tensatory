@@ -31,6 +31,13 @@ abstract class FieldDataBase {
   abstract readonly kind: FieldKind;
   /** the discrete support; defined iff kind === "sampled" */
   abstract readonly samplePoints: DenseGrid | undefined;
+  /**
+   * true when evaluating is expensive (a net evaluated on the CPU, or anything
+   * derived from one): consumers should sample sparingly and avoid per-point
+   * work such as exact isoline projection. Ordinary symbolic and sampled data
+   * is cheap.
+   */
+  get costly(): boolean { return false; }
 
   protected posFor(grid: DenseGrid): boolean {
     return this.samplePoints !== undefined && this.samplePoints.equals(grid);
@@ -124,9 +131,11 @@ export class ClosureScalarFieldData extends ScalarFieldData {
     readonly samplePoints: DenseGrid | undefined,
     readonly fn: ScalarFn,
     private readonly deriv: (dim: number) => ScalarFieldData,
+    private readonly _costly = false,
   ) {
     super();
   }
+  override get costly(): boolean { return this._costly; }
   derivative(dim: number): ScalarFieldData {
     return this.deriv(dim);
   }
@@ -137,7 +146,7 @@ export class ClosureScalarFieldData extends ScalarFieldData {
  * values on the grid and interpolate the differenced field (so higher orders
  * compose). Symbolic data without an exact derivative: central differences.
  */
-function numericalDerivative(f: ScalarFieldData, dim: number): ScalarFieldData {
+export function numericalDerivative(f: ScalarFieldData, dim: number): ScalarFieldData {
   const grid = f.samplePoints;
   let fn: ScalarFn;
   if (grid) {
@@ -146,14 +155,14 @@ function numericalDerivative(f: ScalarFieldData, dim: number): ScalarFieldData {
     for (let i = 0; i < dvals.length; i++) dvals[i] = gridDifference(grid, vals, 1, 0, dim, i);
     fn = (p, pos) => (pos >= 0 ? dvals[pos]! : interpolate(grid, dvals, 1, 0, p));
   } else fn = fdPartial(f.fn, dim, f.box);
-  const out: ClosureScalarFieldData = new ClosureScalarFieldData(f.kind, f.dimCount, f.box, grid, fn, (d) => numericalDerivative(out, d));
+  const out: ClosureScalarFieldData = new ClosureScalarFieldData(f.kind, f.dimCount, f.box, grid, fn, (d) => numericalDerivative(out, d), f.costly);
   return out;
 }
 
 /** k * f, with derivatives scaled alike */
 function scaleValues(f: ScalarFieldData, k: number): ScalarFieldData {
   const fn: ScalarFn = (p, pos) => k * f.fn(p, pos);
-  return new ClosureScalarFieldData(f.kind, f.dimCount, f.box, f.samplePoints, fn, (d) => scaleValues(f.derivative(d), k));
+  return new ClosureScalarFieldData(f.kind, f.dimCount, f.box, f.samplePoints, fn, (d) => scaleValues(f.derivative(d), k), f.costly);
 }
 
 /*******************************************************/
@@ -288,6 +297,60 @@ export interface FieldArgs {
 }
 
 export const NO_ARGS: FieldArgs = { scalars: {}, vectors: {} };
+const argsCostly = (args: FieldArgs): boolean => Object.values(args.scalars).some((a) => a.costly) || Object.values(args.vectors).some((a) => a.costly);
+
+/**
+ * `f` with its values (and, lazily, its derivatives') precomputed on `grid`
+ * by ONE batched `sampleOn` each: `fn(p, pos)` answers from the cache when
+ * `pos` is a grid position and falls back to `f` elsewhere. This is how an
+ * expression over a costly argument is sampled on a grid without a per-point
+ * evaluation of the argument (see `SymbolicScalarFieldData.sampleOn`).
+ */
+function gridCached(f: ScalarFieldData, grid: DenseGrid): ScalarFieldData {
+  let vals: Float64Array | undefined;
+  const fn: ScalarFn = (p, pos) => (pos >= 0 ? (vals ??= f.sampleOn(grid))[pos]! : f.fn(p, pos));
+  const derivs = new Map<number, ScalarFieldData>();
+  return new ClosureScalarFieldData(f.kind, f.dimCount, f.box, f.samplePoints, fn, (d) => {
+    let g = derivs.get(d);
+    if (!g) derivs.set(d, (g = gridCached(f.derivative(d), grid)));
+    return g;
+  }, f.costly);
+}
+
+class GridCachedVectorFieldData extends VectorFieldData {
+  readonly kind: FieldKind;
+  readonly dimCount: number;
+  readonly box: Box;
+  readonly samplePoints: DenseGrid | undefined;
+  readonly fn: VectorFn;
+  override get costly(): boolean { return this.inner.costly; }
+  private vals: Float64Array | undefined;
+  private readonly comps = new Map<number, ScalarFieldData>();
+  constructor(private readonly inner: VectorFieldData, private readonly grid: DenseGrid) {
+    super();
+    this.kind = inner.kind; this.dimCount = inner.dimCount; this.box = inner.box; this.samplePoints = inner.samplePoints;
+    const D = inner.dimCount;
+    this.fn = (p, pos, out) => {
+      if (pos < 0) return inner.fn(p, pos, out);
+      const v = (this.vals ??= inner.sampleOn(grid));
+      for (let d = 0; d < D; d++) out[d] = v[pos * D + d]!;
+      return out;
+    };
+  }
+  component(index: number): ScalarFieldData {
+    let c = this.comps.get(index);
+    if (!c) this.comps.set(index, (c = gridCached(this.inner.component(index), this.grid)));
+    return c;
+  }
+}
+
+/** the arguments with every costly one cached on `grid` */
+function gridCachedArgs(args: FieldArgs, grid: DenseGrid): FieldArgs {
+  return {
+    scalars: Object.fromEntries(Object.entries(args.scalars).map(([k, a]) => [k, a.costly ? gridCached(a, grid) : a])),
+    vectors: Object.fromEntries(Object.entries(args.vectors).map(([k, a]) => [k, a.costly ? new GridCachedVectorFieldData(a, grid) : a])),
+  };
+}
 
 function argContext(dimCount: number, args: FieldArgs): CompileContext {
   const need = <T>(table: Readonly<Record<string, T>>, name: string, what: string): T => {
@@ -360,6 +423,17 @@ export class SymbolicScalarFieldData extends ScalarFieldData {
     this.ctx = Object.keys(args.scalars).length + Object.keys(args.vectors).length ? argContext(dimCount, args) : pureContext(dimCount);
     this.fn = compileScalar(ast, this.ctx);
   }
+  override get costly(): boolean { return argsCostly(this.args); }
+
+  /** costly arguments are sampled on the grid in batches, then the expression runs with `pos` set */
+  override sampleOn(grid: DenseGrid): Float64Array {
+    if (!this.costly || grid.dimCount !== this.dimCount) return super.sampleOn(grid);
+    const fn = compileScalar(this.ast, argContext(this.dimCount, gridCachedArgs(this.args, grid)));
+    const out = new Float64Array(grid.sampleCount);
+    const p = new Float64Array(this.dimCount);
+    for (let i = 0; i < out.length; i++) { grid.pointInto(i, p); out[i] = fn(p, i); }
+    return out;
+  }
 
   private readonly derivatives = new Map<number, ScalarFieldData>();
   derivative(dim: number): ScalarFieldData {
@@ -392,6 +466,18 @@ export class SymbolicVectorFieldData extends VectorFieldData {
     this.samplePoints = s.grid;
     this.ctx = Object.keys(args.scalars).length + Object.keys(args.vectors).length ? argContext(dimCount, args) : pureContext(dimCount);
     this.fn = compileVector(ast, this.ctx);
+  }
+  override get costly(): boolean { return argsCostly(this.args); }
+
+  /** costly arguments are sampled on the grid in batches, then the expression runs with `pos` set */
+  override sampleOn(grid: DenseGrid): Float64Array {
+    if (!this.costly || grid.dimCount !== this.dimCount) return super.sampleOn(grid);
+    const fn = compileVector(this.ast, argContext(this.dimCount, gridCachedArgs(this.args, grid)));
+    const D = this.dimCount;
+    const out = new Float64Array(grid.sampleCount * D);
+    const p = new Float64Array(D), v = new Float64Array(D);
+    for (let i = 0; i < grid.sampleCount; i++) { grid.pointInto(i, p); fn(p, i, v); out.set(v, i * D); }
+    return out;
   }
 
   component(index: number): ScalarFieldData {
@@ -433,6 +519,8 @@ export class PulledBackScalarFieldData extends ScalarFieldData {
   readonly samplePoints: DenseGrid | undefined;
   readonly fn: ScalarFn;
 
+  override get costly(): boolean { return this.inner.costly; }
+
   constructor(readonly inner: ScalarFieldData, readonly map: AxisMap) {
     super();
     this.kind = inner.kind;
@@ -458,6 +546,7 @@ export class PulledBackVectorFieldData extends VectorFieldData {
   readonly box: Box;
   readonly samplePoints: DenseGrid | undefined;
   readonly fn: VectorFn;
+  override get costly(): boolean { return this.inner.costly; }
 
   constructor(readonly inner: VectorFieldData, readonly map: AxisMap) {
     super();

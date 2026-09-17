@@ -63,8 +63,11 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #picker .prow label, #system .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
 #picker .pval, #system .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-/* about: one line, the full text (name — description) in the tooltip */
-#picker .pval.about { font-size: inherit; line-height: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; user-select: none; -webkit-user-select: none; }
+/* about: one line, the full text (name — description) in the tooltip. The ellipsized text sits in a span that takes
+   no pointer events: Chrome shows a native tooltip with the full text of any line it clips with an ellipsis, which
+   would double our own; with the hover landing on the wrapper there is nothing clipped under the pointer. */
+#picker .pval.about { font-size: inherit; line-height: inherit; min-width: 0; cursor: help; user-select: none; -webkit-user-select: none; }
+#picker .pval.about > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 #pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }
 
 #cursorPane { position: absolute; right: 12px; bottom: 12px; display: none; pointer-events: none; }

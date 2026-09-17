@@ -58,3 +58,15 @@ mixture through the argument. Measured with `PERF=1 pnpm test`
 * A Web Worker for contouring / integration to keep the main thread free.
 * GPU: transpile expressions to WGSL; sample, raster and (in 3D) march on the
   GPU; upload grids as textures / storage buffers.
+
+## Nets
+
+See [gpu.md](gpu.md) stage 8. Two viewer-side lessons from the iris bundle:
+a fused kernel's cache key must contain only what changes its CODE (the
+colormap selection was in the isoline key and compiled a shader per drag
+event), and exact projection of a net-backed field is latency-bound (~40 ms
+per level however few vertices) — so the fused path shows marching squares
+while the level moves and projects once it settles. `window.__tensatory.frames`
+logs the last 60 frames' JS ms / dispatches / pipelines built for this kind of
+investigation; `?isoexact=0` disables 2D exact isolines for comparison.
+

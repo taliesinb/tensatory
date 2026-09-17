@@ -30,7 +30,9 @@ cannot drift from the types.
 It defines manifolds, fields on them (scalar / vector) whose data is
 symbolically defined, pointwise-derived from other fields, pulled back
 (translate / scale), or backed by arrays that are themselves inline, constant,
-one-hot, symbolic, or (later) stored via npz / npy / zarr / bin.
+one-hot, symbolic, or (later) stored via npz / npy / zarr / bin; and small
+neural networks (`nets`, `schema/nets.ts`, `notes/nets.md`) whose outputs can
+back fields (`net` / `netv` field data).
 
 ## Repository layout
 
@@ -38,14 +40,16 @@ one-hot, symbolic, or (later) stored via npz / npy / zarr / bin.
 schema/            @tensatory/schema  - bundle schema as TS types (+ BUNDLE_VERSION)
 packages/core/     @tensatory/core    - runtime: zod parsing, NdArray, symbolic
                                         expressions (normalize / compile / diff),
-                                        field data, stats, codomains, Bundle
+                                        field data, stats, codomains, nets
+                                        (zod + shape inference), Bundle
                                         registry, isolines, streamlines, glyph
                                         lattices. Isomorphic; no DOM. Tests in test/.
 packages/gpu/      @tensatory/gpu     - WebGPU backend beside core: WGSL
                                         transpiler, compute-shader sampling,
                                         geometry kernels (marching squares,
                                         projection, fused isolines/streamlines/
-                                        glyphs, marching tetrahedra), WebGPU 2D and 3D
+                                        glyphs, marching tetrahedra), net
+                                        transpiler, WebGPU 2D and 3D
                                         renderers; tests assert CPU/GPU
                                         agreement (Dawn node bindings).
 apps/viewer/       @tensatory/viewer  - Vite + vanilla TS viewer: 2D arm (canvas
@@ -87,6 +91,67 @@ profiling test.
   position. `grad` is symbolic differentiation; derivatives through field
   arguments compose to any order (`derivative(dim)` on field data: exact for
   symbolic data, grid differences for sampled data).
+* Nets (`notes/nets.md`): a net is a pure function from named input arrays
+  to named output arrays with predeclared per-example shapes (`def` / `bind`
+  / `displace` / `grad`); nothing distinguishes weights from data, loss is an
+  ordinary `[]` output. The body is the scalar language lifted elementwise
+  to arrays plus `matmul` / `einsum`, `reduce`, shape ops and `call`. Dataset
+  axes are DECLARED symbolic sizes (`"N"`) and reduced inside the net; extra
+  undeclared leading axes are an implicit vmap batch (broadcast across
+  inputs, invisible to the body, never reducible) for evaluating one net at
+  many parameter points. Symbolic sizes are opaque (never equal to another
+  name or a number except via broadcasting with 1); anything unprovable is a
+  parse-time error. `bind` fixes inputs (they stay internal arrays);
+  `displace` adds a `[K]` coefficient input and moves any named arrays
+  (inputs, nodes, bound inputs, constants) along K directions — "around" a
+  net; a net whose sole remaining input is `[D]` is a field with just `net`
+  + `output` + `box`, so a loss landscape is bind(data, θ*) → displace →
+  field. `grad` yields a net; `wrt` may be an input or any internal array; a
+  named `seed` becomes a new input (HVPs). `grad` is reverse-mode autodiff
+  as a PROGRAM REWRITE (`core/src/nets/autodiff.ts`): forward in A-normal
+  form + adjoint nodes in the same op vocabulary (slice / takeAlong adjoints
+  via a baked selection matrix + einsum / oneHot + reduce + transpose; `call`
+  via the callee's own grad net; einsum may repeat a letter in its OUTPUT —
+  `i->ii` writes the diagonal — so diagonal reads and writes are each
+  other's adjoints), so the op set is closed under adjoints, every evaluator
+  differentiates for free and grad programs compose (bind / displace / call
+  / grad again, to any order). Two
+  evaluators: the CPU reference (`ops.ts`, `program.ts`: batch-aware strided
+  ops, one batched evaluation per sampled grid chunk, Float64) and the
+  WebGPU transpiler (`gpu/src/nets.ts`: a net field becomes an ordinary WGSL
+  field function — one thread evaluates the whole net for its point in
+  function-scope arrays, so raster / exact isolines / streamlines / glyphs /
+  marching tetrahedra evaluate nets in place). SAFARI rejects a WGSL
+  function with > 8192 bytes of variables, so `NET_MAX_FLOATS = 2000` and
+  the emitter minimizes function-scope memory: ANF, best-fit reuse by
+  liveness, in-place elementwise, fusion of single-use elementwise producers
+  (`fuseElementwise`); `gpuTranspilable(fd)` says whether a field fits; one
+  `vecD` gradient function per field (`ProgramBuilder.gradient`); loop bounds
+  are opaque (`nb_`) because WGSL has no unroll control and Metal unrolls —
+  measured in both browsers with `apps/viewer/public/nettiming.html` (Safari
+  compiles 5–15× slower than Chrome; opaque bounds help both). A net
+  field is a program with one input (the point; `fieldProgram` folds
+  coordinate expressions in); `derivative(dim)` is exact (component of the
+  gradient program) to any order. Net fields report `costly`; the viewer's
+  `costly(fd)` = the flag AND the GPU cannot take it — then small fixed
+  streamline grids (32 / 16), glyph lattices capped at 2k, no exact isoline
+  projection, and the resolution controller judges compiled frames by JS
+  time (a shader compile never inflates it, CPU sampling does); expression
+  fields over costly arguments pre-sample them on the grid in batches. 3D
+  exact projection stays off for nets (one 256³ dispatch of value + gradient
+  per Newton step exceeded the GPU watchdog); 2D exact projection of a net
+  is latency-bound (~40 ms per level: a lone lane's serial chain through
+  private memory), so the fused path shows marching squares while the level
+  moves and projects on settle; Newton uses `ProgramBuilder.valueGradient`
+  (value + ∇ in one evaluation), a step-size stop and geometric acceptance.
+  Fused kernel cache keys contain only what changes the CODE (the colormap
+  selection once compiled a shader per drag event). Reals only. `apps/viewer/public/bundles/iris.json` (from
+  `tools/iris/train.py`, PyTorch once-off) is the example: a 4-16-3 MLP, its
+  validation set and θ*, 2 / 3 orthogonal random directions;
+  `core/test/iris.test.ts` checks loss / accuracy against PyTorch to 1e-9,
+  `core/test/autodiff.test.ts` every op's gradient against finite
+  differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,
+  gradient, second derivative).
 * Vector fields are plain vector-valued functions: pullbacks reparametrize the
   domain only (no pushforward). 1-forms are not distinguished yet.
 * `exactGradient` on a scalar field names a vector field holding gradients

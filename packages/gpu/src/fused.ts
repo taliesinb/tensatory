@@ -58,17 +58,16 @@ export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | unde
   if (exact && !field && !slice) throw new Error("fusedIsolines: exact projection needs the field");
   // a slice of a 3D field: the programs are 3D, wrapped as 2D functions on the plane
   const b = new ProgramBuilder(slice ? new DenseGrid([2, 2, 2], slice.field.box) : grid);
-  let fn = "", dx = "", dy = "";
+  let fn = "", vg = "";
   const extra: string[] = [];
   if (exact && slice) {
     const keep = [0, 1, 2].filter((d) => d !== slice.axis) as [number, number];
-    const f3 = b.scalar(slice.field), d3 = keep.map((d) => b.scalar(slice.field, [d]));
+    const f3 = b.scalar(slice.field), vg3 = b.valueGradient(slice.field);
     const lift = (q: string) => { const c = ["", "", ""]; c[slice.axis] = "params[2]"; c[keep[0]] = `${q}.x`; c[keep[1]] = `${q}.y`; return `vec3<f32>(${c.join(", ")})`; };
-    fn = "sl_f"; dx = "sl_dx"; dy = "sl_dy";
+    fn = "sl_f"; vg = "sl_vg";
     extra.push(`fn sl_f(q: vec2<f32>, pos: i32) -> f32 { return ${f3}(${lift("q")}, -1); }`);
-    extra.push(`fn sl_dx(q: vec2<f32>, pos: i32) -> f32 { return ${d3[0]}(${lift("q")}, -1); }`);
-    extra.push(`fn sl_dy(q: vec2<f32>, pos: i32) -> f32 { return ${d3[1]}(${lift("q")}, -1); }`);
-  } else if (exact) { fn = b.scalar(field!); dx = b.scalar(field!, [0]); dy = b.scalar(field!, [1]); }
+    extra.push(`fn sl_vg(q: vec2<f32>, pos: i32) -> vec3<f32> { let v = ${vg3}(${lift("q")}, -1); return vec3<f32>(v.x, v[${keep[0] + 1}], v[${keep[1] + 1}]); }`);
+  } else if (exact) { fn = b.scalar(field!); vg = b.valueGradient(field!); }
   const col = colour ? b.scalar(colour) : undefined;
   const lib = b.library();
   lib.code += `\n${extra.join("\n")}`;
@@ -91,7 +90,7 @@ fn appendSeg(s: Seg) {
 }
 ${ISO_GRID.code}
 ${marchingSquaresWgsl(ISO_GRID.ref)}
-${exact ? projectionWgsl(fn, dx, dy, slice ? sliceBox(slice) : field!.box) : ""}
+${exact ? projectionWgsl(fn, vg, slice ? sliceBox(slice) : field!.box) : ""}
 fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
   let d = b - a; let l2 = dot(d, d);
@@ -106,8 +105,9 @@ fn emit(a0: vec2<f32>, b0: vec2<f32>, level: f32, tol: f32) {
   pts[0] = a0; pts[1] = b0;
 ${exact ? `
   let cellMax = 1.5 * max(msH().x, msH().y);
-  let pa = project_(a0, cellMax, level); if (pa.z > 0.0) { pts[0] = pa.xy; }
-  let pb = project_(b0, cellMax, level); if (pb.z > 0.0) { pts[1] = pb.xy; }
+  let tolW = 0.25 * tol; // vertices within a quarter of the chord tolerance (a sixteenth of a pixel) of the curve
+  let pa = project_(a0, cellMax, level, tolW); if (pa.z > 0.0) { pts[0] = pa.xy; }
+  let pb = project_(b0, cellMax, level, tolW); if (pb.z > 0.0) { pts[1] = pb.xy; }
   // adaptive midpoint refinement, in passes (each pass splits the chords still too coarse)
   for (var round = 0; round < 4; round++) {
     var inserted = false;
@@ -117,7 +117,7 @@ ${exact ? `
       let A = pts[i]; let B = pts[i + 1];
       let len = distance(A, B);
       if (len > 2.0 * tol) {
-        let m = project_(0.5 * (A + B), len, level);
+        let m = project_(0.5 * (A + B), len, level, tolW);
         if (m.z > 0.0 && chordDist_(A, B, m.xy) > tol) {
           for (var k = n; k > i + 1; k--) { pts[k] = pts[k - 1]; }
           pts[i + 1] = m.xy; n++; inserted = true;

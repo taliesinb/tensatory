@@ -54,7 +54,12 @@ counted dispatches (`GpuBackend.dispatches`); `compiled` = a compute
 pipeline was built (`pipelinesBuilt`) — such a frame is not representative,
 and for a settled recomputation the controller asks for a **remeasure**
 (`onRemeasure` → `fused.redo()` / `view3d.redo()`: the same geometry is
-dispatched again without compiles and timed cleanly).
+dispatched again without compiles and timed cleanly) — unless the frame's
+JS time (`jsMs`) alone already exceeds the settled budget: a compile stalls
+the GPU, not the main thread, so a long JS time is real CPU work (a `costly`
+net field sampled on the dispatch grid, whose fallback reader bakes its grid
+and so compiles at every step) and the sample is judged as slow at once,
+without the remeasure that would only hit the caches.
 
 Frame times are quantized by vsync (17 / 33 / 50 ms), so a 60 fps window
 says nothing about headroom. The moving tier therefore **probes**: one step
@@ -142,5 +147,6 @@ the old one would dispatch against a destroyed buffer.
 
 The grid streamlines are measured in (step = ½ cell, `length` in steps,
 `tail` in cells) is FIXED — 128 in 2D (`STREAM_N`), 64 in 3D
-(`View3D.STREAM_N`) — or the vector field's own grid: tying it to the
+(`View3D.STREAM_N`); 32 / 16 for `costly` fields (net-backed, CPU-evaluated;
+see [nets.md](nets.md)) — or the vector field's own grid: tying it to the
 adaptive resolution would change the lines' lengths with the tier.

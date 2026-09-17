@@ -14,5 +14,9 @@
   {
     "file": "arrays.json",
     "name": "array-defined fields"
+  },
+  {
+    "file": "iris.json",
+    "name": "iris MLP (net evaluator)"
   }
 ]

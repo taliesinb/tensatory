@@ -128,6 +128,10 @@ fn logbase_(a: f32, b: f32) -> f32 { return log(a) / log(b); }
 fn normalpdf_(z: f32, s: f32) -> f32 { return exp(-0.5 * z * z) / (s * SQRT_2PI); }
 `;
 
+/** a loop bound opaque to the compiler (transpiled nets: keeps their loop nests from being unrolled into huge code);
+ *  reads the grid header's dimension count, never this bit pattern — needs the program's `data` binding */
+export const OPAQUE_BOUND_WGSL = `fn nb_(n: i32) -> i32 { return select(n, 0, bitcast<u32>(data[1]) == 0x7fc00001u); }`;
+
 const UNARY_WGSL: Record<string, (x: string) => string> = {
   sin: (x) => `sin(${x})`, cos: (x) => `cos(${x})`, tan: (x) => `tan(${x})`,
   sinh: (x) => `sinh(${x})`, cosh: (x) => `cosh(${x})`, tanh: (x) => `tanh(${x})`,

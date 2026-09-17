@@ -142,7 +142,7 @@ export interface GpuProjector {
  * damped Newton along the gradient with a bracketing + bisection fallback and
  * coordinates on box faces locked — core's `projectToLevel` at f32 tolerances.
  */
-export function projectionWgsl(fn: string, dx: string, dy: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
+export function projectionWgsl(fn: string, valueGradient: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
   const eps = 1e-6 * Math.max(box.size[0]!, box.size[1]!);
   return `
 const PA: vec2<f32> = vec2<f32>(${f32(box.a[0]!)}, ${f32(box.a[1]!)});
@@ -150,37 +150,46 @@ const PB: vec2<f32> = vec2<f32>(${f32(box.b[0]!)}, ${f32(box.b[1]!)});
 const PEPS: f32 = ${f32(eps)};
 fn inBox_(q: vec2<f32>) -> bool { return q.x >= PA.x - PEPS && q.x <= PB.x + PEPS && q.y >= PA.y - PEPS && q.y <= PB.y + PEPS; }
 fn resid_(q: vec2<f32>, level: f32) -> f32 { return ${fn}(q, -1) - level; }
-fn grad_(q: vec2<f32>, lock: vec2<f32>) -> vec2<f32> { return vec2<f32>(${dx}(q, -1), ${dy}(q, -1)) * lock; }
-fn project_(p: vec2<f32>, maxDist: f32, level: f32) -> vec3<f32> {
+// (residual, gradient) in ONE evaluation: for a net the gradient program computes the forward pass anyway
+fn fg_(q: vec2<f32>, level: f32, lock: vec2<f32>) -> vec3<f32> { let v = ${valueGradient}(q, -1); return vec3<f32>(v.x - level, v.yz * lock); }
+// Damped Newton along the exact gradient. Each accepted step costs ONE combined evaluation (the trial's residual
+// is kept as the next step's gradient). Stops when the residual is tiny, when the step is shorter than tolW (world
+// units; the caller passes a fraction of its chord tolerance — further steps could not move the vertex visibly), or
+// when no damped step lowers the residual (the f32 noise floor: a net's loss is a long sum, so 1e-6 · scale is
+// often unreachable) — then the vertex is accepted if |r| / |grad f| < tolW, else the bracketing bisection runs.
+fn project_(p: vec2<f32>, maxDist: f32, level: f32, tolW: f32) -> vec3<f32> {
   let scale = max(1.0, abs(level));
   let tolF = 1e-6 * scale;
   let lock = vec2<f32>(select(1.0, 0.0, abs(p.x - PA.x) < PEPS || abs(p.x - PB.x) < PEPS), select(1.0, 0.0, abs(p.y - PA.y) < PEPS || abs(p.y - PB.y) < PEPS));
   var q = p;
-  var r = resid_(q, level);
+  var rg = fg_(q, level, lock);
+  var r = rg.x; var g = rg.yz;
   var ok = 0.0;
-  let g0 = grad_(q, lock);
+  let g0 = g;
   let g02 = dot(g0, g0);
   if (!isfinite_(r) || !(g02 > 1e-24)) { return vec3<f32>(p, 0.0); }
   let r0 = r;
+  var gn = sqrt(g02);
   for (var it = 0; it < 12; it++) {
     if (abs(r) < tolF) { break; }
-    let g = grad_(q, lock);
     let g2 = dot(g, g);
     if (!(g2 > 1e-24)) { break; }
+    gn = sqrt(g2);
     var k = r / g2;
     var accepted = false;
-    for (var damp = 0; damp < 5; damp++) {
+    for (var damp = 0; damp < 4; damp++) {
       let trial = q - k * g;
       let d = trial - p;
       if (inBox_(trial) && dot(d, d) <= maxDist * maxDist) {
-        let rt = resid_(trial, level);
-        if (isfinite_(rt) && abs(rt) < abs(r)) { q = trial; r = rt; accepted = true; break; }
+        let t = fg_(trial, level, lock);
+        if (isfinite_(t.x) && abs(t.x) < abs(r)) { q = trial; r = t.x; g = t.yz; accepted = true; break; }
       }
       k = k * 0.5;
     }
     if (!accepted) { break; }
+    if (abs(k) * gn < tolW) { break; } // the step that was just taken could not move the vertex visibly
   }
-  if (abs(r) < tolF || abs(r) < 1e-5 * scale) { ok = 1.0; }
+  if (abs(r) < tolF || abs(r) < 1e-5 * scale || abs(r) < tolW * gn) { ok = 1.0; }
   else {
     let dir = -sign(r0) * g0 / sqrt(g02);
     var lo = 0.0; var hi = maxDist / 64.0; var found = false;
@@ -197,7 +206,7 @@ fn project_(p: vec2<f32>, maxDist: f32, level: f32) -> vec3<f32> {
       for (var it = 0; it < 40; it++) {
         let mid = 0.5 * (lo + hi);
         let rm = resid_(p + mid * dir, level);
-        if (abs(rm) < tolF) { lo = mid; hi = mid; break; }
+        if (abs(rm) < tolF || hi - lo < tolW) { lo = mid; hi = mid; break; }
         if (sign(rm) == sign(r0)) { lo = mid; } else { hi = mid; }
       }
       q = p + 0.5 * (lo + hi) * dir; ok = 1.0;
@@ -215,17 +224,17 @@ fn project_(p: vec2<f32>, maxDist: f32, level: f32) -> vec3<f32> {
  */
 export function gpuProjector(backend: GpuBackend, field: ScalarFieldData, grid: DenseGrid): GpuProjector {
   const b = new ProgramBuilder(grid);
-  const fn = b.scalar(field), dx = b.scalar(field, [0]), dy = b.scalar(field, [1]);
+  const fn = b.scalar(field), vg = b.valueGradient(field);
   const lib = b.library();
   const code = `${lib.code}
-${projectionWgsl(fn, dx, dy, field.box)}
+${projectionWgsl(fn, vg, field.box)}
 @group(0) @binding(0) var<storage, read_write> out: array<f32>;
 @group(0) @binding(2) var<storage, read> verts: array<f32>;
 @group(0) @binding(3) var<storage, read> lvl: array<f32>;
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = i32(id.x);
   if (i >= i32(arrayLength(&verts)) / 3) { return; }
-  let r = project_(vec2<f32>(verts[i * 3], verts[i * 3 + 1]), verts[i * 3 + 2], lvl[0]);
+  let r = project_(vec2<f32>(verts[i * 3], verts[i * 3 + 1]), verts[i * 3 + 2], lvl[0], 1e-3 * verts[i * 3 + 2]);
   out[i * 3] = r.x; out[i * 3 + 1] = r.y; out[i * 3 + 2] = r.z;
 }`;
   return {

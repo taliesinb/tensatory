@@ -1,10 +1,14 @@
 import { z } from "zod";
-import type { BundleSpec, FieldSpec, ManifoldDefinitionSpec, PointSetSpec } from "@tensatory/schema";
+import type { BundleSpec, FieldSpec, ManifoldDefinitionSpec, NetSpec, PointSetSpec } from "@tensatory/schema";
 import { BUNDLE_VERSION } from "@tensatory/schema";
 import { SpecError, TensatoryError } from "../errors";
 import { Codomain } from "../fields/codomain";
 import type { ScalarFieldData, VectorFieldData } from "../fields/fieldData";
 import { FieldSchema, buildScalarFieldData, buildVectorFieldData, type FieldResolver } from "../fields/spec";
+import { compileNet, evaluate, type Program, type ProgramResolver } from "../nets/program";
+import { inferNet, type NetSignature } from "../nets/shapes";
+import { NetSchema } from "../nets/spec";
+import type { NdArray } from "../arrays/ndarray";
 
 /*******************************************************/
 /* schema */
@@ -32,6 +36,7 @@ export const BundleSchema: z.ZodType<BundleSpec> = z.object({
   defaultManifold: z.string().optional(),
   fields: z.record(z.string(), FieldSchema),
   pointSets: z.record(z.string(), PointSetSchema).optional(),
+  nets: z.record(z.string(), NetSchema).optional(),
 });
 
 /*******************************************************/
@@ -88,6 +93,23 @@ export class VectorField {
 
 export type Field = ScalarField | VectorField;
 
+/** a parsed net: its spec, inferred signature, and (lazily) its compiled program */
+export class Net {
+  readonly name: string;
+  private _program: Program | undefined;
+  constructor(readonly id: string, readonly spec: NetSpec, readonly signature: NetSignature, private readonly nets: ProgramResolver) {
+    this.name = spec.name ?? id;
+  }
+  /** the compiled program (CPU reference evaluator); throws NotSupportedError for grad nets */
+  get program(): Program {
+    return (this._program ??= compileNet(this.spec, this.nets, ["nets", this.id]));
+  }
+  /** evaluate on the CPU: inputs with their batch prefixes -> outputs */
+  evaluate(inputs: Record<string, NdArray>): Record<string, NdArray> {
+    return evaluate(this.program, inputs, { nets: this.nets }, ["nets", this.id]);
+  }
+}
+
 /**
  * A parsed bundle. Fields are built lazily on first access (so a field may
  * refer to another by id regardless of declaration order); reference cycles
@@ -101,6 +123,12 @@ export class Bundle {
   readonly pointSets: ReadonlyMap<string, PointSet>;
   private readonly built = new Map<string, Field>();
   private readonly building = new Set<string>();
+  private readonly builtNets = new Map<string, Net>();
+  private readonly buildingNets = new Set<string>();
+  private readonly netResolver: ProgramResolver = {
+    net: (id, path) => this.net(id, path).signature,
+    program: (id, path) => this.net(id, path).program,
+  };
 
   constructor(readonly spec: BundleSpec) {
     this.name = spec.name ?? "untitled";
@@ -133,6 +161,7 @@ export class Bundle {
   get fieldIds(): string[] { return Object.keys(this.spec.fields); }
   get scalarFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "scalar"); }
   get vectorFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "vector"); }
+  get netIds(): string[] { return Object.keys(this.spec.nets ?? {}); }
 
   private manifoldOf(id: string | undefined, path: string[]): Manifold {
     if (id === undefined) {
@@ -156,6 +185,7 @@ export class Bundle {
       const resolver: FieldResolver = {
         scalar: (ref, p) => this.scalarField(ref, p).data,
         vector: (ref, p) => this.vectorField(ref, p).data,
+        nets: this.netResolver,
       };
       const fpath = ["fields", id, "data"];
       const field: Field =
@@ -181,9 +211,31 @@ export class Bundle {
     return f;
   }
 
-  /** build every field, collecting errors per field */
+  /** a net by id, with its signature inferred (lazily, so nets may refer to each other in any order) */
+  net(id: string, path: string[] = []): Net {
+    const done = this.builtNets.get(id);
+    if (done) return done;
+    const spec = this.spec.nets?.[id];
+    if (!spec) throw new SpecError(`unknown net "${id}"`, path);
+    if (this.buildingNets.has(id)) throw new SpecError(`net "${id}" refers to itself (cycle: ${[...this.buildingNets, id].join(" -> ")})`, path);
+    this.buildingNets.add(id);
+    try {
+      const net = new Net(id, spec, inferNet(spec, this.netResolver, ["nets", id]), this.netResolver);
+      this.builtNets.set(id, net);
+      return net;
+    } finally {
+      this.buildingNets.delete(id);
+    }
+  }
+
+  /** build every field and net, collecting errors per id (nets keyed "nets.<id>") */
   buildAll(): Map<string, TensatoryError> {
     const errors = new Map<string, TensatoryError>();
+    for (const id of this.netIds) {
+      try { this.net(id); } catch (e) {
+        if (e instanceof TensatoryError) errors.set(`nets.${id}`, e); else throw e;
+      }
+    }
     for (const id of this.fieldIds) {
       try { this.field(id); } catch (e) {
         if (e instanceof TensatoryError) errors.set(id, e); else throw e;

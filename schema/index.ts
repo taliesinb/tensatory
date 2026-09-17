@@ -12,6 +12,7 @@ export * from "./codomain";
 export * from "./statistics";
 export * from "./manifolds";
 export * from "./mappings";
+export * from "./nets";
 export * from "./fieldData";
 export * from "./fields";
 export * from "./bundle";

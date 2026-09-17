@@ -1,0 +1,667 @@
+// Net-backed fields -> WGSL.
+//
+// One thread evaluates the whole net for ONE grid point, so inside the emitted
+// function there is no batch: every array has exactly its declared per-example
+// shape (symbolic sizes resolved from the bound arrays) and lives in a
+// function-scope `var name: array<f32, N>`; constants (bound / baked arrays)
+// live in the shared storage buffer. Ops become nested loops over the output
+// shape with an inner accumulation for contractions and reductions. `call`
+// inlines the callee. The result is an ordinary field function
+// `fn <name>(p: vecD, pos: i32) -> f32 | vecD`, so every kernel (raster, exact
+// isolines, streamlines, glyphs, marching tetrahedra) evaluates the net
+// directly and net fields need no CPU fallback. Derivatives are net fields
+// too (core's autodiff rewrites the program), so nothing special is needed.
+//
+// Sizes are bounded (NET_MAX_FLOATS): a net whose per-example intermediates
+// do not fit is left to the CPU fallback (still correct, just `costly`).
+
+import {
+  NetScalarFieldData,
+  NetVectorFieldData,
+  PulledBackScalarFieldData,
+  PulledBackVectorFieldData,
+  SymbolicScalarFieldData,
+  SymbolicVectorFieldData,
+  anfProgram,
+  compileNet,
+  exprNames,
+  inferExpr,
+  pointInput,
+  type FieldData,
+  type NetField,
+  type Program,
+  type ProgramResolver,
+  type Shape,
+} from "@tensatory/core";
+import type { ArrayExpr, ArrayReduceFn } from "@tensatory/schema";
+import { f32, vecType } from "./wgsl";
+
+/**
+ * Most function-scope floats a transpiled net may declare; beyond this the CPU fallback samples the field. Safari's
+ * WGSL compiler rejects a function whose variables exceed 8192 bytes (2048 f32); Chrome has no such limit, but a
+ * bundle must render in both, so the tighter one rules (with room for scalars and loop counters).
+ */
+export const NET_MAX_FLOATS = 2000;
+
+/**
+ * Whether loop bounds are emitted through an opaque function (`nb_`) so the backend shader compiler cannot unroll
+ * the loop nests. WGSL has no roll / unroll attribute (gpuweb#4110) and Tint's MSL printer emits plain loops, so the
+ * runtime bound is the only lever; measured with apps/viewer/public/nettiming.html. Default on; a switch so the
+ * probe can compare.
+ */
+let OPAQUE_BOUNDS = true;
+export function setOpaqueLoopBounds(on: boolean): void { OPAQUE_BOUNDS = on; }
+
+/** what the emitter needs from the program builder */
+export interface NetEmitContext {
+  readonly D: number;
+  /** override of NET_MAX_FLOATS (diagnostics) */
+  readonly maxFloats?: number;
+  /** pack an array into the shared `data` buffer; returns its element offset */
+  upload(data: ArrayLike<number>): number;
+}
+
+const UNARY: Record<string, (x: string) => string> = {
+  sin: (x) => `sin(${x})`, cos: (x) => `cos(${x})`, tan: (x) => `tan(${x})`,
+  sinh: (x) => `sinh(${x})`, cosh: (x) => `cosh(${x})`, tanh: (x) => `tanh(${x})`,
+  asin: (x) => `asin(${x})`, acos: (x) => `acos(${x})`, atan: (x) => `atan(${x})`,
+  asinh: (x) => `asinh(${x})`, acosh: (x) => `acosh(${x})`, atanh: (x) => `atanh(${x})`,
+  relu: (x) => `relu_(${x})`, sigmoid: (x) => `sigmoid_(${x})`, gelu: (x) => `gelu_(${x})`, silu: (x) => `silu_(${x})`,
+  softplus: (x) => `softplus_(${x})`, elu: (x) => `elu_(${x})`, erf: (x) => `erf_(${x})`,
+  floor: (x) => `floor(${x})`, ceil: (x) => `ceil(${x})`, round: (x) => `round_(${x})`, sign: (x) => `sign(${x})`, abs: (x) => `abs(${x})`,
+  exp: (x) => `exp(${x})`, exp2: (x) => `exp2(${x})`, exp10: (x) => `exp(${x} * LN10)`,
+  log: (x) => `log(${x})`, log2: (x) => `log2(${x})`, log10: (x) => `(log(${x}) * INV_LN10)`, log1p: (x) => `log(1.0 + ${x})`, expm1: (x) => `(exp(${x}) - 1.0)`,
+  plogp: (x) => `plogp_(${x})`, sqrt: (x) => `sqrt(${x})`, square: (x) => `(${x} * ${x})`, negate: (x) => `(-${x})`, reciprocal: (x) => `(1.0 / ${x})`, gauss: (x) => `gauss_(${x})`,
+};
+const BINARY: Record<string, (a: string, b: string) => string> = {
+  sub: (a, b) => `(${a} - ${b})`, div: (a, b) => `(${a} / ${b})`, pow: (a, b) => `pow_(${a}, ${b})`,
+  logBase: (a, b) => `logbase_(${a}, ${b})`, atan2: (a, b) => `atan2(${a}, ${b})`, mod: (a, b) => `mod_(${a}, ${b})`,
+};
+const COMPARE: Record<string, string> = { lt: "<", le: "<=", gt: ">", ge: ">=", eq: "==", ne: "!=" };
+const NARY = new Set(["add", "mul", "min", "max", "mean", "rms"]);
+
+/** an array inside the emitted function */
+interface Arr {
+  readonly shape: readonly number[];
+  /** priv: function-scope array `base[i]`; data: storage `data[base + i]`; lit: a scalar expression; point: the point `p` ([D]) */
+  readonly kind: "priv" | "data" | "lit" | "point";
+  readonly base: string;
+}
+
+const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1);
+const strides = (shape: readonly number[]): number[] => { const s = new Array<number>(shape.length); for (let d = shape.length - 1, acc = 1; d >= 0; d--) { s[d] = acc; acc *= shape[d]!; } return s; };
+const dims = (shape: Shape, what: string): number[] => shape.map((d) => { if (typeof d !== "number") throw new Error(`${what}: unresolved symbolic size "${d}"`); return d; });
+
+class NetEmitter {
+  readonly lines: string[] = [];
+  floats = 0;
+  private n = 0;
+
+  constructor(private readonly ctx: NetEmitContext, private readonly nets: ProgramResolver) {}
+
+  private fresh(prefix: string): string { return `${prefix}${this.n++}`; }
+
+  /** a loop bound the shader compiler cannot see through (so it does not unroll the loop nests: compile time) */
+  private bound(n: number): string { return !OPAQUE_BOUNDS || n <= 2 ? String(n) : `nb_(${n})`; }
+
+  /** function-scope arrays whose values are dead, by element count: reused before anything new is declared */
+  private readonly free = new Map<number, string[]>();
+  /** arrays allocated while emitting the current node (freed at its end unless they became the node's value) */
+  private scratch: string[] = [];
+  /** live node names per array base (aliases such as reshape share a base) */
+  private readonly owners = new Map<string, Set<string>>();
+
+  /** a function-scope array, reusing a dead one of the same size when there is one (private memory is the GPU's
+   *  scarce resource here: every float a thread holds costs occupancy) */
+  private readonly sizes = new Map<string, number>();
+  private alloc(shape: readonly number[]): Arr {
+    const n = Math.max(1, size(shape));
+    // best fit: the smallest dead array that holds n floats (a larger one wastes nothing — it is already declared)
+    let name: string | undefined;
+    let bestSize = Infinity;
+    for (const [sz, pool] of this.free) if (sz >= n && sz < bestSize && pool.length) { bestSize = sz; }
+    if (bestSize < Infinity) name = this.free.get(bestSize)!.pop();
+    if (name === undefined) {
+      name = this.fresh("a");
+      this.floats += n;
+      this.sizes.set(name, n);
+      this.lines.push(`  var ${name}: array<f32, ${n}>;`);
+    }
+    this.scratch.push(name);
+    return { shape, kind: "priv", base: name };
+  }
+
+  private release(base: string): void {
+    const n = this.sizes.get(base);
+    if (n === undefined) return;
+    const pool = this.free.get(n) ?? this.free.set(n, []).get(n)!;
+    if (!pool.includes(base)) pool.push(base);
+  }
+
+  /** flat index expression of `idx` (one string per axis) in `shape` */
+  private flat(shape: readonly number[], idx: readonly string[]): string {
+    const st = strides(shape);
+    const paren = (i: string) => (/^[A-Za-z_][A-Za-z_0-9]*$|^\d+$/.test(i) ? i : `(${i})`);
+    const terms = idx.map((i, d) => (shape[d] === 1 ? null : st[d] === 1 ? paren(i) : `${paren(i)} * ${st[d]}`)).filter((t): t is string => t !== null);
+    return terms.length ? terms.join(" + ") : "0";
+  }
+
+  /** read element `idx` of `a` (idx has a.shape.length entries) */
+  read(a: Arr, idx: readonly string[]): string {
+    switch (a.kind) {
+      case "lit": return a.base;
+      case "point": return this.ctx.D === 1 ? "p" : `p[${idx[0]}]`;
+      case "priv": return `${a.base}[${this.flat(a.shape, idx)}]`;
+      case "data": return `data[${a.base} + ${this.flat(a.shape, idx)}]`;
+    }
+  }
+
+  /** read `a` broadcast against an output of rank `outIdx.length` (numpy right alignment; size-1 axes index 0) */
+  private readB(a: Arr, outIdx: readonly string[]): string {
+    const off = outIdx.length - a.shape.length;
+    return this.read(a, a.shape.map((s, d) => (s === 1 ? "0" : outIdx[off + d]!)));
+  }
+
+  /** nested loops over `shape`; `body` receives the index variables */
+  private loops(shape: readonly number[], body: (idx: string[]) => void): void {
+    const idx: string[] = [];
+    const open = (d: number) => {
+      if (d === shape.length) { body(idx); return; }
+      const v = this.fresh("ix");
+      this.lines.push(`  for (var ${v}: i32 = 0; ${v} < ${this.bound(shape[d]!)}; ${v}++) {`);
+      idx.push(v);
+      open(d + 1);
+      idx.pop();
+      this.lines.push(`  }`);
+    };
+    open(0);
+  }
+
+  /** write `expr(idx)` into every element of a new array of `shape` */
+  private fill(shape: readonly number[], expr: (idx: string[]) => string): Arr {
+    const out = this.alloc(shape);
+    this.loops(shape, (idx) => this.lines.push(`  ${this.read(out, idx)} = ${expr(idx)};`));
+    return out;
+  }
+
+  /** a contiguous copy of `a` in a function-scope array (for aliasing ops on literals / the point) */
+  private materialize(a: Arr): Arr {
+    if (a.kind === "priv" || a.kind === "data") return a;
+    return this.fill(a.shape, (idx) => this.read(a, idx));
+  }
+
+  /*******************************************************/
+
+  /** emit a whole program with its inputs bound to arrays; returns the outputs */
+  program(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string): Record<string, Arr> {
+    const env = new Map<string, Arr>();
+    const sizes = new Map<string, number>();
+    const bind = (name: string, actual: readonly number[], declared: Shape) => {
+      if (actual.length !== declared.length) throw new Error(`${path}: "${name}" has rank ${actual.length}, declared ${declared.length} (a batch inside a transpiled net?)`);
+      declared.forEach((d, i) => {
+        if (typeof d === "number") { if (d !== actual[i]) throw new Error(`${path}: "${name}" axis ${i} is ${actual[i]}, declared ${d}`); }
+        else { const prev = sizes.get(d); if (prev === undefined) sizes.set(d, actual[i]!); else if (prev !== actual[i]) throw new Error(`${path}: axis "${d}" is ${prev} and ${actual[i]}`); }
+      });
+    };
+    for (const [n, shape] of Object.entries(prog.inputs)) {
+      const a = inputs.get(n);
+      if (!a) throw new Error(`${path}: input "${n}" not given`);
+      bind(n, a.shape, shape);
+      env.set(n, a);
+    }
+    for (const [n, c] of Object.entries(prog.consts)) {
+      bind(n, c.arr.shape, c.shape);
+      env.set(n, { shape: [...c.arr.shape], kind: "data", base: String(this.ctx.upload(c.arr.data)) });
+    }
+    const sizeOf = (d: number | string): number => {
+      if (typeof d === "number") return d;
+      const s = sizes.get(d);
+      if (s === undefined) throw new Error(`${path}: symbolic size "${d}" is not bound`);
+      return s;
+    };
+    // liveness: the last node that reads each name; outputs and everything a nested (inlined) call produces live on
+    const lastUse = new Map<string, number>();
+    prog.nodes.forEach((node, i) => { for (const dep of exprNames(node.expr)) lastUse.set(dep, i); });
+    const outputs = new Set(Object.values(prog.outputs));
+    const top = this.scratch.length === 0 && this.owners.size === 0 && !this.inCall;
+    const releaseDying = (node: { name: string; expr: ArrayExpr }, i: number) => {
+      for (const dep of exprNames(node.expr)) {
+        if (lastUse.get(dep) !== i || outputs.has(dep)) continue;
+        const a = env.get(dep);
+        if (!a || a.kind !== "priv") continue;
+        const own = this.owners.get(a.base);
+        if (!own) continue;
+        own.delete(dep);
+        if (own.size === 0) { this.owners.delete(a.base); this.release(a.base); }
+      }
+    };
+    prog.nodes.forEach((node, i) => {
+      this.scratch = [];
+      // an elementwise node writes element i from the operands' element i (or a broadcast of a smaller operand): an
+      // operand that dies here can be its output buffer — release it first so alloc picks it up (in-place update)
+      if (top && isElementwise(node.expr)) releaseDying(node, i);
+      const val = this.expr(node.expr, env, sizeOf, `${path}.${node.name}`);
+      env.set(node.name, val);
+      if (!top) return;
+      // a folded node may ALIAS an operand (`add(x, 0)` is x): if that operand was just released, take it back
+      if (val.kind === "priv") { const pool = this.free.get(this.sizes.get(val.base) ?? -1); const k = pool?.indexOf(val.base) ?? -1; if (k >= 0) pool!.splice(k, 1); }
+      if (val.kind === "priv") (this.owners.get(val.base) ?? this.owners.set(val.base, new Set()).get(val.base)!).add(node.name);
+      // scratch arrays that did not become the node's value are dead now
+      for (const b of this.scratch) if (b !== val.base && !this.owners.has(b)) this.release(b);
+      this.scratch = [];
+      // operands whose last reader this was
+      releaseDying(node, i);
+    });
+    return Object.fromEntries(Object.entries(prog.outputs).map(([o, n]) => [o, env.get(n)!]));
+  }
+  private inCall = false;
+
+  /** shape of an expression whose operands are in `env` (symbolic sizes resolved) */
+  private shapeOf(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number): number[] {
+    const names = new Map<string, Shape>();
+    for (const [k, a] of env) names.set(k, a.shape);
+    return dims(inferExpr(concretize(e, sizeOf), { names, axisNames: new Set(), nets: this.nets }, ["net"]), "net");
+  }
+
+  /** emit an expression */
+  expr(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number, path: string): Arr {
+    if (typeof e === "number") return { shape: [], kind: "lit", base: f32(e) };
+    if (typeof e === "string") return lookup(e, env, path);
+    const sub = (x: ArrayExpr) => this.expr(x, env, sizeOf, path);
+    const norm = (axis: number, rank: number) => (axis < 0 ? rank + axis : axis);
+    const outShape = () => this.shapeOf(e, env, sizeOf);
+    const op = e.op;
+    switch (op) {
+      case "arg": return lookup(e.name, env, path);
+      case "coord": case "coordv": throw new Error(`${path}: coordinate leaves are folded into the program by core (fieldProgram)`);
+      case "clamp": case "where": return this.elementwise(e, env, sizeOf, path);
+      case "matmul": {
+        const a = sub(e.vals[0]), b = sub(e.vals[1]);
+        const ra = a.shape.length, rb = b.shape.length;
+        if (ra === 1 && rb === 1) return this.einsum(["k", "k"], "", [a, b], outShape());
+        const L = Math.max(ra, rb) - 2;
+        const lead = Array.from({ length: Math.max(L, 0) }, (_, i) => String.fromCharCode(0x41 + i));
+        const la = lead.slice(lead.length - Math.max(ra - 2, 0)).join(""), lb = lead.slice(lead.length - Math.max(rb - 2, 0)).join("");
+        if (rb === 1) return this.einsum([la + "ik", "k"], lead.join("") + "i", [a, b], outShape());
+        if (ra === 1) return this.einsum(["k", lb + "kj"], lead.join("") + "j", [a, b], outShape());
+        return this.einsum([la + "ik", lb + "kj"], lead.join("") + "ij", [a, b], outShape());
+      }
+      case "einsum": {
+        const text = e.subscripts.replace(/\s+/g, "");
+        const [lhs, rhs] = text.split("->");
+        const terms = lhs!.split(",");
+        const vals = e.vals.map(sub);
+        let out = rhs;
+        if (out === undefined) {
+          const count = new Map<string, number>();
+          for (const l of lhs!.replace(/,/g, "")) count.set(l, (count.get(l) ?? 0) + 1);
+          out = [...count.entries()].filter(([, c]) => c === 1).map(([l]) => l).sort().join("");
+        }
+        return this.einsum(terms, out, vals, outShape());
+      }
+      case "reduce": {
+        const v = sub(e.val);
+        const r = v.shape.length;
+        const axes = new Set(e.axes === undefined ? v.shape.map((_, i) => i) : e.axes.map((a) => norm(a, r)));
+        return this.reduce(v, e.fn, axes, e.keepDims ?? false, outShape());
+      }
+      case "argmax": case "argmin": {
+        const v = sub(e.val);
+        const ax = norm(e.axis ?? -1, v.shape.length);
+        const out = this.alloc(outShape());
+        this.loops(out.shape, (oi) => {
+          const best = this.fresh("b"), arg = this.fresh("j"), k = this.fresh("k");
+          const idx = [...oi]; idx.splice(ax, 0, k);
+          const first = [...oi]; first.splice(ax, 0, "0");
+          this.lines.push(`  var ${best}: f32 = ${this.read(v, first)}; var ${arg}: i32 = 0;`);
+          this.lines.push(`  for (var ${k}: i32 = 1; ${k} < ${this.bound(v.shape[ax]!)}; ${k}++) { let x = ${this.read(v, idx)}; if (x ${op === "argmax" ? ">" : "<"} ${best}) { ${best} = x; ${arg} = ${k}; } }`);
+          this.lines.push(`  ${this.read(out, oi)} = f32(${arg});`);
+        });
+        return out;
+      }
+      case "softmax": case "logSoftmax": {
+        const v = this.materialize(sub(e.val));
+        const ax = norm(e.axis ?? -1, v.shape.length);
+        const keep = v.shape.map((s, d) => (d === ax ? 1 : s));
+        const m = this.reduce(v, "max", new Set([ax]), true, keep);
+        const ex = this.fill(v.shape, (i) => `exp(${this.read(v, i)} - ${this.readB(m, i)})`);
+        const s = this.reduce(ex, "sum", new Set([ax]), true, keep);
+        return op === "softmax"
+          ? this.fill(v.shape, (i) => `${this.read(ex, i)} / ${this.readB(s, i)}`)
+          : this.fill(v.shape, (i) => `(${this.read(v, i)} - ${this.readB(m, i)}) - log(${this.readB(s, i)})`);
+      }
+      case "reshape": {
+        const v = this.materialize(sub(e.val));
+        return { ...v, shape: outShape() }; // contiguous: an alias
+      }
+      case "transpose": {
+        const v = sub(e.val);
+        const r = v.shape.length;
+        const perm = e.perm ?? Array.from({ length: r }, (_, i) => r - 1 - i);
+        return this.fill(outShape(), (oi) => { const idx = new Array<string>(r); perm.forEach((p, d) => { idx[p] = oi[d]!; }); return this.read(v, idx); });
+      }
+      case "concat": {
+        const vals = e.vals.map(sub);
+        const shape = outShape();
+        const ax = norm(e.axis, shape.length);
+        const out = this.alloc(shape);
+        let at = 0;
+        for (const v of vals) {
+          const part = shape.map((s, d) => (d === ax ? v.shape[ax]! : s));
+          this.loops(part, (i) => { const oi = i.map((x, d) => (d === ax ? `${x} + ${at}` : x)); this.lines.push(`  ${this.read(out, oi)} = ${this.readB(v, i)};`); });
+          at += v.shape[ax]!;
+        }
+        return out;
+      }
+      case "slice": {
+        const v = sub(e.val);
+        const shape = outShape();
+        const ax = norm(e.axis, v.shape.length);
+        const n = v.shape[ax]!, step = e.step ?? 1;
+        const clampIdx = (i: number | undefined, dflt: number, lo: number, hi: number) => (i === undefined ? dflt : Math.min(hi, Math.max(lo, i < 0 ? n + i : i)));
+        const start = step > 0 ? clampIdx(e.start, 0, 0, n) : clampIdx(e.start, n - 1, -1, n - 1);
+        return this.fill(shape, (i) => this.read(v, i.map((x, d) => (d === ax ? `${start} + ${x} * ${step}` : x))));
+      }
+      case "oneHot": {
+        const v = sub(e.val);
+        const shape = outShape();
+        return this.fill(shape, (i) => `select(0.0, 1.0, i32(round_(${this.read(v, i.slice(0, -1))})) == ${i[i.length - 1]})`);
+      }
+      case "takeAlong": {
+        const v = sub(e.val), ix = sub(e.indices);
+        const shape = outShape();
+        const ax = norm(e.axis, v.shape.length);
+        const n = v.shape[ax]!;
+        return this.fill(shape, (i) => {
+          const j = `clamp(i32(round_(${this.readB(ix, i)})), 0, ${n - 1})`;
+          const off = shape.length - v.shape.length;
+          const idx = v.shape.map((s, d) => (d === ax ? j : s === 1 ? "0" : i[off + d]!));
+          return this.read(v, idx);
+        });
+      }
+      case "stopGradient": return sub(e.val);
+      case "call": {
+        const callee = typeof e.net === "string" ? this.nets.program(e.net, [path]) : compileNet(e.net, this.nets, [path]);
+        const args = new Map(Object.entries(e.inputs).map(([k, v]) => [k, this.materialize(sub(v))]));
+        const was = this.inCall; this.inCall = true;
+        const saved = this.scratch; this.scratch = [];
+        const outs = this.program(callee, args, `${path}.call`);
+        this.scratch = [...saved, ...this.scratch]; this.inCall = was;
+        const out = outs[e.output];
+        if (!out) throw new Error(`${path}: called net has no output "${e.output}"`);
+        return out;
+      }
+      default: {
+        if (isElementwise(e)) return this.elementwise(e, env, sizeOf, path);
+        throw new Error(`${path}: unknown array op "${String(op)}"`);
+      }
+    }
+  }
+
+  /**
+   * An elementwise TREE (nested unary / nary / binary / compare / clamp / where over names, literals and
+   * non-elementwise subexpressions) as ONE loop: each element is a single scalar expression, so a chain like
+   * `relu(add(matmul, b))` or an autodiff mask `where(gt(y, 0), g, 0)` materializes nothing but its result.
+   * Non-elementwise operands are emitted first (materialized); the tree's shape is inferred once.
+   */
+  private elementwise(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number, path: string): Arr {
+    const shape = this.shapeOf(e, env, sizeOf);
+    // materialize non-elementwise / non-leaf operands once, keyed by object identity
+    const leaves = new Map<object, Arr>();
+    const prepare = (x: ArrayExpr): void => {
+      if (typeof x !== "object") return;
+      if (isElementwise(x)) { for (const k of ["val", "vals", "min", "max", "cond"] as const) { const v = (x as unknown as Record<string, ArrayExpr | ArrayExpr[]>)[k]; if (v === undefined) continue; if (Array.isArray(v)) v.forEach(prepare); else prepare(v); } return; }
+      leaves.set(x, this.expr(x, env, sizeOf, path));
+    };
+    prepare(e);
+    // fold literal idioms of autodiff (mul by 0, add / mul of a unit)
+    const scalar = (x: ArrayExpr, idx: string[]): string => {
+      if (typeof x === "number") return f32(x);
+      if (typeof x === "string") return this.readB(lookup(x, env, path), idx);
+      if (!isElementwise(x)) return this.readB(leaves.get(x)!, idx);
+      const op = x.op;
+      if (op === "clamp") return `clamp(${scalar(x.val, idx)}, ${scalar(x.min, idx)}, ${scalar(x.max, idx)})`;
+      if (op === "where") return `select(${scalar(x.vals[1], idx)}, ${scalar(x.vals[0], idx)}, ${scalar(x.cond, idx)} != 0.0)`;
+      if (op in UNARY) return UNARY[op]!(scalar((x as { val: ArrayExpr }).val, idx));
+      if (op in BINARY) { const [a, b] = (x as { vals: [ArrayExpr, ArrayExpr] }).vals; return BINARY[op]!(scalar(a, idx), scalar(b, idx)); }
+      if (op in COMPARE) { const [a, b] = (x as { vals: [ArrayExpr, ArrayExpr] }).vals; return `select(0.0, 1.0, ${scalar(a, idx)} ${COMPARE[op]} ${scalar(b, idx)})`; }
+      const vals = (x as { vals: ArrayExpr[] }).vals;
+      if (op === "mul" && vals.some((v) => v === 0)) return "0.0";
+      if (op === "add" || op === "mul") {
+        const unit = op === "add" ? 0 : 1;
+        const rest = vals.filter((v) => v !== unit);
+        if (rest.length === 0) return f32(unit);
+        if (rest.length === 1) return scalar(rest[0]!, idx);
+        return `(${rest.map((v) => scalar(v, idx)).join(op === "add" ? " + " : " * ")})`;
+      }
+      const xs = vals.map((v) => scalar(v, idx));
+      switch (op) {
+        case "min": return xs.reduce((a, b) => `min(${a}, ${b})`);
+        case "max": return xs.reduce((a, b) => `max(${a}, ${b})`);
+        case "mean": return `((${xs.join(" + ")}) / ${f32(xs.length)})`;
+        default: return `sqrt((${xs.map((v) => `${v} * ${v}`).join(" + ")}) / ${f32(xs.length)})`; // rms
+      }
+    };
+    // a tree that folds to a literal or to one same-shaped operand needs no array
+    const probe = scalar(e, shape.map((_, d) => `__i${d}`));
+    if (/^[-+0-9.e()\s]+$/.test(probe) && !/__i/.test(probe)) return { shape, kind: "lit", base: probe };
+    if (typeof e === "object" && (e.op === "add" || e.op === "mul")) {
+      const unit = e.op === "add" ? 0 : 1;
+      const rest = (e as { vals: ArrayExpr[] }).vals.filter((v) => v !== unit);
+      if (rest.length === 1 && typeof rest[0] === "string") { const r = lookup(rest[0], env, path); if (r.shape.length === shape.length && r.shape.every((d, i) => d === shape[i])) return r; }
+    }
+    return this.fill(shape, (idx) => scalar(e, idx));
+  }
+
+  /** generalized einsum over declared axes (no batch here); size-1 letters broadcast */
+  private einsum(terms: string[], out: string, vals: Arr[], shape: number[]): Arr {
+    const sizes = new Map<string, number>();
+    terms.forEach((t, k) => [...t].forEach((l, d) => { const s = vals[k]!.shape[d]!; const prev = sizes.get(l); if (prev === undefined || prev === 1) sizes.set(l, s); }));
+    const summed = [...new Set(terms.join(""))].filter((l) => !out.includes(l));
+    const res = this.alloc(shape);
+    const outLetters = [...out];
+    const distinct = [...new Set(outLetters)];
+    const diagonal = distinct.length !== outLetters.length;
+    // a letter repeated in the output writes the diagonal only: zero the array, then iterate each letter once
+    if (diagonal) this.loops(shape, (oi) => this.lines.push(`  ${this.read(res, oi)} = 0.0;`));
+    this.loops(distinct.map((l) => sizes.get(l)!), (di) => {
+      const pos = new Map<string, string>(distinct.map((l, d) => [l, di[d]!]));
+      const oi = outLetters.map((l) => pos.get(l)!);
+      const acc = this.fresh("acc");
+      this.lines.push(`  var ${acc}: f32 = 0.0;`);
+      const inner = (d: number) => {
+        if (d === summed.length) {
+          const prod = vals.map((v, k) => this.read(v, [...terms[k]!].map((l, i) => (v.shape[i] === 1 ? "0" : pos.get(l)!)))).join(" * ");
+          this.lines.push(`  ${acc} = ${acc} + ${prod};`);
+          return;
+        }
+        const l = summed[d]!, v = this.fresh("s");
+        this.lines.push(`  for (var ${v}: i32 = 0; ${v} < ${this.bound(sizes.get(l)!)}; ${v}++) {`);
+        pos.set(l, v);
+        inner(d + 1);
+        this.lines.push(`  }`);
+      };
+      inner(0);
+      this.lines.push(`  ${this.read(res, oi)} = ${acc};`);
+    });
+    return res;
+  }
+
+  private reduce(v: Arr, fn: ArrayReduceFn, axes: ReadonlySet<number>, keepDims: boolean, shape: number[]): Arr {
+    const out = this.alloc(shape);
+    const kept = v.shape.map((_, d) => d).filter((d) => !axes.has(d));
+    const red = [...axes].sort((a, b) => a - b);
+    const count = red.reduce((n, d) => n * v.shape[d]!, 1);
+    // iterate over the kept axes; the output index drops (or keeps as 0) the reduced ones
+    this.loops(kept.map((d) => v.shape[d]!), (ki) => {
+      const outIdx = keepDims ? v.shape.map((_, d) => (axes.has(d) ? "0" : ki[kept.indexOf(d)]!)) : ki;
+      const acc = this.fresh("acc");
+      const init = fn === "prod" ? "1.0" : fn === "max" || fn === "logsumexp" ? "-3.4e38" : fn === "min" ? "3.4e38" : "0.0";
+      this.lines.push(`  var ${acc}: f32 = ${init};`);
+      const pass = (body: (x: string) => string) => {
+        const rv: string[] = [];
+        for (const d of red) { const s = this.fresh("r"); rv.push(s); this.lines.push(`  for (var ${s}: i32 = 0; ${s} < ${this.bound(v.shape[d]!)}; ${s}++) {`); }
+        const idx = v.shape.map((_, d) => (axes.has(d) ? rv[red.indexOf(d)]! : ki[kept.indexOf(d)]!));
+        this.lines.push(`  ${body(this.read(v, idx))}`);
+        for (const _ of red) this.lines.push(`  }`);
+      };
+      switch (fn) {
+        case "sum": case "mean": pass((x) => `${acc} = ${acc} + ${x};`); break;
+        case "prod": pass((x) => `${acc} = ${acc} * ${x};`); break;
+        case "max": pass((x) => `${acc} = max(${acc}, ${x});`); break;
+        case "min": pass((x) => `${acc} = min(${acc}, ${x});`); break;
+        case "logsumexp": {
+          pass((x) => `${acc} = max(${acc}, ${x});`);
+          const s = this.fresh("acc");
+          this.lines.push(`  var ${s}: f32 = 0.0;`);
+          pass((x) => `${s} = ${s} + exp(${x} - ${acc});`);
+          this.lines.push(`  ${acc} = ${acc} + log(${s});`);
+          break;
+        }
+      }
+      if (fn === "mean") this.lines.push(`  ${acc} = ${acc} / ${f32(count)};`);
+      this.lines.push(`  ${this.read(out, outIdx)} = ${acc};`);
+    });
+    return out;
+  }
+}
+
+/** occurrences of each name in the program's node expressions (with multiplicity) */
+function useCounts(prog: Program): Map<string, number> {
+  const counts = new Map<string, number>();
+  const walk = (e: ArrayExpr): void => {
+    if (typeof e === "number") return;
+    if (typeof e === "string") { counts.set(e, (counts.get(e) ?? 0) + 1); return; }
+    if (e.op === "arg") { counts.set(e.name, (counts.get(e.name) ?? 0) + 1); return; }
+    if (e.op === "call") { Object.values(e.inputs).forEach(walk); return; }
+    for (const k of ["val", "vals", "min", "max", "cond", "indices"]) { const v = (e as unknown as Record<string, ArrayExpr | ArrayExpr[]>)[k]; if (v === undefined) continue; if (Array.isArray(v)) v.forEach(walk); else walk(v); }
+  };
+  for (const n of prog.nodes) walk(n.expr);
+  for (const o of Object.values(prog.outputs)) counts.set(o, (counts.get(o) ?? 0) + 1);
+  return counts;
+}
+
+/**
+ * Substitute every elementwise node that is read exactly once, by an elementwise node, into that consumer. The
+ * consumer's expression becomes a tree the emitter turns into one loop (`elementwise`), so the intermediate is
+ * never materialized. Outputs and multi-use nodes stay.
+ */
+export function fuseElementwise(prog: Program): Program {
+  const counts = useCounts(prog);
+  const outputs = new Set(Object.values(prog.outputs));
+  const consumer = new Map<string, number>(); // name -> index of its only reading node
+  prog.nodes.forEach((node, i) => { for (const dep of exprNames(node.expr)) consumer.set(dep, i); });
+  const fused = new Map<string, ArrayExpr>();
+  const subst = (e: ArrayExpr): ArrayExpr => {
+    if (typeof e === "number") return e;
+    if (typeof e === "string") return fused.get(e) ?? e;
+    if (e.op === "arg") return fused.get(e.name) ?? e;
+    if (e.op === "call") return { ...e, inputs: Object.fromEntries(Object.entries(e.inputs).map(([k, v]) => [k, subst(v)])) };
+    const out = { ...e } as unknown as Record<string, unknown>;
+    for (const k of ["val", "vals", "min", "max", "cond", "indices"]) { const v = out[k]; if (v === undefined) continue; out[k] = Array.isArray(v) ? (v as ArrayExpr[]).map(subst) : subst(v as ArrayExpr); }
+    return out as unknown as ArrayExpr;
+  };
+  const nodes: Program["nodes"] = [];
+  prog.nodes.forEach((node) => {
+    const expr = subst(node.expr);
+    const c = consumer.get(node.name);
+    if (isElementwise(expr) && !outputs.has(node.name) && counts.get(node.name) === 1 && c !== undefined && isElementwise(prog.nodes[c]!.expr)) {
+      fused.set(node.name, expr);
+      return;
+    }
+    nodes.push({ name: node.name, expr });
+  });
+  return { ...prog, nodes };
+}
+
+/** ops whose output element depends only on the operands' element at the same (broadcast) index */
+function isElementwise(e: ArrayExpr): boolean {
+  if (typeof e !== "object") return false;
+  const op = e.op;
+  return op in UNARY || op in BINARY || op in COMPARE || NARY.has(op) || op === "clamp" || op === "where";
+}
+
+function lookup(name: string, env: ReadonlyMap<string, Arr>, path: string): Arr {
+  const a = env.get(name);
+  if (!a) throw new Error(`${path}: unknown name "${name}"`);
+  return a;
+}
+
+/** resolve symbolic sizes in reshape / oneHot (at any depth) so shape inference sees numbers */
+function concretize(e: ArrayExpr, sizeOf: (d: number | string) => number): ArrayExpr {
+  if (typeof e !== "object") return e;
+  if (e.op === "call") return { ...e, inputs: Object.fromEntries(Object.entries(e.inputs).map(([k, v]) => [k, concretize(v, sizeOf)])) };
+  const out = { ...e } as unknown as Record<string, unknown>;
+  for (const k of ["val", "vals", "min", "max", "cond", "indices"]) {
+    const v = out[k];
+    if (v === undefined) continue;
+    out[k] = Array.isArray(v) ? (v as ArrayExpr[]).map((x) => concretize(x, sizeOf)) : concretize(v as ArrayExpr, sizeOf);
+  }
+  if (e.op === "reshape") out.shape = e.shape.map((d) => (d === -1 ? -1 : sizeOf(d)));
+  if (e.op === "oneHot") out.size = sizeOf(e.size);
+  return out as unknown as ArrayExpr;
+}
+
+/*******************************************************/
+
+export interface NetFunction {
+  /** the WGSL function text */
+  code: string;
+  /** function-scope floats used */
+  floats: number;
+}
+
+/**
+ * Emit `fn <name>(p, pos) -> f32 | vecD` evaluating a net field (a program
+ * whose sole input is the point) at `p`. Returns undefined when the net's
+ * intermediates exceed NET_MAX_FLOATS (the caller falls back to CPU sampling).
+ */
+export function emitNetField(name: string, field: NetField, ctx: NetEmitContext, outputs: string[] = [field.output]): NetFunction | undefined {
+  const em = new NetEmitter(ctx, field.nets);
+  const D = ctx.D;
+  const inputs = new Map<string, Arr>([[pointInput(field.program), { shape: [D], kind: "point", base: "p" }]]);
+  // A-normal form (every intermediate is a node, so liveness — array reuse, in-place updates — sees all of them),
+  // then single-use elementwise producers fused back into their elementwise consumers (one loop, no intermediate)
+  const outs = em.program(fuseElementwise(anfProgram(field.program, field.nets)), inputs, "net");
+  if (em.floats > (ctx.maxFloats ?? NET_MAX_FLOATS)) return undefined;
+  // the outputs' elements concatenated: a scalar, a vecD, or (value + gradient) a vec(D+1)
+  const comps: string[] = [];
+  for (const o of outputs) {
+    const out = outs[o];
+    if (!out) throw new Error(`net field has no output "${o}"`);
+    const n = out.shape.reduce((a, b) => a * b, 1);
+    for (let i = 0; i < n; i++) comps.push(em.read(out, out.shape.length === 0 ? [] : [String(i)]));
+  }
+  if (comps.length > 4) throw new Error(`net field function would return ${comps.length} components (max 4)`);
+  const type = comps.length === 1 ? "f32" : vecType(comps.length);
+  const ret = comps.length === 1 ? comps[0]! : `${type}(${comps.join(", ")})`;
+  return { code: `fn ${name}(p: ${vecType(D)}, pos: i32) -> ${type} {\n${em.lines.join("\n")}\n  return ${ret};\n}`, floats: em.floats };
+}
+
+/** function-scope floats a net field needs (a dry emission), cached per program */
+const sizeCache = new WeakMap<Program, number>();
+export function netFieldFloats(fd: NetScalarFieldData | NetVectorFieldData): number {
+  let n = sizeCache.get(fd.field.program);
+  if (n === undefined) {
+    try {
+      const r = emitNetField("dry", fd.field, { D: fd.dimCount, upload: () => 0 });
+      n = r ? r.floats : Infinity;
+    } catch { n = Infinity; }
+    sizeCache.set(fd.field.program, n);
+  }
+  return n;
+}
+
+/**
+ * Whether the GPU program can evaluate `fd` without sampling it on the CPU:
+ * cheap data always; net fields (and whatever is derived from them) when the
+ * net fits in function-scope memory.
+ */
+export function gpuTranspilable(fd: FieldData): boolean {
+  if (!fd.costly) return true;
+  if (fd instanceof NetScalarFieldData || fd instanceof NetVectorFieldData) return netFieldFloats(fd) <= NET_MAX_FLOATS;
+  if (fd instanceof SymbolicScalarFieldData || fd instanceof SymbolicVectorFieldData)
+    return [...Object.values(fd.args.scalars), ...Object.values(fd.args.vectors)].every(gpuTranspilable);
+  if (fd instanceof PulledBackScalarFieldData || fd instanceof PulledBackVectorFieldData) return gpuTranspilable(fd.inner);
+  return false;
+}

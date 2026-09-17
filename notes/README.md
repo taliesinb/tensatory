@@ -7,6 +7,7 @@ the short summary; when a decision changes, update both.
 |---|---|
 | [bundle-schema.md](bundle-schema.md) | the JSON bundle: manifolds, fields, field data, arrays, codomains, point sets; how specs become runtime objects |
 | [symbolic.md](symbolic.md) | the expression language: syntax, namespaces, normalization, compilation (CSE), symbolic differentiation |
+| [nets.md](nets.md) | small neural networks in a bundle: `def` / `bind` / `displace` / `grad`, the array expression language, declared symbolic axes vs implicit batch, autodiff as a program rewrite, net-backed fields with exact derivatives, the CPU reference evaluator and the WGSL transpiler, the `costly` flag, the iris example checked against PyTorch |
 | [field-data.md](field-data.md) | runtime field data: `symbolic` vs `sampled`, sample grids, derivatives to any order, pullbacks, "uses" (gradient / norm) |
 | [isolines.md](isolines.md) | marching squares, exact projected isolines, streamline integration, smoothing |
 | [glyphs.md](glyphs.md) | static vector-field glyphs: hex / FCC lattices as coset grids, view-driven spacing, arrows normalized to the longest sampled vector, the fused atomicMax kernel |

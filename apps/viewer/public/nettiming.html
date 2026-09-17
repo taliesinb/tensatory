@@ -1,0 +1,58 @@
+<!doctype html>
+<!-- Shader compile-time probe for transpiled nets (dev server only: imports the workspace sources through /@fs/).
+     Open http://127.0.0.1:5180/nettiming.html in each browser; results land in the page and in document.title. -->
+<html><head><meta charset="utf-8"><title>net compile timing</title>
+<style>body{font:13px/1.4 -apple-system,system-ui,sans-serif;background:#0b0d12;color:#e6ebf5;padding:16px}table{border-collapse:collapse}td,th{padding:2px 10px;text-align:right;border-bottom:1px solid #2a3244}th{color:#9aa5bd}</style></head>
+<body><h3 id="h">compiling…</h3><table id="t"></table><pre id="log"></pre>
+<script type="module">
+const core = await import("/@fs/Users/tali/github/tensatory/packages/core/src/index.ts");
+const gpu = await import("/@fs/Users/tali/github/tensatory/packages/gpu/src/index.ts");
+const mesh = await import("/@fs/Users/tali/github/tensatory/packages/gpu/src/mesh.ts");
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; };
+const ua = navigator.userAgent.includes("Chrome") ? "chrome" : navigator.userAgent.includes("Safari") ? "safari" : "other";
+const params = new URLSearchParams(location.search);
+const opaque = params.get("opaque"); // "1" | "0" | null = both
+const spec = await (await fetch("/bundles/iris.json")).json();
+const b = core.Bundle.parse(spec);
+const fd = b.scalarField("loss3").data;
+const grid = new core.DenseGrid([8, 8, 8], fd.box);
+const backend = await gpu.GpuBackend.create();
+if (!backend) { document.getElementById("h").textContent = "no WebGPU"; throw new Error("no WebGPU"); }
+const device = backend.device;
+const rows = [];
+async function time(label, code, repeat = 3) {
+  const ts = [];
+  for (let r = 0; r < repeat; r++) {
+    // unique CODE per repetition (a comment is stripped before Dawn's pipeline cache hashes the MSL)
+    const src = code.replace("/*SALT*/", `+ ${(Math.random() * 1e-30).toExponential(6)}`);
+    const t0 = performance.now();
+    const mod = device.createShaderModule({ code: src });
+    const info = await mod.getCompilationInfo();
+    if (info.messages.some((m) => m.type === "error")) { log(`${label}: ${info.messages.map((m) => m.message).join("; ")}`); return; }
+    const t1 = performance.now();
+    const pipe = device.createComputePipelineAsync ? await device.createComputePipelineAsync({ layout: "auto", compute: { module: mod, entryPoint: "main" } }) : device.createComputePipeline({ layout: "auto", compute: { module: mod, entryPoint: "main" } });
+    void pipe;
+    await device.queue.onSubmittedWorkDone();
+    ts.push([t1 - t0, performance.now() - t1]);
+  }
+  const med = (i) => ts.map((t) => t[i]).sort((a, b) => a - b)[Math.floor(ts.length / 2)];
+  rows.push({ label, module: med(0), pipeline: med(1), chars: code.length });
+  render();
+}
+function render() {
+  const t = document.getElementById("t");
+  t.innerHTML = `<tr><th>kernel</th><th>module ms</th><th>pipeline ms</th><th>chars</th></tr>` + rows.map((r) => `<tr><td>${r.label}</td><td>${r.module.toFixed(0)}</td><td>${r.pipeline.toFixed(0)}</td><td>${r.chars}</td></tr>`).join("");
+}
+const entry = (body) => `\n@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) { ${body.replace(";", " /*SALT*/;")} }`;
+const variants = opaque === null ? [true, false] : [opaque === "1"];
+for (const useOpaque of variants) {
+  gpu.setOpaqueLoopBounds(useOpaque);
+  const tag = useOpaque ? "opaque" : "literal";
+  { const pb = new gpu.ProgramBuilder(grid); const f = pb.scalar(fd); const lib = pb.library(); await time(`forward (${tag})`, lib.code + entry(`out[id.x] = ${f}(vec3<f32>(0.1, 0.2, 0.3), -1);`)); }
+  { const pb = new gpu.ProgramBuilder(grid); const g = pb.gradient(fd); const lib = pb.library(); await time(`gradient (${tag})`, lib.code + entry(`out[id.x] = ${g}(vec3<f32>(0.1, 0.2, 0.3), -1).x;`)); }
+  { const pb = new gpu.ProgramBuilder(grid); const f = pb.scalar(fd), g = pb.gradient(fd); const lib = pb.library();
+    await time(`projection (${tag})`, lib.code + "\n" + mesh.projection3Wgsl(f, g, { a: fd.box.a, b: fd.box.b, size: [...fd.box.size] }) + entry(`out[id.x] = project3_(vec3<f32>(0.1, 0.2, 0.3), 0.1, 0.5).x;`), 2); }
+}
+document.getElementById("h").textContent = `done (${ua}, ${navigator.userAgent.match(/(Chrome|Version)\/[\d.]+/)?.[0] ?? ""})`;
+document.title = "done " + JSON.stringify(rows.map((r) => [r.label, Math.round(r.module), Math.round(r.pipeline)]));
+</script></body></html>

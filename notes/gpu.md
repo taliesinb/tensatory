@@ -14,6 +14,7 @@ shader-based renderer.
 | `src/program.ts` | `ProgramBuilder`: field data → a complete compute program for one dispatch grid. Symbolic data is transpiled, with its arguments bound recursively; dense data is uploaded and read through a generated reader (direct `pos` read when the dispatch grid *is* its support, multilinear interpolation otherwise, NaN outside its box — the CPU semantics exactly); derivatives of dense arguments are computed by core (grid differences) and uploaded; pullbacks become coordinate maps with the chain-rule factor; anything else (closure-backed data) is sampled by core on the dispatch grid and uploaded. **All uploads are packed into one storage buffer** (binding 1) with offsets — WebGPU allows only 8 storage buffers per stage, and derived fields easily need more readers than that. |
 | `src/device.ts` | `GpuBackend`: finds `navigator.gpu` in a browser or Dawn's node bindings (`webgpu` package) in node (device requested with the adapter's buffer limits, up to 2 GB); explicit bind-group layout (out + data); pipeline cache by shader code; validation error scopes; `run(program)` → `Float32Array`. Kernels use a 1D `id.x`; dispatches over 65535 workgroups are laid out in 2D and the entry point rewritten (`linearize`). `createBuffer` accounts resident allocations (`bytesAllocated`); `dispatches` / `pipelinesBuilt` counters and `readCounter` (a set's true record count) feed the viewer's adaptive resolution ([resolution.md](resolution.md)). |
 | `src/sample.ts` | `gpuSampleOn(backend, field, grid)`: the counterpart of `field.sampleOn(grid)`. |
+| `src/nets.ts` | `emitNetField`: a net-backed field ([nets.md](nets.md)) → one WGSL field function. One thread evaluates the whole net for its point, so the function has no batch: every array has its declared per-example shape and lives in a function-scope `var a: array<f32, N>` (constants in the shared `data` buffer); ops are nested loops with an inner accumulation for `einsum` / `reduce`; elementwise trees are one loop; `call` inlines the callee; `reshape` aliases. Emitted from the A-normal form with elementwise fusion, best-fit array reuse by liveness and in-place updates, bounded by `NET_MAX_FLOATS` (2000 floats: Safari's 8192-byte limit); `gpuTranspilable(fd)` tells the viewer whether a field (or anything derived from it) needs no CPU fallback. Derivatives of net fields are core's autodiff programs, transpiled like any net; `ProgramBuilder.gradient(fd)` emits one `vecD` function per field. Loop bounds are opaque (`nb_`) so Metal does not unroll the nests. |
 
 ## Semantics preserved
 
@@ -207,6 +208,81 @@ same arrow formulas as core. One kernel per (field, colour); the lattice
 (packed coset grids) and the set's capacity travel in the params, so a pan or
 zoom re-dispatches without compiling or re-uploading a dense field's data.
 
+## Stage 8 (done): nets
+
+Net-backed fields are transpiled whole (`src/nets.ts`, above), so the raster,
+exact isolines, streamlines, glyphs and marching tetrahedra evaluate the net
+directly — the iris MLP at 256³ (16.8M points × 30 examples) samples in
+milliseconds and the 3D arm runs at the top of its ladder. `test/nets.test.ts`
+checks every array op through a small net, `call`, coordinate-expression
+inputs and `netv` against the CPU evaluator at 2e-4, the iris fields at
+48² / 12³, and — since gradients are autodiff programs on both sides — the
+iris gradient and a second derivative at the ordinary f32 tolerance.
+
+Two constraints shape the emitted code, both measured with
+`apps/viewer/public/nettiming.html` (dev server; compiles the iris forward /
+gradient / projection kernels with and without opaque bounds — Dawn caches
+pipelines by generated MSL, so the probe salts the code, not a comment):
+
+**Function-scope memory.** Safari's WGSL compiler rejects any function whose
+variables exceed 8192 bytes ("The combined byte size of all variables in this
+function exceeds 8192 bytes"); Chrome has no such limit. A bundle must render
+in both, so `NET_MAX_FLOATS = 2000` and the emitter works to stay under it:
+the program is emitted in A-normal form, dead arrays are reused best-fit by
+per-node liveness, an elementwise node whose operand dies there writes in
+place, and single-use elementwise producers are fused into their consumer
+(`fuseElementwise` + the `elementwise` tree emitter: one loop, one scalar
+expression per element). The iris forward went from 2274 floats (rejected by
+Safari) to 821, the gradient program from 3576 to 1661; a second derivative
+(3943) still falls back to the CPU.
+
+**Compile time.** A kernel inlines every field function at every call site,
+and the projection routines call the value and the gradient several times.
+WGSL has no roll / unroll attribute ([gpuweb#4110](https://github.com/gpuweb/gpuweb/issues/4110)
+is the open request) and Tint's MSL printer emits plain `while(true)` loops,
+so the unrolling happens in Apple's Metal compiler where nothing in WGSL can
+reach it — an opaque loop bound (`nb_`, a function reading a header word) is
+the only lever. Pipeline compile of the iris kernels, ms, median of repeats:
+
+| kernel | Chrome literal | Chrome opaque | Safari literal | Safari opaque |
+|---|---|---|---|---|
+| forward | 142 | 78 | 1387 | 369 |
+| gradient | 236 | 145 | 742 | 700 |
+| projection | 675 | 291 | 8743 | 4926 |
+
+Safari is 5–15× slower than Chrome to compile the same WGSL and benefits
+even more from the opaque bounds (forward 3.8×), so they stay on in both
+browsers (`setOpaqueLoopBounds` exists for the probe). One `vecD` gradient
+function per field instead of D component programs was the other big cut
+(2.4 s → 0.5 s for the projection kernel in Dawn).
+
+**Exact projection of nets is latency-bound.** Measured on the iris loss at
+192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
+351 segments. Not arithmetic: even with a single evaluation per projection
+the kernel takes 12 ms, while the raster does 37k gradient evaluations in
+30 ms. Only the ~350 lanes whose cell holds a segment work, one lane per SIMD
+group, and a net evaluation in a lone lane is a serial chain of thread-private
+memory round trips (~5 ms wall); Newton runs ~8 of them in sequence, so the
+cost is per level, not per vertex, and compaction would not help. What did:
+`ProgramBuilder.valueGradient` — (value, ∇) in ONE evaluation (a net's
+gradient program computes the forward pass anyway), so a Newton step costs
+one evaluation, with a step-size stop and geometric acceptance (`|r| / |∇f| <
+tolW`) instead of stalling into the bisection at f32's noise floor
+(47 → 40 ms); and, decisively, the fused path now shows marching squares
+while a net field's level is moving and turns exact when it settles (the CPU
+path always did) — 165 → 17 ms per frame during a level drag, one exact
+recompute after. Literal loop bounds would make the lone-lane chain 2× faster
+(25 ms) at 10× the compile; not taken. The colormap selection is no longer
+part of the isoline kernel key: a new key meant a shader compile per drag
+event (165 ms per frame in Chrome, seconds in Safari) for a kernel the
+selection does not affect.
+
+What stays CPU-side / off: nets over `NET_MAX_FLOATS` fall back to core
+sampling on the dispatch grid (`costly` in the viewer); 3D exact projection
+is skipped for nets — at 256³ one dispatch of value + gradient per Newton
+step per vertex exceeded the GPU watchdog and lost the device (normals still
+use the exact gradient; 2D isolines of nets are exact).
+
 ## Next stages
 
 1. Interval-arithmetic quadtree seeding for exact isolines (topology still
@@ -215,3 +291,8 @@ zoom re-dispatches without compiling or re-uploading a dense field's data.
    the adaptive resolution instead of vsync-quantized rAF intervals.
 3. Reuse same-sized resident buffers across frames (a moving crop allocates
    and frees its grids every frame; Dawn zero-fills new buffers).
+4. Nets beyond function-scope memory (an MNIST-sized validation set): stream
+   the declared dataset axis — every array carrying it is consumed only by
+   reductions, so the loop over examples can wrap the per-example body with
+   small intermediates. Also: fuse elementwise chains into their consumers
+   instead of materializing every node, and call-site batching in the emitter.

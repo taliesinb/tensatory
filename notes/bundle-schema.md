@@ -15,7 +15,8 @@ shape; it is parsed into runtime classes that carry behaviour.
   "manifolds": { "plane": { "numDims": 2, "dimNames": ["x", "y"], "dimWeights": [0.7, 0.3] } },
   "defaultManifold": "plane",          // only needed by fields / point sets that omit `domain`
   "fields":    { "<fieldId>": FieldSpec, … },
-  "pointSets": { "<id>": { "points": [[1, 1]], "labels": ["θ*"], "ordered": false } }
+  "pointSets": { "<id>": { "points": [[1, 1]], "labels": ["θ*"], "ordered": false } },
+  "nets":      { "<netId>": NetSpec, … }  // small neural networks, see nets.md
 }
 ```
 
@@ -50,6 +51,7 @@ collection (backprop). `codomain` is a visualization hint only (see below).
 | `symbolic` / `symbolicv` | symbolic | an expression of the coordinates over `box`, with named `consts` |
 | `pointwise` / `pointwisev` | inherited | an expression over named `scalars` / `vectors` arguments (inline specs or field ids) |
 | `translate` / `scale` | inherited | pull back another datum's domain (p ↦ p − vec; p ↦ origin + (p − origin)/scale) |
+| `net` / `netv` | symbolic | an output of a net evaluated at inputs that are expressions of the coordinates (by default the net's sole input receives the point); CPU reference evaluator, `costly` ([nets.md](nets.md)) |
 
 Kind rules: pointwise data is *sampled* iff any argument is, and then all
 sampled arguments must share **identical** sample points (grid size and box);
@@ -90,7 +92,9 @@ bare name, or `{ "op": …, … }`; e.g. `x² + y²` is
 `Bundle.parse(json)` validates, then builds fields **lazily** on first access
 (so fields may reference each other by id in any order) with cycle detection;
 `buildAll()` reports per-field errors without failing the whole bundle, and
-the viewer lists them in the bundle panel. `Bundle.scalarField(id)` /
+the viewer lists them in the bundle panel. Nets are built the same way
+(`Bundle.net(id)` → `Net` with its inferred signature; errors under
+`nets.<id>`). `Bundle.scalarField(id)` /
 `vectorField(id)` return `ScalarField` / `VectorField` (id, name, codomain,
 domain, `data: ScalarFieldData`).
 

@@ -34,3 +34,5 @@ export type { FusedStreamlines3 } from "./fused3d";
 export type { GpuSegments3 } from "./lines3d";
 export { fusedGlyphs, packLattice } from "./glyphs";
 export type { FusedGlyphs, GlyphDispatch } from "./glyphs";
+export { emitNetField, gpuTranspilable, netFieldFloats, setOpaqueLoopBounds, NET_MAX_FLOATS } from "./nets";
+export type { NetFunction, NetEmitContext } from "./nets";

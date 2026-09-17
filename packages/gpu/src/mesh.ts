@@ -93,7 +93,7 @@ export async function readMesh(backend: GpuBackend, m: GpuMesh): Promise<IsoMesh
 }
 
 /** WGSL: `project3_(p, maxDist, level) -> vec4 (q, ok)` — Newton along the exact gradient of a symbolic 3D field, box faces locked */
-export function projection3Wgsl(fn: string, dx: string, dy: string, dz: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
+export function projection3Wgsl(fn: string, valueGradient: string, box: { a: readonly number[]; b: readonly number[]; size: number[] }): string {
   const eps = 1e-6 * Math.max(...box.size);
   return `
 const PA3: vec3<f32> = vec3<f32>(${f32(box.a[0]!)}, ${f32(box.a[1]!)}, ${f32(box.a[2]!)});
@@ -101,38 +101,42 @@ const PB3: vec3<f32> = vec3<f32>(${f32(box.b[0]!)}, ${f32(box.b[1]!)}, ${f32(box
 const PEPS3: f32 = ${f32(eps)};
 fn inBox3_(q: vec3<f32>) -> bool { return all(q >= PA3 - PEPS3) && all(q <= PB3 + PEPS3); }
 fn resid3_(q: vec3<f32>, level: f32) -> f32 { return ${fn}(q, -1) - level; }
-fn grad3_(q: vec3<f32>) -> vec3<f32> { return vec3<f32>(${dx}(q, -1), ${dy}(q, -1), ${dz}(q, -1)); }
-fn project3_(p: vec3<f32>, maxDist: f32, level: f32) -> vec4<f32> {
+fn fg3_(q: vec3<f32>, level: f32, lock: vec3<f32>) -> vec4<f32> { let v = ${valueGradient}(q, -1); return vec4<f32>(v.x - level, v.yzw * lock); }
+// see projectionWgsl (isolines.ts): one combined evaluation per Newton step, step-size stop, geometric acceptance
+fn project3_(p: vec3<f32>, maxDist: f32, level: f32, tolW: f32) -> vec4<f32> {
   let scale = max(1.0, abs(level));
   let tolF = 1e-6 * scale;
   let onLo = abs(p - PA3) < vec3<f32>(PEPS3); let onHi = abs(p - PB3) < vec3<f32>(PEPS3);
   let lock = select(vec3<f32>(1.0), vec3<f32>(0.0), onLo | onHi);
   var q = p;
-  var r = resid3_(q, level);
+  var rg = fg3_(q, level, lock);
+  var r = rg.x; var g = rg.yzw;
   var ok = 0.0;
-  let g0 = grad3_(q) * lock;
+  let g0 = g;
   let g02 = dot(g0, g0);
   if (!isfinite_(r) || !(g02 > 1e-24)) { return vec4<f32>(p, 0.0); }
   let r0 = r;
+  var gn = sqrt(g02);
   for (var it = 0; it < 12; it++) {
     if (abs(r) < tolF) { break; }
-    let g = grad3_(q) * lock;
     let g2 = dot(g, g);
     if (!(g2 > 1e-24)) { break; }
+    gn = sqrt(g2);
     var k = r / g2;
     var accepted = false;
-    for (var damp = 0; damp < 5; damp++) {
+    for (var damp = 0; damp < 4; damp++) {
       let trial = q - k * g;
       let d = trial - p;
       if (inBox3_(trial) && dot(d, d) <= maxDist * maxDist) {
-        let rt = resid3_(trial, level);
-        if (isfinite_(rt) && abs(rt) < abs(r)) { q = trial; r = rt; accepted = true; break; }
+        let t = fg3_(trial, level, lock);
+        if (isfinite_(t.x) && abs(t.x) < abs(r)) { q = trial; r = t.x; g = t.yzw; accepted = true; break; }
       }
       k = k * 0.5;
     }
     if (!accepted) { break; }
+    if (abs(k) * gn < tolW) { break; }
   }
-  if (abs(r) < tolF || abs(r) < 1e-5 * scale) { ok = 1.0; }
+  if (abs(r) < tolF || abs(r) < 1e-5 * scale || abs(r) < tolW * gn) { ok = 1.0; }
   else {
     let dir = -sign(r0) * g0 / sqrt(g02);
     var lo = 0.0; var hi = maxDist / 64.0; var found = false;
@@ -149,7 +153,7 @@ fn project3_(p: vec3<f32>, maxDist: f32, level: f32) -> vec4<f32> {
       for (var it = 0; it < 40; it++) {
         let mid = 0.5 * (lo + hi);
         let rm = resid3_(p + mid * dir, level);
-        if (abs(rm) < tolF) { lo = mid; hi = mid; break; }
+        if (abs(rm) < tolF || hi - lo < tolW) { lo = mid; hi = mid; break; }
         if (sign(rm) == sign(r0)) { lo = mid; } else { hi = mid; }
       }
       q = p + 0.5 * (lo + hi) * dir; ok = 1.0;
@@ -201,7 +205,7 @@ export function fusedIsosurface(backend: GpuBackend, values: GpuGrid, opts: Fuse
   const symbolic = opts.field?.kind === "symbolic" ? opts.field : undefined;
   const exact = opts.exact ?? !!symbolic;
   if (exact && !symbolic) throw new Error("fusedIsosurface: exact projection needs a symbolic field");
-  const fn = symbolic ? b.scalar(symbolic) : "", dx = symbolic ? b.scalar(symbolic, [0]) : "", dy = symbolic ? b.scalar(symbolic, [1]) : "", dz = symbolic ? b.scalar(symbolic, [2]) : "";
+  const fn = symbolic && exact ? b.scalar(symbolic) : "", grad = symbolic ? b.gradient(symbolic) : "", vg = symbolic && exact ? b.valueGradient(symbolic) : ""; // normals need the gradient even without projection
   const colour = opts.colour;
   const col = colour ? b.scalar(colour) : undefined;
   const maxDist = Math.hypot(hx, hy, hz);
@@ -236,7 +240,7 @@ fn gridGrad_(i: i32, j: i32, k: i32) -> vec3<f32> {
     select((val_(i, j1, k) - val_(i, j0, k)) / (f32(j1 - j0) * H.y), 0.0, j1 == j0),
     select((val_(i, j, k1) - val_(i, j, k0)) / (f32(k1 - k0) * H.z), 0.0, k1 == k0));
 }
-${exact ? projection3Wgsl(fn, dx, dy, dz, symbolic!.box) : ""}
+${exact ? projection3Wgsl(fn, vg, symbolic!.box) : ""}
 fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
 fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   let A = vec3<f32>(params[8], params[9], params[10]);
@@ -248,10 +252,10 @@ fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   let ca = CUBE_[a]; let cb = CUBE_[bb];
   let g = vec3<f32>(c) + vec3<f32>(ca) + (vec3<f32>(cb) - vec3<f32>(ca)) * t;
   var p = A + g * H;
-  ${exact ? `let pr = project3_(p, params[14], level); if (pr.w > 0.5) { p = pr.xyz; }` : ""}
+  ${exact ? `let pr = project3_(p, params[14], level, 1e-3 * params[14]); if (pr.w > 0.5) { p = pr.xyz; }` : ""}
   var out: Vert;
   out.p = p;
-  ${symbolic ? `let gr = vec3<f32>(${dx}(p, -1), ${dy}(p, -1), ${dz}(p, -1));` : `let ga = gridGrad_(c.x + ca.x, c.y + ca.y, c.z + ca.z); let gb = gridGrad_(c.x + cb.x, c.y + cb.y, c.z + cb.z); let gr = ga + (gb - ga) * t;`}
+  ${symbolic ? `let gr = ${grad}(p, -1);` : `let ga = gridGrad_(c.x + ca.x, c.y + ca.y, c.z + ca.z); let gb = gridGrad_(c.x + cb.x, c.y + cb.y, c.z + cb.z); let gr = ga + (gb - ga) * t;`}
   let l = length(gr);
   if (l > 0.0 && isfinite_(l)) { out.n = gr / l; } else { out.n = vec3<f32>(0.0, 0.0, 1.0); }
   out.c = colour_(p);

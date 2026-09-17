@@ -6,12 +6,17 @@
 //   * derivatives of sampled arguments are computed by core (grid
 //     differences) and uploaded;
 //   * pullbacks become coordinate maps;
+//   * net-backed fields are transpiled whole (nets.ts): one thread evaluates
+//     the net for its point; their derivatives are the autodiff programs;
 //   * anything else is sampled by core on the dispatch grid and uploaded.
 
 import {
   DenseGrid,
   DenseScalarFieldData,
   DenseVectorFieldData,
+  GRADIENT_VALUE_OUTPUT,
+  NetScalarFieldData,
+  NetVectorFieldData,
   PulledBackScalarFieldData,
   PulledBackVectorFieldData,
   SymbolicScalarFieldData,
@@ -21,7 +26,8 @@ import {
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
-import { FunctionEmitter, GRID_FLOATS, PRELUDE, bakedGrid, expandGrad, f32, gridWgsl, packGrid, vecType, type ArgBindings, type GridRef } from "./wgsl";
+import { NET_MAX_FLOATS, emitNetField, netFieldFloats } from "./nets";
+import { FunctionEmitter, GRID_FLOATS, OPAQUE_BOUND_WGSL, PRELUDE, bakedGrid, expandGrad, f32, gridWgsl, packGrid, vecType, type ArgBindings, type GridRef } from "./wgsl";
 
 export interface GpuProgram {
   code: string;
@@ -152,6 +158,12 @@ export class ProgramBuilder {
         this.fns.push(`fn ${nm}(p: ${vecType(this.D)}, pos: i32) -> f32 {\n  let q = ${this.mapCode(fd.map)};\n  return ${f32(k)} * ${inner}(q, pos);\n}`);
         return nm;
       }
+      if (fd instanceof NetScalarFieldData) {
+        // derivatives of a net field are net fields (autodiff): transpile the differentiated program
+        const target = dims.reduce<ScalarFieldData>((f, d) => f.derivative(d), fd);
+        const net = target instanceof NetScalarFieldData ? this.net(target) : undefined;
+        if (net) return net;
+      }
       // fallback: let core evaluate it on the dispatch grid
       const target = dims.reduce<ScalarFieldData>((f, d) => f.derivative(d), fd);
       return this.bufferReader(target.sampleOn(this.grid), this.grid, 1, 0);
@@ -162,6 +174,9 @@ export class ProgramBuilder {
     return this.memo(fd, "v", () => {
       const D = this.D, T = vecType(D);
       if (fd instanceof SymbolicVectorFieldData) {
+        // `grad(arg f)` of a net field (the viewer's ∇ uses): one backward program, not D component programs
+        const ast0 = fd.ast;
+        if (ast0.k === "grad" && ast0.s.k === "arg" && fd.args.scalars[ast0.s.name] instanceof NetScalarFieldData) return this.gradient(fd.args.scalars[ast0.s.name]!);
         const em = new FunctionEmitter(D, this.bindings(fd.args));
         const ast = expandGrad(fd.ast, gradient, D);
         const nm = this.name("vf");
@@ -174,6 +189,10 @@ export class ProgramBuilder {
         this.fns.push(`fn ${nm}(p: ${T}, pos: i32) -> ${T} {\n  let q = ${this.mapCode(fd.map)};\n  return ${inner}(q, pos);\n}`);
         return nm;
       }
+      if (fd instanceof NetVectorFieldData) {
+        const net = this.net(fd);
+        if (net) return net;
+      }
       // dense (or fallback: sampled by core on the dispatch grid), one reader per channel
       const grid = fd instanceof DenseVectorFieldData ? fd.samplePoints : this.grid;
       const data = fd instanceof DenseVectorFieldData ? fd.data : fd.sampleOn(this.grid);
@@ -185,13 +204,59 @@ export class ProgramBuilder {
     });
   }
 
+  /**
+   * `fn name(p, pos) -> vecD`: the gradient of a scalar field. A net field's gradient is ONE program (one backward
+   * pass for all components) — three component functions would inline the whole backward pass three times into
+   * every kernel that projects onto level sets; other data composes its component derivatives.
+   */
+  gradient(fd: ScalarFieldData): string {
+    return this.memo(fd, "grad", () => {
+      const D = this.D, T = vecType(D);
+      if (fd instanceof NetScalarFieldData) { const v = this.net(fd.gradient()); if (v) return v; }
+      const comps = Array.from({ length: D }, (_, d) => `${this.scalar(fd, [d])}(p, pos)`);
+      const nm = this.name("gr");
+      this.fns.push(`fn ${nm}(p: ${T}, pos: i32) -> ${T} {\n  return ${D === 1 ? comps[0] : `${T}(${comps.join(", ")})`};\n}`);
+      return nm;
+    });
+  }
+
+  /**
+   * `fn name(p, pos) -> vec(D+1)`: (value, gradient) of a scalar field in ONE evaluation — what Newton projection
+   * needs at every step. For a net the gradient program computes the forward pass anyway, so this halves the
+   * evaluations per step; other data composes value and gradient.
+   */
+  valueGradient(fd: ScalarFieldData): string {
+    return this.memo(fd, "vg", () => {
+      const D = this.D, T = vecType(D + 1);
+      if (fd instanceof NetScalarFieldData && netFieldFloats(fd.gradient()) <= NET_MAX_FLOATS) {
+        const nm = this.name("nvg");
+        this.fns.push(emitNetField(nm, fd.gradient().field, { D, upload: (d) => this.upload(d) }, [GRADIENT_VALUE_OUTPUT, fd.gradient().field.output])!.code);
+        return nm;
+      }
+      const f = this.scalar(fd), g = this.gradient(fd);
+      const nm = this.name("vg");
+      this.fns.push(`fn ${nm}(p: ${vecType(D)}, pos: i32) -> ${T} {\n  return ${T}(${f}(p, pos), ${g}(p, pos));\n}`);
+      return nm;
+    });
+  }
+
+  /** the transpiled net of a net-backed field, or undefined when it does not fit (the caller falls back) */
+  private net(fd: NetScalarFieldData | NetVectorFieldData): string | undefined {
+    if (netFieldFloats(fd) > NET_MAX_FLOATS) return undefined;
+    return this.memo(fd, "net", () => {
+      const nm = this.name("nf");
+      this.fns.push(emitNetField(nm, fd.field, { D: this.D, upload: (d) => this.upload(d) })!.code);
+      return nm;
+    });
+  }
+
   /** everything emitted so far (prelude + field functions) and the packed data, for kernels that add their own entry point */
   library(): { code: string; data: Float32Array } {
     const data = new Float32Array(Math.max(GRID_FLOATS, this.dataLength));
     packGrid(this.grid, data, 0);
     let o = GRID_FLOATS;
     for (const c of this.chunks) { data.set(c, o); o += c.length; }
-    return { code: [PRELUDE, "@group(0) @binding(1) var<storage, read> data: array<f32>;", this.dgCode, ...this.fns].join("\n\n"), data };
+    return { code: [PRELUDE, "@group(0) @binding(1) var<storage, read> data: array<f32>;", OPAQUE_BOUND_WGSL, this.dgCode, ...this.fns].join("\n\n"), data };
   }
 
   /** the complete program sampling `field` on the dispatch grid */

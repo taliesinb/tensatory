@@ -47,7 +47,7 @@ import { FusedGeometry } from "./gpuFused";
 import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, type MemoryUser } from "./cache";
-import { GpuRenderer, type Camera3D, gpuStats, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
+import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -203,6 +203,13 @@ let usable = { scalars: [] as string[], vectors: [] as string[] };
 interface ScalarUse { id: string; name: string; codomain: Codomain; data: ScalarFieldData }
 interface VectorUse { id: string; name: string; data: VectorFieldData }
 const useCache = new Map<string, ScalarUse | VectorUse>();
+
+/**
+ * Whether sampling `fd` is expensive for the current compute mode: net-backed data (and whatever derives from it)
+ * is evaluated on the CPU unless the GPU computes and can transpile the net (gpu/nets.ts), in which case it is as
+ * cheap as any symbolic field — exact isolines, full streamline grids and glyph lattices included.
+ */
+const costly = (fd: ScalarFieldData | VectorFieldData): boolean => fd.costly && !(modes.compute === "gpu" && !!sampler.gpu && gpuTranspilable(fd));
 const paren = (name: string) => (/^[\w.²³]+$/.test(name) ? name : `(${name})`);
 
 function useScalar(id: string | null | undefined): ScalarUse | undefined {
@@ -276,7 +283,7 @@ function rangeOf(f: ScalarUse): [number, number] {
     rangeCache.set(f.id, r);
     if (!rangePending.has(f.id)) {
       rangePending.add(f.id);
-      const gpu = sampler.gpu, id = f.id, grid = defaultStatsGrid(f.data.box);
+      const gpu = sampler.gpu, id = f.id, grid = costly(f.data) ? new DenseGrid([48, 48], f.data.box) : defaultStatsGrid(f.data.box);
       const resident = fused ? fused.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid);
       gpuStats(gpu, resident).then((st) => {
         if (!Number.isFinite(st.min)) return;
@@ -446,7 +453,7 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const metric = num("metric"), line = num("line") ?? 0;
   const tol = 0.25 * renderer.worldPerPixel;
   const ic = slotScalar("ic");
-  const exactWanted = f.data.kind === "symbolic" && metric === null;
+  const exactWanted = f.data.kind === "symbolic" && !costly(f.data) && metric === null; // costly (net) fields: marching squares only
   let rough = isoMoving() && exactWanted;
   const gridKey = `${grid.size.join("x")}|${viewBoxKey}`;
   const key = [f.id, gridKey, metric, line, ui.isoValue.value, num("split"), selKeyOf(f), tol.toExponential(2), ic?.id ?? "", rough].join("|");
@@ -543,10 +550,13 @@ function integrableVector(v: VectorUse, grid: DenseGrid): VectorFieldData | unde
  * a native grid and the 128 fallback depending on which scalar panels are enabled, which used to rescale the
  * streamlines whenever the colourfield or the isolines were toggled.
  */
+/** `?isoexact=0` turns the 2D exact (projected) isolines off — benchmarking marching squares against projection */
+const ISO_EXACT_2D = new URLSearchParams(location.search).get("isoexact") !== "0";
 const STREAM_N = 128;
+const STREAM_N_COSTLY = 32; // net-backed fields are evaluated on the CPU: keep the fixed grids small
 function streamGrid(v: VectorUse, box: Box): DenseGrid {
   if (v.data.samplePoints) return v.data.samplePoints;
-  return squareGrid(box, STREAM_N);
+  return squareGrid(box, costly(v.data) ? STREAM_N_COSTLY : STREAM_N);
 }
 
 /**
@@ -622,6 +632,8 @@ function streamlines(view: Box): StreamSet | undefined {
 
 /** most lattice points a frame samples; the spacing is coarsened until the lattice fits */
 const GLYPH_MAX_POINTS = 100_000;
+/** ... and for costly (net-backed, CPU-evaluated) fields, whose gradient costs 2D evaluations per point */
+const GLYPH_MAX_POINTS_COSTLY = 2_000;
 /** 3D lattices are spaced this many times wider than the control says: glyphs at every depth share the screen */
 const GLYPH_SPACING_3D = 2;
 /** glyphs shorter than this on screen are not drawn (3D: at the camera's target depth): they would only be noise */
@@ -651,9 +663,10 @@ function glyphLattice(v: VectorUse, region: Box, target: number): Lattice | unde
   const box = fbox.intersect(region);
   if (!box || !(target > 0)) { glyphLevelShown = undefined; return undefined; }
   let k = Math.max(0, Math.round(Math.log2(side / target)));
+  const maxPoints = costly(v.data) ? GLYPH_MAX_POINTS_COSTLY : GLYPH_MAX_POINTS;
   for (;;) {
     const lat = latticeIn(box, side / 2 ** k, fbox.a);
-    if (lat.pointCount <= GLYPH_MAX_POINTS) { glyphLevelShown = { level: k, spacing: lat.spacing, points: lat.pointCount }; return lat.pointCount ? lat : undefined; }
+    if (lat.pointCount <= maxPoints) { glyphLevelShown = { level: k, spacing: lat.spacing, points: lat.pointCount }; return lat.pointCount ? lat : undefined; }
     if (k === 0) { glyphLevelShown = undefined; return undefined; }
     k--;
   }
@@ -834,6 +847,7 @@ function view3dOf(): View3D | undefined {
     blur: () => num("metric"),
     smoothing: () => num("line") ?? 0,
     compute: () => modes.compute,
+    costly,
     showIso: () => ui.showIso.checked,
     exact: () => ui.isoExact.checked,
     showOutline: () => ui.isoOutline.checked,
@@ -909,10 +923,15 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       const metric = num("metric"), line = num("line") ?? 0;
       const raw = F.grid(gridKey(f, grid), f.data, grid);
       const values = metric === null ? raw : F.blur(gridKey(f, grid), raw, metric);
-      const exact = f.data.kind === "symbolic" && metric === null;
+      // Exact projection of a NET field is latency-bound (~40 ms per level: a lone lane runs Newton's evaluations
+      // serially through thread-private memory, whatever the vertex count), so while the level moves such fields show
+      // marching squares and turn exact when it settles (as the CPU path always did); analytic fields stay exact
+      const exact = f.data.kind === "symbolic" && !costly(f.data) && metric === null && ISO_EXACT_2D && !(f.data.costly && isoMoving());
       const [lo, hi] = rangeOf(f);
       const tol = 0.25 * renderer.worldPerPixel;
-      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}|${selKeyOf(f)}`;
+      // NOT the colormap selection: it only filters the levels (isoLevelParams) and colours the raster; a kernel is a
+      // shader compile (seconds for a net in Safari), and every set re-dispatches on its own level stamp anyway
+      const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}`;
       isoLevelParams().forEach((t, k) => {
         const level = f.codomain.fromParam(t, lo, hi);
         const segs = !exact && line > 0
@@ -1292,7 +1311,7 @@ function aboutText(bundle: Bundle): string {
   if (!d.toLowerCase().startsWith(bundle.name.toLowerCase())) return d;
   return d.slice(bundle.name.length).replace(/^[\s:.,;\-\u2013\u2014]*/, "") || d;
 }
-function setAbout(text: string): void { const el = $("pickAbout"); el.textContent = text; el.dataset.tip = text; }
+function setAbout(text: string): void { const el = $("pickAbout"); el.firstElementChild!.textContent = text; el.dataset.tip = text; }
 
 function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
   state.bundle = bundle; state.bundleFile = file;
@@ -1436,10 +1455,14 @@ let lastFrameKey = "", lastTier: Tier = "settled";
 const frameKey = () => [spaceDims(), autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
 /** what the resolution is spent on: failed steps are remembered per context */
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
+/** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
+const frameLog: { ms: number; dispatches: number; pipelines: number; recomputed: boolean }[] = [];
+(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu };
+
 function frame(now: number): void {
   const dt = state.paused ? 0 : Math.min(0.1, (now - lastT) / 1000);
   lastT = now;
-  if (pendingFrame) { const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined; autoRes().report({ ...r, ms: Math.max(now - t0, jsMs) }); }
+  if (pendingFrame) { const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined; autoRes().report({ ...r, jsMs, ms: Math.max(now - t0, jsMs) }); }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
@@ -1456,6 +1479,7 @@ function frame(now: number): void {
     const overCap = governMemory(a.capBytes);
     const bytes = memoryNow();
     pendingFrame = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: (gpu?.pipelinesBuilt ?? 0) !== p0, bytes, overCap, ctx: resCtx() };
+    frameLog.push({ ms: performance.now() - t0, dispatches: (gpu?.dispatches ?? 0) - d0, pipelines: (gpu?.pipelinesBuilt ?? 0) - p0, recomputed: pendingFrame.recomputed }); if (frameLog.length > 60) frameLog.shift();
     lastFrameKey = key;
     $("memv").textContent = `${fmtMB(bytes.total)}/${fmtMB(a.capBytes)}${a.pin !== undefined ? ` · pinned ${a.pin}` : a.note ? ` · ${a.note}` : ""}`;
   }

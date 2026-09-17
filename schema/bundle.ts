@@ -4,6 +4,7 @@ import type { FieldId, FieldSpec } from "./fields";
 import type { Point } from "./geometry";
 import type { ManifoldDefinitionSpec, ManifoldId } from "./manifolds";
 import type { ShowString } from "./math";
+import type { NetId, NetSpec } from "./nets";
 
 export const BUNDLE_VERSION = "0.1";
 
@@ -27,4 +28,5 @@ export type BundleSpec = {
   defaultManifold?: ManifoldId; // used by fields without `domain`; defaults to the sole manifold if there is exactly one
   fields: Record<FieldId, FieldSpec>;
   pointSets?: Record<PointSetId, PointSetSpec>;
+  nets?: Record<NetId, NetSpec>; // small neural networks (nets.ts); `net` / `netv` field data refers to them
 };

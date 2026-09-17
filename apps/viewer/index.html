@@ -22,7 +22,7 @@
   <div class="strip"><span class="title">bundle</span><span class="ticks"><button class="tickbtn" id="resetBtn" title="wipe local storage and reload">R</button><button class="tickbtn" id="logBtn" title="show console log">L</button><button class="tickbtn" id="uploadBtn" title="open a bundle JSON from disk (not persisted)">⤒</button><input type="file" id="pickFile" accept=".json,application/json" hidden></span></div>
   <div class="body">
     <div class="prow"><label data-tip="Which Tensatory data bundle to view; scroll or use ↑/↓ while hovering to switch.">bundle</label><select id="pickBundle"></select></div>
-    <div class="prow"><label>about</label><div class="pval about" id="pickAbout" data-tip=""></div></div>
+    <div class="prow"><label>about</label><div class="pval about" id="pickAbout" data-tip=""><span></span></div></div>
     <div class="prow"><label data-tip="Which of the bundle's spaces (manifolds) to view: a 2D space gets the colorfield / isolines / streamlines panels, a 3D space the isosurface panels. Point sets and fields belong to a space. Only 2D and 3D spaces are listed. ?space=id">space</label><select id="pickSpaceSel"></select></div>
     <div class="prow" id="pickErrRow" style="display:none"><label>errors</label><div class="pval err" id="pickErr"></div></div>
   </div>

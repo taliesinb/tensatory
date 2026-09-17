@@ -4,6 +4,8 @@ import { z } from "zod";
 import type {
   BoxSpec,
   FieldSpec,
+  NetScalarFieldDataSpec,
+  NetVectorFieldDataSpec,
   PointSpec,
   ScalarFieldDataSpec,
   ScalarFieldSpec,
@@ -17,6 +19,11 @@ import { Box } from "../geometry/box";
 import { DenseGrid } from "../geometry/grid";
 import { checkNamespaces, normalizeScalar, normalizeVector, type NameEnv } from "../symbolic/normalize";
 import { SymbolicScalarSchema, SymbolicVectorSchema } from "../symbolic/spec";
+import { NetScalarFieldData, NetVectorFieldData, fieldProgram, type NetField } from "../nets/fieldData";
+import type { Val } from "../nets/ops";
+import { compileNet, type ProgramResolver } from "../nets/program";
+import { inferNetField } from "../nets/shapes";
+import { NetScalarFieldDataObject, NetVectorFieldDataObject } from "../nets/spec";
 import { CodomainSchema } from "./codomain";
 import {
   DenseScalarFieldData,
@@ -66,6 +73,7 @@ export const ScalarFieldDataSchema: z.ZodType<ScalarFieldDataSpec> = z.lazy(() =
       vectors: z.record(z.string(), z.union([fieldId, VectorFieldDataSchema])).optional(),
     }),
     z.object({ type: z.literal("symbolic"), expr: SymbolicScalarSchema, box: BoxSchema.optional(), consts }),
+    NetScalarFieldDataObject,
   ]),
 );
 
@@ -83,6 +91,7 @@ export const VectorFieldDataSchema: z.ZodType<VectorFieldDataSpec> = z.lazy(() =
       vectors: z.record(z.string(), z.union([fieldId, VectorFieldDataSchema])).optional(),
     }),
     z.object({ type: z.literal("symbolicv"), expr: SymbolicVectorSchema, box: BoxSchema.optional(), consts }),
+    NetVectorFieldDataObject,
   ]),
 );
 
@@ -113,16 +122,35 @@ export const FieldSchema: z.ZodType<FieldSpec> = z.discriminatedUnion("kind", [S
 /*******************************************************/
 /* builders */
 
-/** resolves field ids referenced from within field data specs */
+/** resolves field ids (and net ids) referenced from within field data specs */
 export interface FieldResolver {
   scalar(id: string, path: string[]): ScalarFieldData;
   vector(id: string, path: string[]): VectorFieldData;
+  nets?: ProgramResolver;
 }
+
+export const noNets: ProgramResolver = {
+  net: (id, path) => { throw new SpecError(`cannot resolve net reference "${id}" outside a bundle`, path); },
+  program: (id, path) => { throw new SpecError(`cannot resolve net reference "${id}" outside a bundle`, path); },
+};
 
 export const noResolver: FieldResolver = {
   scalar: (id, path) => { throw new SpecError(`cannot resolve field reference "${id}" outside a bundle`, path); },
   vector: (id, path) => { throw new SpecError(`cannot resolve field reference "${id}" outside a bundle`, path); },
 };
+
+/** shape-check a net-backed field spec and fold it into one single-input program */
+function netField(spec: NetScalarFieldDataSpec | NetVectorFieldDataSpec, dimCount: number, resolver: FieldResolver, path: string[]): NetField {
+  const nets = resolver.nets ?? noNets;
+  inferNetField(spec, dimCount, nets, path);
+  const base = typeof spec.net === "string" ? nets.program(spec.net, [...path, "net"]) : compileNet(spec.net, nets, [...path, "net"]);
+  const arrays = new Map<string, Val>();
+  for (const [n, a] of Object.entries(spec.arrays ?? {})) {
+    if (typeof a === "string" || !("shape" in a)) throw new NotSupportedError(`external arrays are not loaded yet`, [...path, "arrays", n]);
+    arrays.set(n, { arr: buildArray(a, [...path, "arrays", n]), rank: a.shape.length });
+  }
+  return { program: fieldProgram(base, spec.inputs, arrays, dimCount, path), output: spec.output, nets };
+}
 
 function resolvePoint(spec: PointSpec, dimCount: number, path: string[]): number[] {
   if (Array.isArray(spec) && spec.every((x) => typeof x === "number")) {
@@ -184,6 +212,8 @@ export function buildScalarFieldData(spec: ScalarFieldDataSpec, dimCount: number
       const env: NameEnv = { dimCount, consts: spec.consts ?? {}, scalarArgs: new Set(), vectorArgs: new Set() };
       return new SymbolicScalarFieldData(normalizeScalar(spec.expr, env, [...path, "expr"]), dimCount, undefined, boxOrUnit(spec.box, dimCount, [...path, "box"]), path);
     }
+    case "net":
+      return new NetScalarFieldData(dimCount, boxOrUnit(spec.box, dimCount, [...path, "box"]), netField(spec, dimCount, resolver, path));
   }
 }
 
@@ -213,5 +243,7 @@ export function buildVectorFieldData(spec: VectorFieldDataSpec, dimCount: number
       const env: NameEnv = { dimCount, consts: spec.consts ?? {}, scalarArgs: new Set(), vectorArgs: new Set() };
       return new SymbolicVectorFieldData(normalizeVector(spec.expr, env, [...path, "expr"]), dimCount, undefined, boxOrUnit(spec.box, dimCount, [...path, "box"]), path);
     }
+    case "netv":
+      return new NetVectorFieldData(dimCount, boxOrUnit(spec.box, dimCount, [...path, "box"]), netField(spec, dimCount, resolver, path));
   }
 }

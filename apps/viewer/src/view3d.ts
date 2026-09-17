@@ -95,6 +95,8 @@ export interface View3DContext {
   /** Taubin iterations on the welded mesh (non-exact surfaces), 0 = none */
   smoothing(): number;
   compute(): "cpu" | "gpu";
+  /** sampling this data is expensive in the current compute mode (a CPU-evaluated net): keep fixed grids small */
+  costly(fd: ScalarFieldData | VectorFieldData): boolean;
   showIso(): boolean;
   /** project vertices onto the true level set along the exact gradient (symbolic fields) */
   exact(): boolean;
@@ -301,6 +303,7 @@ export class View3D implements MemoryUser {
   /** the grid streamlines are measured in (step = ½ cell, `length` counts steps, `tail` cells) and symbolic vectors
    *  are sampled on: FIXED, not the adaptive isosurface resolution, so line lengths do not change with the tier */
   static readonly STREAM_N = 64;
+  static readonly STREAM_N_COSTLY = 16; // net-backed fields are evaluated on the CPU
 
   /** the resident I_V grid, blurred when `metric` is set */
   private volumeGpu(iv: Use3, grid: DenseGrid): { values: GpuGrid; key: string } {
@@ -320,7 +323,11 @@ export class View3D implements MemoryUser {
     return { values: this.cpuValues.getOr(bk, () => boxBlur(grid, vals, r)), key: bk };
   }
   /** exact projection applies to symbolic fields contoured as they are (a blurred field is only known on the grid) */
-  private isExact(iv: Use3): boolean { return this.c.exact() && iv.data.kind === "symbolic" && !(this.c.blur()! > 0); }
+  /** exact projection runs value + gradient (one forward + one backward pass of the net) per Newton step per vertex:
+   *  at 256³ that is millions of vertices × ~10 steps in ONE dispatch, which exceeds the GPU watchdog and loses the
+   *  device. Nets (`costly` data) therefore keep marching-tetrahedra vertices in 3D; normals still use the exact
+   *  gradient, and 2D isolines of nets are exact. */
+  private isExact(iv: Use3): boolean { return this.c.exact() && iv.data.kind === "symbolic" && !iv.data.costly && !(this.c.blur()! > 0); }
 
   private meshesGpu(iv: Use3, ic: Use3 | undefined, grid: DenseGrid, levels: number[]): GpuMesh[] {
     const { values, key: gk } = this.volumeGpu(iv, grid);
@@ -583,7 +590,7 @@ export class View3D implements MemoryUser {
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
-    if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, View3D.STREAM_N)); if (layer) lines.push(layer); }
+    if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, this.c.costly(sv.data) ? View3D.STREAM_N_COSTLY : View3D.STREAM_N)); if (layer) lines.push(layer); }
     if (gv) { const layer = this.glyphLayer(gv, cbox); if (layer) lines.push(layer); } else this.glyphMaxNorm = NaN;
     this.renderer.resize();
     this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });

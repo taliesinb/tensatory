@@ -35,11 +35,18 @@ to `NotSupportedError`. Nothing outside JSON has ever been loaded.
 4. **Charts / affine frames** (`schema/mappings.ts`, currently commented
    out): fields on a low-dimensional frame inside a high-dimensional
    parameter manifold; 1-forms vs vectors under pullback.
-5. **Server-side computation**: a Tensatory server that materializes fields on
+5. **Nets** ([nets.md](nets.md)): the schema is implemented end to end —
+   shape inference, CPU reference evaluator, WebGPU transpiler, autodiff
+   (`grad` as a program rewrite; exact derivatives of net fields), the iris
+   example checked against PyTorch, CPU / GPU agreement. Next: streaming the
+   dataset axis in the transpiler so nets larger than function-scope memory
+   run on the GPU, elementwise fusion in the emitter, and an MLP-on-MNIST
+   bundle (needs 1 for the weights and validation set).
+6. **Server-side computation**: a Tensatory server that materializes fields on
    demand (e.g. a Torch script sampling a new grid), with the same
    `FieldDataSpec` vocabulary; and client-side computation via third-party JS
    (WebGPU training).
-6. **Schema housekeeping** when 1 lands: drop `CellSpec` (a `part` fixing
+7. **Schema housekeeping** when 1 lands: drop `CellSpec` (a `part` fixing
    every axis is a cell), drop or use `VectorStatistics` and the phantom
    `ArraySpec<_N>` parameter, decide whether `stats.quantiles` / `histogram`
    (parsed, never read) stay. The `part` change is backward compatible, so
@@ -47,25 +54,25 @@ to `NotSupportedError`. Nothing outside JSON has ever been loaded.
 
 ## Geometry and rendering
 
-7. **Interval-arithmetic quadtree seeding** for exact isolines — an interval
+8. **Interval-arithmetic quadtree seeding** for exact isolines — an interval
    evaluator over the expression tree, prune cells whose enclosure excludes
    the level, subdivide the rest; removes the seed-grid topology limitation
    ([isolines.md](isolines.md)). Generalizes to an octree for 3D.
-8. **3D, second round** ([3d.md](3d.md) "Next"): fused surface smoothing
+9. **3D, second round** ([3d.md](3d.md) "Next"): fused surface smoothing
    (welded connectivity on the device — Taubin is CPU-only today), temporal
    supersampling, depth-tested points, per-level colouring through the I_V
    colormap when no I_C is set, colouring the face outlines by I_C.
-9. **GPU backend** ([gpu.md](gpu.md) "Next stages"): `timestamp-query` for
+10. **GPU backend** ([gpu.md](gpu.md) "Next stages"): `timestamp-query` for
    real GPU frame times in the adaptive resolution instead of vsync-quantized
    rAF intervals; reuse same-sized resident buffers across frames (a moving
    crop allocates and frees its grids every frame).
-10. **Glyph rescaling** ([glyphs.md](glyphs.md)): the arrows are normalized
+11. **Glyph rescaling** ([glyphs.md](glyphs.md)): the arrows are normalized
    linearly against the longest vector sampled, which leaves most of a
    heavy-tailed field (gradient norms spanning orders of magnitude) as dots —
    add a `scale` choice (linear / log / rank or quantile), and perhaps a
    "comet" glyph (width tapering along the shaft, which the line pipelines'
    particle ramp already provides).
-11. **CPU path**: a Web Worker for contouring / integration in `compute = cpu`
+12. **CPU path**: a Web Worker for contouring / integration in `compute = cpu`
    mode; `diff` emitting shared references rather than copies (smaller trees
    before CSE); compiling value + gradient as one function for projection
    ([performance.md](performance.md)).

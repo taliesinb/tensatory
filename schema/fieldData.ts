@@ -12,23 +12,28 @@
 //                      All sampled arguments must have IDENTICAL sample points
 //                      (same grid size and box); it is an error otherwise.
 // * translate/scale -> same kind as the wrapped data (sample points move with it)
+// * net/netv        -> symbolic (a net evaluated at inputs that are expressions of
+//                      the coordinates; see nets.ts)
 
 import type { ArraySpec, SizedArraySpec } from "./arrays";
 import type { FieldId } from "./fields";
 import type { BoxSpec, ScaledSpaceOpSpec, TranslatedSpaceOpSpec } from "./geometry";
 import type { Real } from "./math";
 import type { ScalarStatistics } from "./statistics";
+import type { NetScalarFieldDataSpec, NetVectorFieldDataSpec } from "./nets";
 import type { ConstArgName, ScalarArgName, SymbolicScalar, SymbolicVector, VectorArgName } from "./symbolic";
 
 export type ScalarFieldDataSpec =
   | SampledScalarFieldDataSpec
   | DerivedScalarFieldDataSpec
-  | SymbolicScalarFieldDataSpec;
+  | SymbolicScalarFieldDataSpec
+  | NetScalarFieldDataSpec;
 
 export type VectorFieldDataSpec =
   | SampledVectorFieldDataSpec
   | DerivedVectorFieldDataSpec
-  | SymbolicVectorFieldDataSpec;
+  | SymbolicVectorFieldDataSpec
+  | NetVectorFieldDataSpec;
 
 /*************************************************/
 /* sampled: backed by array(s) of sampled values */

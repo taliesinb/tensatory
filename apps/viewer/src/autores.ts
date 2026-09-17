@@ -26,8 +26,11 @@ export interface FrameReport {
   tier: Tier;
   /** the frame recomputed geometry (grid / levels changed); false = it only rendered what was resident */
   recomputed: boolean;
-  /** the frame built a pipeline / kernel (shader compile): its time is not representative */
+  /** the frame built a pipeline / kernel (shader compile): its time is not representative ... */
   compiled: boolean;
+  /** ... unless its JS time alone already blows the budget: a compile stalls the GPU, not the main thread, so a long
+   *  JS time is real CPU work (a costly field sampled on the dispatch grid) and is judged like any slow sample */
+  jsMs?: number;
   /** memory after the frame: `total` = everything held (device + JS arrays; the part outside the working set is
    *  trimmable), `volume` / `surface` = the frame's working set, ∝ nᴰ and ∝ nᴰ⁻¹ */
   bytes: { total: number; volume: number; surface: number };
@@ -160,9 +163,12 @@ export class AutoRes {
 
     if (r.tier === "settled" && r.recomputed) {
       // one recomputation while idle: a single latency sample decides (no cooldown: the sample after a step IS the probe)
-      if (r.compiled || this.afterCompile) { this.afterCompile = r.compiled; this.onRemeasure?.(); return; }
+      const cpuSlow = (r.jsMs ?? 0) > SETTLED_BUDGET_MS * 1.5;
+      if ((r.compiled || this.afterCompile) && !cpuSlow) { this.afterCompile = r.compiled; this.onRemeasure?.(); return; }
+      this.afterCompile = false;
       if (r.ms > SETTLED_BUDGET_MS * 1.5) {
-        if (!this.slowSeen) { this.slowSeen = true; this.note = `set@${this.steps[idx]} ${r.ms.toFixed(0)}ms, remeasuring`; this.onRemeasure?.(); return; }
+        // (a remeasure would hit the caches, so CPU-slow samples are believed at once)
+        if (!this.slowSeen && !cpuSlow) { this.slowSeen = true; this.note = `set@${this.steps[idx]} ${r.ms.toFixed(0)}ms, remeasuring`; this.onRemeasure?.(); return; }
         if (idx > 0) { this.fail(r.ctx, "settled", idx); this.set("settled", idx - 1, `${r.ms.toFixed(0)}ms`); }
         return;
       }
