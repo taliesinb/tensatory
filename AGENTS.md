@@ -142,7 +142,8 @@ profiling test.
   apex at the arrow's tip), all within L/2 of the point so none overlaps;
   ≤ 3 `Seg` / `Seg3` records each — lines, or one filled-triangle record
   (base in a / b, apex in arc / len / phase) for the renderers' triangle
-  pipelines (`kind: "triangles"`) — coloured by V_C. Fused path:
+  pipelines (`kind: "triangles"`; in 3D drawn as ray-cast CONES with true
+  depth and a subtle headlight) — coloured by V_C. Fused path:
   one kernel per (field, colour) — measure (`atomicMax` on norm bits) + emit
   — with the lattice as a dispatch parameter. Linear normalization only;
   rescaling for heavy-tailed norms is the planned follow-up. No animation.

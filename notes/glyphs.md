@@ -51,7 +51,9 @@ never overlap in any of them (the `glyph` control, `?vglyph=`):
   the arrowhead so the direction reads); one polyline, two segments;
 * **triangle** — a solid, narrow triangle with its base centred on the
   point (half-width `TRIANGLE_HALF_WIDTH` = 0.22 of its length) and its
-  apex where the arrow's tip would be, `p + L/2·u`; ONE record, filled.
+  apex where the arrow's tip would be, `p + L/2·u`; ONE record, filled. In
+  3D the record is drawn as a **cone** — the triangle's solid of revolution
+  — so it reads from every direction.
 
 3D barbs / bases lie in the plane of the vector and the axis it is least
 aligned with (`glyphNormal`). Zero and non-finite vectors get no glyph.
@@ -64,10 +66,18 @@ pipeline: `a`, `b` = the base's ends, the apex in the spare floats (`arc`,
 `GpuLineLayer3D.kind` = `"triangles"` selects the pipeline, which draws each
 record as two halves (apex–a–mid, apex–mid–b) so the six instance vertices
 cover the triangle exactly once — no double blending in 2D. The Canvas 2D
-renderer fills `TriangleLayer`s binned by colour like its lines. In 3D a flat
-triangle seen edge-on is a sliver (the arrow, extruded in screen space, is
-not): a fatter 3D glyph (two crossed triangles, or a tetrahedron) is a
-possible follow-up.
+renderer fills `TriangleLayer`s binned by colour like its lines.
+
+**3D cones** (`GpuRenderer3D`, `CONES3`): a flat triangle seen edge-on is a
+sliver, so the 3D pipeline draws each record as a cone (apex, base centre =
+mid(a, b), radius = |a − b|/2) by ray casting: the vertex shader emits a
+camera-facing square in the plane of the cone's bounding sphere's silhouette
+(the six instance vertices), the fragment shader intersects the eye ray with
+the finite cone (`((X−A)·d)² = cos²α |X−A|²`, `t ∈ [0, h]`) and the base
+disc, keeps the nearest hit, writes `frag_depth` from its clip position (so
+the translucent shells composite correctly over it) and shades the analytic
+normal with a subtle headlight (0.62 + 0.38 diffuse + a faint highlight).
+Exact silhouettes, no tessellation, one instance per glyph.
 
 **Normalization** is against the longest vector *actually sampled* (this
 lattice, this view), the `longest` readout: zooming into a flat region

@@ -26,7 +26,8 @@ export interface GpuMeshLayer {
 /** thick screen-space lines with depth: Seg3 records, or 2D Seg records embedded on the plane `embed.axis = embed.depth` */
 export interface GpuLineLayer3D {
   segs: GpuSegments3 | GpuSegments;
-  /** thick lines (default), or filled triangles read from Seg3 records (a, b = base, arc / len / phase = apex) */
+  /** thick lines (default), or "triangle" records (a, b = base, arc / len / phase = apex) drawn as CONES: the
+   *  triangle's solid of revolution, ray-cast per fragment with true depth and a subtle headlight */
   kind?: "lines" | "triangles";
   embed?: { axis: number; depth: number };
   /** css px */
@@ -267,11 +268,14 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   return vec4<f32>(rgb * bright, 1.0);
 }`;
 
-// filled triangles from Seg3 records (glyphs): a, b = the base, (arc, len, phase) = the apex; two halves per instance
-// (apex-a-mid, apex-mid-b) so the six vertices cover the triangle once. Same uniform block as the lines.
-const TRIANGLES3 = `
-struct LineU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, particles: vec4<f32>, embed: vec4<f32>, viewport: vec4<f32>, cropLo: vec4<f32> }
-@group(0) @binding(0) var<uniform> u: LineU;
+// Cones from Seg3 "triangle" records (glyphs): a, b = the base's ends, (arc, len, phase) = the apex; the record's
+// triangle is drawn as its solid of revolution about the axis apex → base centre. Ray-cast impostors: the vertex
+// shader emits a camera-facing quad covering the cone's bounding sphere (six vertices, one instance per glyph),
+// the fragment shader intersects the eye ray with the finite cone and its base disc, writes the true depth and
+// shades the analytic normal with a subtle headlight. Exact silhouettes, no tessellation.
+const CONES3 = `
+struct ConeU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, cropLo: vec4<f32> }
+@group(0) @binding(0) var<uniform> u: ConeU;
 @group(0) @binding(1) var<storage, read> segs: array<f32>;
 @group(0) @binding(2) var lut: texture_2d<f32>;
 @group(0) @binding(3) var lutSampler: sampler;
@@ -283,20 +287,64 @@ fn param(value: f32, m: vec4<f32>) -> f32 {
   t = clamp(t, 0.0, 1.0);
   return select(t, 1.0 - t, m.w > 0.5);
 }
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) value: f32 }
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) value: f32, @location(2) apex: vec3<f32>, @location(3) axis: vec3<f32>, @location(4) dims: vec2<f32> }
 @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+  var out: VOut;
   let o = ii * ${SEG3_FLOATS}u;
   let a = vec3<f32>(segs[o], segs[o + 1u], segs[o + 2u]); let b = vec3<f32>(segs[o + 4u], segs[o + 5u], segs[o + 6u]);
-  let apex = vec3<f32>(segs[o + 8u], segs[o + 9u], segs[o + 10u]); let m = 0.5 * (a + b);
-  var p = apex;
-  if (vi == 1u) { p = a; } else if (vi == 2u || vi == 4u) { p = m; } else if (vi == 5u) { p = b; }
-  var out: VOut;
+  let apex = vec3<f32>(segs[o + 8u], segs[o + 9u], segs[o + 10u]);
+  let base = 0.5 * (a + b); let r = 0.5 * distance(a, b);
+  let ax = base - apex; let h = length(ax);
+  if (!(h > 0.0) || !(r > 0.0)) { out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return out; }
+  // bounding sphere of the cone, and the plane of its silhouette as seen from the eye: a square there covers it
+  let centre = 0.5 * (apex + base); let R = 1.02 * sqrt(0.25 * h * h + r * r);
+  let toC = centre - u.eye.xyz; let D = length(toC);
+  if (D <= R) { out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return out; }
+  let v = toC / D;
+  let plane = u.eye.xyz + v * (D - R * R / D);
+  let rp = R * sqrt(D * D - R * R) / D;
+  var upw = vec3<f32>(0.0, 0.0, 1.0);
+  if (abs(v.z) > 0.9) { upw = vec3<f32>(1.0, 0.0, 0.0); }
+  let right = normalize(cross(v, upw)); let up = cross(right, v);
+  // 0:(-,-) 1:(+,-) 2:(-,+) 3:(-,+) 4:(+,-) 5:(+,+)
+  let sx = select(-1.0, 1.0, vi == 1u || vi == 4u || vi == 5u);
+  let sy = select(-1.0, 1.0, vi == 2u || vi == 3u || vi == 5u);
+  let p = plane + rp * (sx * right + sy * up);
   out.pos = u.viewProj * vec4<f32>(p, 1.0);
   out.world = p; out.value = segs[o + 3u];
+  out.apex = apex; out.axis = ax / h; out.dims = vec2<f32>(h, r);
   return out;
 }
-@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
-  if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
+struct FOut { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 }
+@fragment fn fs(in: VOut) -> FOut {
+  let O = u.eye.xyz; let Dr = normalize(in.world - O);
+  let A = in.apex; let d = in.axis; let h = in.dims.x; let r = in.dims.y;
+  // finite cone: points X with t = (X − A)·d ∈ [0, h] and |X − A − t d| = t r / h  ⇔  ((X−A)·d)² = cos²α |X−A|²
+  let cos2 = h * h / (h * h + r * r);
+  let v = O - A;
+  let dd = dot(Dr, d); let vd = dot(v, d);
+  let qa = dd * dd - cos2; let qb = 2.0 * (dd * vd - cos2 * dot(Dr, v)); let qc = vd * vd - cos2 * dot(v, v);
+  var best = 1e30; var n = vec3<f32>(0.0);
+  let disc = qb * qb - 4.0 * qa * qc;
+  if (disc >= 0.0 && abs(qa) > 1e-12) {
+    let sq = sqrt(disc);
+    for (var k = 0; k < 2; k++) {
+      let s = select((-qb + sq) / (2.0 * qa), (-qb - sq) / (2.0 * qa), k == 0);
+      if (s <= 0.0 || s >= best) { continue; }
+      let X = O + s * Dr; let q = X - A; let t = dot(q, d);
+      if (t < 0.0 || t > h) { continue; }
+      let radial = q - t * d; let rl = length(radial);
+      if (rl > 0.0) { best = s; n = normalize(radial / rl * h - d * r); }
+    }
+  }
+  // the base disc
+  if (abs(dd) > 1e-9) {
+    let s = dot(A + h * d - O, d) / dd;
+    if (s > 0.0 && s < best) { let X = O + s * Dr; if (distance(X, A + h * d) <= r) { best = s; n = d; } }
+  }
+  if (best >= 1e30) { discard; }
+  let X = O + best * Dr;
+  if (u.crop.w > 0.5 && (any(X > u.crop.xyz) || any(X < u.cropLo.xyz))) { discard; }
   var rgb = u.color.rgb;
   if (u.style.z > 0.5) {
     if (isnan_(in.value)) { discard; }
@@ -304,7 +352,14 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
     if (c.a < 0.5) { discard; }
     rgb = c.rgb;
   }
-  return vec4<f32>(rgb, 1.0);
+  // subtle headlight: the shape reads from the shading, the colour stays the glyph's
+  let diff = max(dot(n, -Dr), 0.0);
+  let lit = rgb * (0.62 + 0.38 * diff) + vec3<f32>(0.08 * pow(diff, 16.0));
+  let clip = u.viewProj * vec4<f32>(X, 1.0);
+  var o: FOut;
+  o.color = vec4<f32>(lit, 1.0);
+  o.depth = clip.z / clip.w;
+  return o;
 }`;
 
 const OPAQUE = `${MESH_COMMON}
@@ -351,7 +406,7 @@ export class GpuRenderer3D {
   private readonly transparent: GPURenderPipeline;
   private readonly composite: GPURenderPipeline;
   private readonly lines: GPURenderPipeline;
-  private readonly triangles: GPURenderPipeline;
+  private readonly cones: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly luts = new WeakMap<Lut, GPUTexture>();
   private readonly uniformPool: GPUBuffer[] = [];
@@ -396,11 +451,11 @@ export class GpuRenderer3D {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
     });
-    const triMod = dev.createShaderModule({ code: TRIANGLES3 });
-    this.triangles = dev.createRenderPipeline({
+    const coneMod = dev.createShaderModule({ code: CONES3 });
+    this.cones = dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: triMod, entryPoint: "vs" },
-      fragment: { module: triMod, entryPoint: "fs", targets: [{ format: this.format }] },
+      vertex: { module: coneMod, entryPoint: "vs" },
+      fragment: { module: coneMod, entryPoint: "fs", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
     });
@@ -487,7 +542,28 @@ export class GpuRenderer3D {
     f.set([w, h, dpr, 0], 44);
     f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 48);
     return this.backend.device.createBindGroup({
-      layout: (L.kind === "triangles" ? this.triangles : this.lines).getBindGroupLayout(0),
+      layout: this.lines.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniform(f) } },
+        { binding: 1, resource: { buffer: L.segs.buffer } },
+        { binding: 2, resource: this.lutTexture(L.lut ?? WHITE_LUT).createView() },
+        { binding: 3, resource: this.sampler },
+      ],
+    });
+  }
+
+  /** ConeU: viewProj, eye, style (–, –, useLut), color, map, crop, cropLo */
+  private bindCones(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[]): GPUBindGroup {
+    const f = new Float32Array(64);
+    f.set(viewProj, 0);
+    f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
+    f.set([0, 1, L.lut && L.map ? 1 : 0, 0], 20);
+    f.set([L.color[0], L.color[1], L.color[2], 1], 24);
+    f.set([L.map?.lo ?? 0, L.map?.hi ?? 1, L.map?.log ? 1 : 0, L.map?.flip ? 1 : 0], 28);
+    f.set([crop[0]!, crop[1]!, crop[2]!, L.uncropped ? 0 : 1], 32);
+    f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 36);
+    return this.backend.device.createBindGroup({
+      layout: this.cones.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform(f) } },
         { binding: 1, resource: { buffer: L.segs.buffer } },
@@ -515,7 +591,11 @@ export class GpuRenderer3D {
       colorAttachments: [{ view: colour, clearValue: { r, g, b, a: 1 }, loadOp: "clear", storeOp: "store" }],
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
-    for (const L of scene.lines ?? []) { p1.setPipeline(L.kind === "triangles" ? this.triangles : this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); p1.drawIndirect(L.segs.indirect, 0); }
+    for (const L of scene.lines ?? []) {
+      if (L.kind === "triangles") { p1.setPipeline(this.cones); p1.setBindGroup(0, this.bindCones(L, viewProj, eye, crop, cropLo)); }
+      else { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); }
+      p1.drawIndirect(L.segs.indirect, 0);
+    }
     for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop, cropLo)); p1.drawIndirect(L.mesh.indirect, 0); }
     p1.end();
     if (trans.length) {
