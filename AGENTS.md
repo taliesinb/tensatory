@@ -134,10 +134,9 @@ profiling test.
   interleaved `DenseGrid` cosets so every sampling path serves it. The
   lattice is FIXED IN SPACE: nested levels anchored at the field's box
   corner, level k = longest side / 2^k (2Λ ⊂ Λ, so refining tessellates);
-  the view only picks the finest level still ≥ the panel's pixels apart
-  (3D: at the camera target, ×2). The whole box is sampled while ≤ 100k
-  points (view-independent normalization), else the view ∩ box (3D: the
-  cropped box). Glyphs
+  the view only picks the level nearest the panel's pixels in log₂ (3D: at
+  the camera target, ×2). Only the visible part (view ∩ box; 3D the cropped
+  box) is sampled and normalized against, ≤ 100k points. Glyphs
   have length budget `L = 0.9 · spacing · |v| / max |v|` with the maximum
   over the vectors ACTUALLY sampled (the `longest` readout) and three styles
   (`glyph`: arrow = centred shaft + head; head = a chevron of length L

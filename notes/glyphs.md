@@ -28,17 +28,22 @@ is a nested hierarchy of levels anchored at the field's box corner, level
 `k` having spacing `longest box side / 2^k`. Since `2Λ ⊂ Λ` for both the
 hexagonal and the FCC lattice, every finer level contains the coarser one's
 points — refining *tessellates*, nothing shifts. The view only picks the
-level: the finest one whose spacing is still at least the control's pixels
-(2D: `px · worldPerPixel`; 3D: at the camera's target depth, doubled by
+level: the one whose spacing is nearest the control's pixels in log₂ (so the
+on-screen spacing stays within a factor √2 of the control; 2D: `px ·
+worldPerPixel`, 3D: at the camera's target depth, doubled by
 `GLYPH_SPACING_3D` since glyphs at every depth share the screen). Panning,
 cropping and zooming within a level move no glyph; zooming across a level
 halves the spacing and quadruples (2D) / octuples (3D) the points. The
-`lattice` readout shows the level, its spacing and its point count.
+`lattice` readout shows the level, its spacing and the points in view.
 
-**Extent.** The whole field box is sampled while the level fits
-`GLYPH_MAX_POINTS` (100k), so the normalizing maximum is view-independent
-too; beyond that only the view ∩ box (3D: the cropped box ∩ box) is sampled
-(`(in view)` in the readout), coarsening while even that exceeds the cap.
+**Extent and normalization.** Only the visible part of the lattice (view ∩
+box; 3D: the cropped box ∩ box) is sampled, and the normalizing maximum is
+the longest of those vectors — the glyphs pack the most information into
+what is on screen, and one rule holds at every zoom. (An earlier version
+sampled the whole box while affordable, which made the normalization switch
+rule between zoom levels — on a heavy-tailed field, one huge glyph far out
+and a well-scaled field close in.) The level is coarsened while even the
+visible part exceeds `GLYPH_MAX_POINTS` (100k).
 
 ## The glyphs
 
