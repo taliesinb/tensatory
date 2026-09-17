@@ -23,14 +23,17 @@ import { ProgramBuilder } from "./program";
 import { SEG_APPEND_WGSL, SEG_WGSL, type GpuSegments } from "./segments";
 import { GRID_FLOATS, f32, packGrid, vecType } from "./wgsl";
 
-/** params: [pointCount (bits), cosets (bits), fill, head, spacing, capacity (bits), style (bits: index into GLYPH_STYLES), pad, then one packed grid per coset] */
+/** params: [pointCount (bits), cosets (bits), fill, head, spacing, capacity (bits), style (bits: index into GLYPH_STYLES), minLength, then one packed grid per coset] */
 const LATTICE_OFF = 8;
 
-export function packLattice(l: Lattice, fill: number, head: number, capacity: number, style: GlyphStyle = "arrow"): Float32Array {
+/** per-dispatch glyph parameters (the rest of GlyphOptions is fixed when the kernel is built) */
+export interface GlyphDispatch { style?: GlyphStyle; minLength?: number }
+
+export function packLattice(l: Lattice, fill: number, head: number, capacity: number, style: GlyphStyle = "arrow", minLength = 0): Float32Array {
   const f = new Float32Array(LATTICE_OFF + GRID_FLOATS * Math.max(1, l.cosets.length));
   const u = new Uint32Array(f.buffer);
   u[0] = l.pointCount; u[1] = l.cosets.length; u[5] = Math.min(0xffffffff, capacity); u[6] = Math.max(0, GLYPH_STYLES.indexOf(style));
-  f[2] = fill; f[3] = head; f[4] = l.spacing;
+  f[2] = fill; f[3] = head; f[4] = l.spacing; f[7] = minLength;
   l.cosets.forEach((g, c) => packGrid(g, f, LATTICE_OFF + GRID_FLOATS * c));
   return f;
 }
@@ -56,11 +59,11 @@ fn latticePoint(i0: i32) -> ${T} {
 }
 
 export interface FusedGlyphs {
-  /** evaluate the field on `lattice`, normalize and append the glyphs of `style` (default the options') into `segs`
-   *  (allocated by the caller with at least `capacityFor(lattice)` records and reset; a fuller set is counted but not
-   *  written, like the other kernels) */
-  dispatch(segs: GpuSegments | GpuSegments3, lattice: Lattice, style?: GlyphStyle): void;
-  run(segs: GpuSegments | GpuSegments3, lattice: Lattice, style?: GlyphStyle): Promise<void>;
+  /** evaluate the field on `lattice`, normalize and append the glyphs (style / cutoff from `d`, defaults from the
+   *  options) into `segs` (allocated by the caller with at least `capacityFor(lattice)` records and reset; a fuller
+   *  set is counted but not written, like the other kernels) */
+  dispatch(segs: GpuSegments | GpuSegments3, lattice: Lattice, d?: GlyphDispatch): void;
+  run(segs: GpuSegments | GpuSegments3, lattice: Lattice, d?: GlyphDispatch): Promise<void>;
   /** segments a lattice appends at most: three per point */
   capacityFor(lattice: Lattice): number;
   /** the normalizing norm of the last dispatch (the longest vector sampled), read back once the queue reaches it */
@@ -81,7 +84,7 @@ export function fusedGlyphs(backend: GpuBackend, field: VectorFieldData, colour?
   const vf = b.vector(field);
   const col = colour ? b.scalar(colour) : undefined;
   const lib = b.library();
-  const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, defaultStyle = opts.style ?? "arrow";
+  const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, defaultStyle = opts.style ?? "arrow", defaultMin = opts.minLength ?? 0;
   let vecs = backend.createBuffer({ size: 16, usage: RESIDENT_USAGE });
   const mx = backend.createBuffer({ size: 16, usage: RESIDENT_USAGE });
 
@@ -146,6 +149,7 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
   let fill = params[2]; let head = params[3]; let spacing = params[4];
   let len = sqrt(l2);
   let L = fill * spacing * len / vmax;
+  if (L < params[7]) { return; } // shorter than the cutoff: visual noise, not drawn
   let u = v / len;
   let nrm = glyphNormal(u);
   let p = latticePoint(i);
@@ -170,12 +174,12 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
   }
 }`;
 
-  const kernels = (segs: GpuSegments | GpuSegments3, lattice: Lattice, style: GlyphStyle) => {
+  const kernels = (segs: GpuSegments | GpuSegments3, lattice: Lattice, d: GlyphDispatch) => {
     if (lattice.dimCount !== D) throw new Error("fusedGlyphs: lattice and field dimensions differ");
     const n = Math.max(1, lattice.pointCount);
     const bytes = Math.max(16, n * D * 4);
     if (vecs.size < bytes) { vecs.destroy(); vecs = backend.createBuffer({ size: bytes, usage: RESIDENT_USAGE }); } // safe: earlier dispatches are already submitted
-    const params = packLattice(lattice, fill, head, segs.capacity, style);
+    const params = packLattice(lattice, fill, head, segs.capacity, d.style ?? defaultStyle, d.minLength ?? defaultMin);
     backend.device.queue.writeBuffer(mx, 0, zero);
     return [
       { code: measure, invocations: n, buffers: [{ role: "rw" as const, buffer: vecs }, { role: "r" as const, data: lib.data }, { role: "r" as const, data: params }, { role: "rw" as const, buffer: mx }] },
@@ -185,8 +189,8 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
   const zero = new Uint32Array(4);
   return {
     capacityFor: (lattice) => 3 * Math.max(1, lattice.pointCount),
-    dispatch(segs, lattice, style = defaultStyle) { for (const k of kernels(segs, lattice, style)) backend.dispatch(k); },
-    async run(segs, lattice, style = defaultStyle) { for (const k of kernels(segs, lattice, style)) await backend.runKernel(k); },
+    dispatch(segs, lattice, d = {}) { for (const k of kernels(segs, lattice, d)) backend.dispatch(k); },
+    async run(segs, lattice, d = {}) { for (const k of kernels(segs, lattice, d)) await backend.runKernel(k); },
     async readMaxNorm() {
       const bits = await backend.readCounter(mx, 0);
       return new Float32Array(Uint32Array.of(bits).buffer)[0]!;

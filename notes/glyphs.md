@@ -62,6 +62,14 @@ never overlap in any of them (the `glyph` control, `?vglyph=`):
 3D barbs / bases lie in the plane of the vector and the axis it is least
 aligned with (`glyphNormal`). Zero and non-finite vectors get no glyph.
 
+**Cutoff.** Glyphs shorter than `GLYPH_MIN_PX` (4 css px) on screen are not
+drawn — with heavy-tailed norms most of a lattice would otherwise be dots of
+noise (the Rosenbrock valley). Core's `minLength` / the kernel's `params[7]`
+apply it in world units: 2D exactly (`4 · worldPerPixel`), 3D line styles at
+the camera's target depth; 3D cones are culled exactly in the cone vertex
+shader by the projected diameter of their bounding sphere
+(`GpuLineLayer3D.minPx`), so perspective is honoured.
+
 **Records.** Arrow and head are line segments in `Seg` / `Seg3` records for
 the line pipelines. A triangle reuses the same record for a *triangle*
 pipeline: `a`, `b` = the base's ends, the apex in the spare floats (`arc`,

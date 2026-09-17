@@ -26,6 +26,8 @@ export interface GpuMeshLayer {
 /** thick screen-space lines with depth: Seg3 records, or 2D Seg records embedded on the plane `embed.axis = embed.depth` */
 export interface GpuLineLayer3D {
   segs: GpuSegments3 | GpuSegments;
+  /** cones (kind "triangles") whose projected size is under this many css px are not drawn (default 0) */
+  minPx?: number;
   /** thick lines (default), or "triangle" records (a, b = base, arc / len / phase = apex) drawn as CONES: the
    *  triangle's solid of revolution, ray-cast per fragment with true depth and a subtle headlight */
   kind?: "lines" | "triangles";
@@ -274,7 +276,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
 // the fragment shader intersects the eye ray with the finite cone and its base disc, writes the true depth and
 // shades the analytic normal with a subtle headlight. Exact silhouettes, no tessellation.
 const CONES3 = `
-struct ConeU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, cropLo: vec4<f32> }
+// viewport: width, height (device px), dpr, minPx (css px: cones whose projected bounding sphere is smaller are culled)
+struct ConeU { viewProj: mat4x4<f32>, eye: vec4<f32>, style: vec4<f32>, color: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, cropLo: vec4<f32>, viewport: vec4<f32> }
 @group(0) @binding(0) var<uniform> u: ConeU;
 @group(0) @binding(1) var<storage, read> segs: array<f32>;
 @group(0) @binding(2) var lut: texture_2d<f32>;
@@ -306,6 +309,11 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   var upw = vec3<f32>(0.0, 0.0, 1.0);
   if (abs(v.z) > 0.9) { upw = vec3<f32>(1.0, 0.0, 0.0); }
   let right = normalize(cross(v, upw)); let up = cross(right, v);
+  // screen size of the silhouette: below the cutoff the glyph is noise, not drawn
+  let c0 = u.viewProj * vec4<f32>(plane, 1.0); let c1 = u.viewProj * vec4<f32>(plane + rp * right, 1.0);
+  if (c0.w <= 1e-6 || c1.w <= 1e-6) { out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return out; }
+  let px = length((c1.xy / c1.w - c0.xy / c0.w) * 0.5 * u.viewport.xy) / u.viewport.z;
+  if (2.0 * px < u.viewport.w) { out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); return out; }
   // 0:(-,-) 1:(+,-) 2:(-,+) 3:(-,+) 4:(+,-) 5:(+,+)
   let sx = select(-1.0, 1.0, vi == 1u || vi == 4u || vi == 5u);
   let sy = select(-1.0, 1.0, vi == 2u || vi == 3u || vi == 5u);
@@ -555,8 +563,10 @@ export class GpuRenderer3D {
   }
 
   /** ConeU: viewProj, eye, style (–, –, useLut), color, map, crop, cropLo */
-  private bindCones(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[]): GPUBindGroup {
+  private bindCones(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[], w: number, h: number): GPUBindGroup {
     const f = new Float32Array(64);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    f.set([w, h, dpr, L.minPx ?? 0], 40);
     f.set(viewProj, 0);
     f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
     f.set([0, 1, L.lut && L.map ? 1 : 0, 0], 20);
@@ -594,7 +604,7 @@ export class GpuRenderer3D {
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
     for (const L of scene.lines ?? []) {
-      if (L.kind === "triangles") { p1.setPipeline(this.cones); p1.setBindGroup(0, this.bindCones(L, viewProj, eye, crop, cropLo)); }
+      if (L.kind === "triangles") { p1.setPipeline(this.cones); p1.setBindGroup(0, this.bindCones(L, viewProj, eye, crop, cropLo, w, h)); }
       else { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); }
       p1.drawIndirect(L.segs.indirect, 0);
     }

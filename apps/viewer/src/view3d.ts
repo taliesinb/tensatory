@@ -120,6 +120,8 @@ export interface View3DContext {
   /** glyph spacing in css px at the camera's target depth */
   glyphSpacingPx(): number;
   glyphStyle(): GlyphStyle;
+  /** glyphs shorter than this many css px (at the camera's target depth) are not drawn */
+  glyphMinPx(): number;
   /** the lattice of `v` inside `region` at world `spacing` (main.ts: anchored, capped), undefined when empty */
   glyphLattice(v: VectorUse3, region: Box, spacing: number): Lattice | undefined;
 }
@@ -175,6 +177,7 @@ export class View3D implements MemoryUser {
   private readonly glyphKernels = new Cache<FusedGlyphs>(4, (k) => k.destroy());
   private readonly glyphSets = new Cache<{ segs: GpuSegments3; stamp: string; pending: boolean; read: string }>(4, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly glyphCpu = new Cache<{ segs: GpuSegments3; max: number }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
+  private readonly glyphSamples = new Cache<{ pts: Float64Array; vectors: Float64Array }>(4, () => {}, (e) => e.pts.byteLength + e.vectors.byteLength);
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
@@ -183,7 +186,7 @@ export class View3D implements MemoryUser {
   }
 
   private get volumeCaches(): Cache<unknown>[] { return [this.grids, this.cpuValues, this.vgrids, this.vsampled] as Cache<unknown>[]; }
-  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels] as Cache<unknown>[]; }
+  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels, this.glyphSamples] as Cache<unknown>[]; }
 
   clear(): void {
     for (const c of [...this.volumeCaches, ...this.surfaceCaches]) c.clear();
@@ -497,8 +500,10 @@ export class View3D implements MemoryUser {
     const worldPerPx = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.regionHeight();
     const lat = c.glyphLattice(v, cbox, c.glyphSpacingPx() * worldPerPx);
     if (!lat) return undefined;
-    const vc = c.glyphColour(), style = c.glyphStyle();
-    const latKey = `${lat.spacing.toExponential(6)}|${lat.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}|${style}`;
+    // cones are culled exactly by their projected size in the renderer; the line styles use the cutoff at the target depth
+    const vc = c.glyphColour(), style = c.glyphStyle(), minLength = style === "triangle" ? 0 : c.glyphMinPx() * worldPerPx;
+    const latOnly = `${lat.spacing.toExponential(6)}|${lat.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}`;
+    const latKey = `${latOnly}|${style}|${minLength.toPrecision(4)}`;
     const kk = `${v.id}|${vc?.id ?? ""}`;
     let segs: GpuSegments3;
     if (c.compute() === "gpu") {
@@ -507,15 +512,20 @@ export class View3D implements MemoryUser {
       let e = this.glyphSets.get(kk);
       if (e && (e.segs.capacity < need || e.segs.capacity > need * 4)) { this.glyphSets.delete(kk); e = undefined; }
       if (!e) e = this.glyphSets.set(kk, { segs: allocSegments3(c.gpu, Math.ceil(need * 1.5), false), stamp: "", pending: false, read: "" });
-      if (e.stamp !== latKey) { resetSegments3(c.gpu, e.segs); kernel.dispatch(e.segs, lat, style); e.stamp = latKey; this.readGlyphMax(e, kernel); }
+      if (e.stamp !== latKey) { resetSegments3(c.gpu, e.segs); kernel.dispatch(e.segs, lat, { style, minLength }); e.stamp = latKey; this.readGlyphMax(e, kernel); }
       segs = e.segs;
     } else {
-      const entry = this.glyphCpu.getOr(`${kk}|${latKey}`, () => {
+      // the samples are per lattice (a zoom within a level only moves the cutoff, which rebuilds the arrows alone)
+      const sampled = this.glyphSamples.getOr(`${v.id}|${latOnly}`, () => {
         const pts = latticePoints(lat);
         const vectors = new Float64Array(lat.pointCount * 3);
         let o = 0;
         for (const g of lat.cosets) { const s = v.data.sampleOn(g); vectors.set(s, o); o += s.length; }
-        const g = arrowGlyphs(pts, vectors, 3, lat.spacing, { style });
+        return { pts, vectors };
+      });
+      const entry = this.glyphCpu.getOr(`${kk}|${latKey}`, () => {
+        const { pts, vectors } = sampled;
+        const g = arrowGlyphs(pts, vectors, 3, lat.spacing, { style, minLength });
         const at = (p: number) => vc!.data.value([pts[3 * p]!, pts[3 * p + 1]!, pts[3 * p + 2]!]) ?? NaN;
         const packed = style === "triangle"
           ? packTriangles3(g.triangles, vc ? Float64Array.from(g.triPoint, at) : undefined)
@@ -526,7 +536,7 @@ export class View3D implements MemoryUser {
     }
     const colour = vc ? c.colour(vc) : undefined;
     // the lattice already lies inside the cropped box: a glyph near a face may poke out by up to L/2 rather than be cut
-    return { segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, color: [1, 1, 1], uncropped: true, ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
+    return { segs, kind: style === "triangle" ? "triangles" : "lines", minPx: c.glyphMinPx(), width: 1.5, color: [1, 1, 1], uncropped: true, ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
   }
   /** one readback of the normalizing norm in flight per set; a newer dispatch is read after it */
   private readGlyphMax(e: { stamp: string; pending: boolean; read: string }, kernel: FusedGlyphs): void {

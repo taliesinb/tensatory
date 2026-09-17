@@ -94,6 +94,8 @@ export interface GlyphOptions {
   head?: number;
   /** the shape (default "arrow") */
   style?: GlyphStyle;
+  /** glyphs shorter than this (world units; the viewer passes a few pixels' worth) are not drawn: visual noise cutoff */
+  minLength?: number;
 }
 export const GLYPH_FILL = 0.9, GLYPH_HEAD = 0.3;
 /** the barbs leave the tip at 30° from the shaft: back `head·L` along it, out `HEAD_SPREAD·head·L` sideways */
@@ -149,7 +151,7 @@ export interface Glyphs {
  * normalization).
  */
 export function arrowGlyphs(points: ArrayLike<number>, vectors: ArrayLike<number>, D: number, spacing: number, opts: GlyphOptions & { maxNorm?: number } = {}): Glyphs {
-  const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, style = opts.style ?? "arrow";
+  const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, style = opts.style ?? "arrow", minLength = opts.minLength ?? 0;
   const vmax = opts.maxNorm ?? maxNorm(vectors, D);
   const lines: Float64Array[] = [], point: number[] = [], tris: number[] = [], triPoint: number[] = [];
   const done = (): Glyphs => ({ lines, point: Int32Array.from(point), triangles: Float64Array.from(tris), triPoint: Int32Array.from(triPoint), maxNorm: vmax > 0 ? vmax : 0 });
@@ -161,6 +163,7 @@ export function arrowGlyphs(points: ArrayLike<number>, vectors: ArrayLike<number
     for (let d = 0; d < D; d++) { const v = vectors[i * D + d]!; l2 += v * v; }
     if (!Number.isFinite(l2) || !(l2 > 0)) continue;
     const len = Math.sqrt(l2), L = (fill * spacing * len) / vmax;
+    if (L < minLength) continue;
     for (let d = 0; d < D; d++) u[d] = vectors[i * D + d]! / len;
     const nrm = glyphNormal(u, D);
     if (style === "arrow") {

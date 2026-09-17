@@ -624,6 +624,8 @@ function streamlines(view: Box): StreamSet | undefined {
 const GLYPH_MAX_POINTS = 100_000;
 /** 3D lattices are spaced this many times wider than the control says: glyphs at every depth share the screen */
 const GLYPH_SPACING_3D = 2;
+/** glyphs shorter than this on screen are not drawn (3D: at the camera's target depth): they would only be noise */
+const GLYPH_MIN_PX = 4;
 const glyphSpacingPx = (): number => num("vspace") ?? 24;
 const glyphStyle = (): GlyphStyle => (ui.vglyph.value === "head" || ui.vglyph.value === "triangle" ? ui.vglyph.value : "arrow");
 
@@ -679,8 +681,8 @@ function glyphs2d(): GlyphSet | undefined {
   if (!v) { glyphCache = undefined; return undefined; }
   const lat = glyphLattice(v, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
   if (!lat) { glyphCache = undefined; return undefined; }
-  const vc = slotScalar("vc"), style = glyphStyle();
-  const key = [v.id, latticeKey(lat), vc?.id ?? "", style].join("|");
+  const vc = slotScalar("vc"), style = glyphStyle(), minLength = GLYPH_MIN_PX * renderer.worldPerPixel;
+  const key = [v.id, latticeKey(lat), vc?.id ?? "", style, minLength.toPrecision(4)].join("|");
   if (glyphCache?.key === key) return glyphCache;
   const parts = lat.cosets.map((g) => sampler.request(`vec:${v.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`, v.data, g));
   if (parts.some((p) => !p)) return glyphCache; // still sampling
@@ -688,7 +690,7 @@ function glyphs2d(): GlyphSet | undefined {
   let o = 0;
   for (const p of parts) { vectors.set(p!, o); o += p!.length; }
   const points = latticePoints(lat);
-  const g = arrowGlyphs(points, vectors, 2, lat.spacing, { style });
+  const g = arrowGlyphs(points, vectors, 2, lat.spacing, { style, minLength });
   let colours: (Float64Array | undefined)[] | undefined, triColours: Float64Array | undefined;
   if (vc) {
     const toParam = paramOf(vc);
@@ -853,6 +855,7 @@ function view3dOf(): View3D | undefined {
     glyphColour: () => slotScalar("vc"),
     glyphSpacingPx: () => glyphSpacingPx() * GLYPH_SPACING_3D,
     glyphStyle,
+    glyphMinPx: () => GLYPH_MIN_PX,
     glyphLattice: (v, region, spacing) => glyphLattice(v as VectorUse, region, spacing),
   });
   return view3d;
@@ -971,7 +974,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       const lat = glyphLattice(gv, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
       if (lat) {
         const style = glyphStyle();
-        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), style, vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
+        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), { style, minLength: GLYPH_MIN_PX * renderer.worldPerPixel }, vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
         gs.lines.push({ segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, alpha, color: [1, 1, 1], ...colour });
       }
     } else if (gl) {

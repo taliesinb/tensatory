@@ -4,7 +4,7 @@
 // needs no readback and no await. Results are cached by key; a level change
 // re-dispatches into the same segment set.
 
-import type { DenseGrid, GlyphStyle, Lattice, ScalarFieldData, StreamlineSeeds, VectorFieldData } from "@tensatory/core";
+import type { DenseGrid, Lattice, ScalarFieldData, StreamlineSeeds, VectorFieldData } from "@tensatory/core";
 import {
   SEG_FLOATS,
   allocSegments,
@@ -19,6 +19,7 @@ import {
   uploadSegments,
   type FusedGlyphs,
   type FusedIsolines,
+  type GlyphDispatch,
   type FusedStreamlineOptions,
   type FusedStreamlines,
   type GpuBackend,
@@ -170,12 +171,12 @@ export class FusedGeometry implements MemoryUser {
 
   /**
    * Arrow glyphs of `field` on `lattice` (three segments per point), coloured by `colour`. The kernel is built once
-   * per `kernelKey` (field + colour) and re-dispatched whenever `latticeKey` or the `style` changes (a pan, zoom or
-   * spacing change); the set is regrown when the lattice outgrows it. `onMax` receives the normalizing norm once the
+   * per `kernelKey` (field + colour) and re-dispatched whenever `latticeKey` or the dispatch parameters (style,
+   * cutoff) change; the set is regrown when the lattice outgrows it. `onMax` receives the normalizing norm once the
    * readback lands.
    */
-  glyphs(kernelKey: string, field: VectorFieldData, lattice: Lattice, latticeKey: string, style: GlyphStyle, colour: ScalarFieldData | undefined, onMax?: (max: number) => void): GpuSegments {
-    latticeKey = `${latticeKey}|${style}`;
+  glyphs(kernelKey: string, field: VectorFieldData, lattice: Lattice, latticeKey: string, d: GlyphDispatch, colour: ScalarFieldData | undefined, onMax?: (max: number) => void): GpuSegments {
+    latticeKey = `${latticeKey}|${d.style ?? ""}|${(d.minLength ?? 0).toPrecision(4)}`;
     const kernel = this.glyphKernels.getOr(kernelKey, () => fusedGlyphs(this.gpu, field, colour));
     const need = kernel.capacityFor(lattice);
     let e = this.glyphSets.get(kernelKey);
@@ -183,7 +184,7 @@ export class FusedGeometry implements MemoryUser {
     if (!e) e = this.glyphSets.set(kernelKey, { segs: allocSegments(this.gpu, Math.ceil(need * 1.5), false), stamp: "", pending: false, read: "" });
     if (e.stamp !== latticeKey) {
       resetSegments(this.gpu, e.segs);
-      kernel.dispatch(e.segs, lattice, style);
+      kernel.dispatch(e.segs, lattice, d);
       e.stamp = latticeKey;
       if (onMax) this.readGlyphMax(e, kernel, onMax);
     }

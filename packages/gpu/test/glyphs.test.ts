@@ -81,7 +81,7 @@ describe("fused glyphs", () => {
     expect((await readSegments(gpu, segs2)).length / SEG_FLOATS).toBe(3 * nonzero);
     // head through the same kernel: exactly core's segments, 2 per glyph
     resetSegments(gpu, segs);
-    await kernel.run(segs, lattice, "head");
+    await kernel.run(segs, lattice, { style: "head" });
     const o2 = await readSegments(gpu, segs);
     const cpu2 = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style: "head" });
     expect(o2.length / SEG_FLOATS).toBe(cpu2.lines.length * 2);
@@ -90,9 +90,16 @@ describe("fused glyphs", () => {
     let miss = 0;
     for (const [k, c] of w2) if ((g2.get(k) ?? 0) !== c) miss++;
     expect(miss).toBeLessThan(w2.size * 0.01 + 1);
+    // the cutoff drops exactly the glyphs core drops
+    resetSegments(gpu, segs);
+    const minLength = 0.4 * lattice.spacing;
+    await kernel.run(segs, lattice, { style: "head", minLength });
+    const cut = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style: "head", minLength });
+    expect(cut.lines.length).toBeLessThan(cpu2.lines.length);
+    expect((await readSegments(gpu, segs)).length / SEG_FLOATS).toBe(cut.lines.length * 2);
     // triangle: one filled record per glyph — base in a / b, apex in (arc, len) — equal to core's triangles
     resetSegments(gpu, segs);
-    await kernel.run(segs, lattice, "triangle");
+    await kernel.run(segs, lattice, { style: "triangle" });
     const o3 = await readSegments(gpu, segs);
     const cpu3 = arrowGlyphs(pts, vectors, 2, lattice.spacing, { style: "triangle" });
     expect(o3.length / SEG_FLOATS).toBe(cpu3.triangles.length / 6);

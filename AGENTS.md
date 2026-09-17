@@ -143,6 +143,7 @@ profiling test.
   (`glyph`: arrow = centred shaft + head; head = a chevron of length L
   centred on the point; triangle = solid narrow triangle, base on the point,
   apex at the arrow's tip), all within L/2 of the point so none overlaps;
+  glyphs under 4 px on screen are culled (3D cones exactly, by projected size);
   ≤ 3 `Seg` / `Seg3` records each — lines, or one filled-triangle record
   (base in a / b, apex in arc / len / phase) for the renderers' triangle
   pipelines (`kind: "triangles"`; in 3D drawn as ray-cast CONES with true
