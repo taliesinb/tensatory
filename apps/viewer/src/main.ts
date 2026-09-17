@@ -635,17 +635,33 @@ function visibleWorld(): Box {
 }
 
 /**
- * The glyph lattice of vector use `v` inside `region` (the view, or the cropped box in 3D) with nearest-neighbour
- * distance `spacing` (world), anchored at the field's box corner so a pan moves no glyph; coarsened while it would
- * exceed GLYPH_MAX_POINTS. Undefined when the region misses the field.
+ * The glyph lattice of vector use `v` for a view whose pixels are `minSpacing` world units apart × the control's
+ * pixels — i.e. the smallest world spacing the view allows. The lattice is FIXED IN SPACE: level k has spacing
+ * `longest box side / 2^k`, anchored at the field's box corner, so every finer level contains the coarser one
+ * (2Λ ⊂ Λ for the hex and FCC lattices) and the view only picks k — the finest level still at least `minSpacing`
+ * apart. Panning, cropping or a zoom that stays within a level moves no glyph; crossing a level tessellates.
+ * The whole field box is sampled while it fits GLYPH_MAX_POINTS (so the normalization is view-independent too);
+ * beyond that only `region` (the view, or the cropped box in 3D), coarsening while even that exceeds the cap.
+ * Undefined when the region misses the field.
  */
-function glyphLattice(v: VectorUse, region: Box, spacing: number): Lattice | undefined {
-  const box = v.data.box.intersect(region);
-  if (!box || !(spacing > 0)) return undefined;
-  let lat = latticeIn(box, spacing, v.data.box.a);
-  while (lat.pointCount > GLYPH_MAX_POINTS) { spacing *= 1.5; lat = latticeIn(box, spacing, v.data.box.a); }
-  return lat.pointCount ? lat : undefined;
+function glyphLattice(v: VectorUse, region: Box, minSpacing: number): Lattice | undefined {
+  const fbox = v.data.box, side = Math.max(...fbox.size) || 1;
+  const box = fbox.intersect(region);
+  if (!box || !(minSpacing > 0)) { glyphLevelShown = undefined; return undefined; }
+  let k = Math.max(0, Math.floor(Math.log2(side / minSpacing)));
+  const pick = (lat: Lattice, whole: boolean): Lattice | undefined => { glyphLevelShown = { level: k, spacing: lat.spacing, points: lat.pointCount, whole }; return lat.pointCount ? lat : undefined; };
+  for (;;) {
+    const s = side / 2 ** k;
+    const whole = latticeIn(fbox, s, fbox.a);
+    if (whole.pointCount <= GLYPH_MAX_POINTS) return pick(whole, true);
+    const part = latticeIn(box, s, fbox.a);
+    if (part.pointCount <= GLYPH_MAX_POINTS) return pick(part, false);
+    if (k === 0) { glyphLevelShown = undefined; return undefined; }
+    k--;
+  }
 }
+/** the level the last lattice was built at (for the panel readout) */
+let glyphLevelShown: { level: number; spacing: number; points: number; whole: boolean } | undefined;
 const latticeKey = (l: Lattice): string => `${l.spacing.toExponential(6)}|${l.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}`;
 
 /** arrow / head styles fill `lines` (+ per-vertex colours), the triangle style `triangles` (+ one colour per triangle) */
@@ -772,6 +788,8 @@ function glyphLabels(): void {
   $("vspacev").textContent = `${ui.vspace.value ?? "—"} px`;
   $("vAlphav").textContent = ui.vAlpha.value === null ? "—" : (+ui.vAlpha.value).toFixed(2);
   const gv = glyphVector();
+  const lv = gv && glyphLevelShown ? `level ${glyphLevelShown.level} · ${fmt3(glyphLevelShown.spacing)} apart · ${fmtCount(glyphLevelShown.points)} pts${glyphLevelShown.whole ? "" : " (in view)"}` : "";
+  $("vlevelv").textContent = lv || "—";
   $("vmaxv").textContent = gv && Number.isFinite(glyphMaxShown) && glyphMaxShown > 0 ? `|${gv.name}| = ${fmt3(glyphMaxShown)}` : "—";
 }
 

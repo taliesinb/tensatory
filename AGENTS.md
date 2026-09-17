@@ -131,10 +131,13 @@ profiling test.
 * Vector field glyphs (`notes/glyphs.md`; `core/src/flow/glyphs.ts`,
   `gpu/src/glyphs.ts`): the V_∇ field as static arrows on the densest
   lattice — hexagonal in 2D, face-centred cubic in 3D — represented as
-  interleaved `DenseGrid` cosets so every sampling path serves it. Spacing =
-  the `vector field` panel's pixels × world-per-pixel (3D: at the camera
-  target, ×2), anchored at the field's box corner (pans move no glyph), over
-  the view ∩ field box (3D: the cropped box); capped at 100k points. Glyphs
+  interleaved `DenseGrid` cosets so every sampling path serves it. The
+  lattice is FIXED IN SPACE: nested levels anchored at the field's box
+  corner, level k = longest side / 2^k (2Λ ⊂ Λ, so refining tessellates);
+  the view only picks the finest level still ≥ the panel's pixels apart
+  (3D: at the camera target, ×2). The whole box is sampled while ≤ 100k
+  points (view-independent normalization), else the view ∩ box (3D: the
+  cropped box). Glyphs
   have length budget `L = 0.9 · spacing · |v| / max |v|` with the maximum
   over the vectors ACTUALLY sampled (the `longest` readout) and three styles
   (`glyph`: arrow = centred shaft + head; head = a chevron of length L

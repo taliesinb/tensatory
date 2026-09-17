@@ -23,18 +23,22 @@ GPU read-back, resident sampling) serves it unchanged; the GPU kernel walks
 the lattice as packed grid headers in its params. Points are numbered coset
 by coset, row-major within each (`latticePoints`).
 
-**Anchoring.** The lattice is anchored at the field's box corner, not at the
-view: a pan moves no glyph (new ones enter at the edges), only a zoom changes
-the spacing — and then every glyph shows a freshly sampled vector.
+**Fixed in space.** The lattice does not follow the view continuously: it
+is a nested hierarchy of levels anchored at the field's box corner, level
+`k` having spacing `longest box side / 2^k`. Since `2Λ ⊂ Λ` for both the
+hexagonal and the FCC lattice, every finer level contains the coarser one's
+points — refining *tessellates*, nothing shifts. The view only picks the
+level: the finest one whose spacing is still at least the control's pixels
+(2D: `px · worldPerPixel`; 3D: at the camera's target depth, doubled by
+`GLYPH_SPACING_3D` since glyphs at every depth share the screen). Panning,
+cropping and zooming within a level move no glyph; zooming across a level
+halves the spacing and quadruples (2D) / octuples (3D) the points. The
+`lattice` readout shows the level, its spacing and its point count.
 
-**Spacing from the view.** The control is the nearest-neighbour distance in
-screen pixels (default 24). 2D: `spacing · worldPerPixel`, over the visible
-world rectangle ∩ the field's box. 3D: the world distance is taken at the
-camera's target depth (`2 d tan(fov/2) / regionHeight`), doubled
-(`GLYPH_SPACING_3D`, since glyphs at every depth share the screen), over the
-cropped box ∩ the field's box — a small crop is a close-up, exactly like the
-isosurface grid. The lattice is coarsened by 1.5× steps while it would exceed
-`GLYPH_MAX_POINTS` (100k).
+**Extent.** The whole field box is sampled while the level fits
+`GLYPH_MAX_POINTS` (100k), so the normalizing maximum is view-independent
+too; beyond that only the view ∩ box (3D: the cropped box ∩ box) is sampled
+(`(in view)` in the readout), coarsening while even that exceeds the cap.
 
 ## The glyphs
 
