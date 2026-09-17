@@ -76,7 +76,7 @@ camera-facing square in the plane of the cone's bounding sphere's silhouette
 the finite cone (`((X−A)·d)² = cos²α |X−A|²`, `t ∈ [0, h]`) and the base
 disc, keeps the nearest hit, writes `frag_depth` from its clip position (so
 the translucent shells composite correctly over it) and shades the analytic
-normal with a subtle headlight (0.62 + 0.38 diffuse + a faint highlight).
+normal with a key light between the eye and above-left (0.3 + 0.7 diffuse + a highlight). Glyph layers are `uncropped`: the lattice already lies inside the cropped box, so a cone near a face pokes out by up to L/2 instead of being cut flat.
 Exact silhouettes, no tessellation, one instance per glyph.
 
 **Normalization** is against the longest vector *actually sampled* (this

@@ -352,9 +352,11 @@ struct FOut { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 }
     if (c.a < 0.5) { discard; }
     rgb = c.rgb;
   }
-  // subtle headlight: the shape reads from the shading, the colour stays the glyph's
-  let diff = max(dot(n, -Dr), 0.0);
-  let lit = rgb * (0.62 + 0.38 * diff) + vec3<f32>(0.08 * pow(diff, 16.0));
+  // a key light between the eye and above-left of the scene, so every cone shows a lit and a shaded side
+  let l = normalize(-Dr + vec3<f32>(0.35, 0.25, 0.8));
+  let diff = max(dot(n, l), 0.0);
+  let spec = pow(max(dot(n, normalize(l - Dr)), 0.0), 24.0);
+  let lit = rgb * (0.3 + 0.7 * diff) + vec3<f32>(0.18 * spec);
   let clip = u.viewProj * vec4<f32>(X, 1.0);
   var o: FOut;
   o.color = vec4<f32>(lit, 1.0);

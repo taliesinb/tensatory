@@ -525,7 +525,8 @@ export class View3D implements MemoryUser {
       segs = entry.segs; this.glyphMaxNorm = entry.max;
     }
     const colour = vc ? c.colour(vc) : undefined;
-    return { segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, color: [1, 1, 1], ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
+    // the lattice already lies inside the cropped box: a glyph near a face may poke out by up to L/2 rather than be cut
+    return { segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, color: [1, 1, 1], uncropped: true, ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
   }
   /** one readback of the normalizing norm in flight per set; a newer dispatch is read after it */
   private readGlyphMax(e: { stamp: string; pending: boolean; read: string }, kernel: FusedGlyphs): void {
