@@ -13,14 +13,19 @@ import {
   SymbolicScalarFieldData,
   SymbolicVectorFieldData,
   TensatoryError,
+  arrowGlyphs,
   boxBlur,
   contourField,
   integrateFromSeeds,
   isoContours,
+  latticeIn,
+  latticePoints,
   planStreamlines,
   streamlineSeeds,
   taubinSmooth,
   type ContourResult,
+  type GlyphStyle,
+  type Lattice,
   type Polyline,
   type ScalarFieldData,
   type Streamline,
@@ -70,8 +75,8 @@ for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".isl:not(.cmap)")) makeIntervalSlider(el); // the 3D crop ranges
 
-const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim"] as const;
-const VALUES = ["cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode"] as const;
+const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim", "showVec"] as const;
+const VALUES = ["cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode", "vspace", "vglyph", "vAlpha"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -126,16 +131,20 @@ installPlayTick(ui.anim, "stream");
 /*******************************************************/
 /* slots: what the mappings matrix assigns fields to */
 
-const SLOTS = ["c", "iv", "ic", "sg", "sc"] as const;
+const SLOTS = ["c", "iv", "ic", "sg", "sc", "vg", "vc"] as const;
 type Slot = (typeof SLOTS)[number];
-const SLOT_HTML: Record<Slot, string> = { c: "C", iv: "I<sub>V</sub>", ic: "I<sub>C</sub>", sg: "S<sub>∇</sub>", sc: "S<sub>C</sub>" };
+const SLOT_HTML: Record<Slot, string> = { c: "C", iv: "I<sub>V</sub>", ic: "I<sub>C</sub>", sg: "S<sub>∇</sub>", sc: "S<sub>C</sub>", vg: "V<sub>∇</sub>", vc: "V<sub>C</sub>" };
 const SLOT_TIP: Record<Slot, string> = {
   c: "colorfield: the field painted as a colormapped raster",
   iv: "isoline value: the field whose level sets are drawn",
   ic: "isoline colour",
   sg: "streamline direction: a vector field, or the gradient of a scalar field",
   sc: "streamline colour",
+  vg: "vector field glyphs: a vector field, or the gradient of a scalar field, drawn as arrows on a lattice",
+  vc: "glyph colour",
 };
+/** slot order for legend rows and the cursor pane */
+const slotIndex = (k: Slot): number => SLOTS.indexOf(k);
 
 interface State {
   bundle: Bundle | undefined;
@@ -182,7 +191,7 @@ function applyModes(): void {
   const is3 = spaceDims() === 3;
   tabBar($("renderBar"), [{ value: "canvas", label: "canvas", disabled: is3, tip: is3 ? "3D spaces render with WebGPU only" : "" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], is3 ? "gpu" : modes.render, (v) => { modes.render = v as Render; applyModes(); });
   $("pickCompute").textContent = `${sampler.label}${sampler.check ? " — agreement check on (see L)" : ""}`;
-  STREAM_CACHE.clear(); PLAN_CACHE.clear(); isoCache = undefined; // geometry produced by the other backend
+  STREAM_CACHE.clear(); PLAN_CACHE.clear(); isoCache = undefined; glyphCache = undefined; // geometry produced by the other backend
   state.dirty = true;
 }
 let usable = { scalars: [] as string[], vectors: [] as string[] };
@@ -236,6 +245,9 @@ function useVector(id: string | null | undefined): VectorUse | undefined {
 const slotScalar = (k: Slot): ScalarUse | undefined => useScalar(state.sel[k]);
 const streamsOn = () => ui.showStream.checked && num("lines") !== null;
 const streamVector = (): VectorUse | undefined => (streamsOn() ? useVector(state.sel.sg) : undefined);
+const glyphsOn = () => ui.showVec.checked;
+/** the V∇ field (glyph arrows) when the vector field panel is on */
+const glyphVector = (): VectorUse | undefined => (glyphsOn() ? useVector(state.sel.vg) : undefined);
 
 /*******************************************************/
 /* per-use value ranges (for colormaps and the value slider) */
@@ -302,14 +314,17 @@ const selectOf = (f: ScalarUse): ((t: number) => number) => { const s = selOf(f)
 /*******************************************************/
 /* the view box and sampling grid */
 
-function selectedUses(): { scalars: ScalarUse[]; vector: VectorUse | undefined } {
+function selectedUses(): { scalars: ScalarUse[]; vectors: VectorUse[] } {
   const uses = new Map<string, ScalarUse>();
   const add = (u: ScalarUse | undefined) => { if (u) uses.set(u.id, u); };
   if (ui.showScalar.checked) add(slotScalar("c"));
   if (ui.showIso.checked) { add(slotScalar("iv")); add(slotScalar("ic")); }
-  const vector = streamVector();
-  if (vector) add(slotScalar("sc"));
-  return { scalars: [...uses.values()], vector };
+  const vectors: VectorUse[] = [];
+  const sv = streamVector();
+  if (sv) { vectors.push(sv); add(slotScalar("sc")); }
+  const gv = glyphVector();
+  if (gv) { vectors.push(gv); add(slotScalar("vc")); }
+  return { scalars: [...uses.values()], vectors };
 }
 
 function unionBox(boxes: Box[]): Box {
@@ -322,8 +337,8 @@ function unionBox(boxes: Box[]): Box {
 let viewBox = Box.unit(2);
 let viewBoxKey = "";
 function currentViewBox(): Box {
-  const { scalars, vector } = selectedUses();
-  let boxes = [...scalars.map((f) => f.data.box), ...(vector ? [vector.data.box] : [])];
+  const { scalars, vectors } = selectedUses();
+  let boxes = [...scalars.map((f) => f.data.box), ...vectors.map((v) => v.data.box)];
   if (!boxes.length && state.bundle) boxes = usable.scalars.map((id) => state.bundle!.scalarField(id).data.box);
   const box = unionBox(boxes);
   const key = box.intervals.flat().join(",");
@@ -603,6 +618,70 @@ function streamlines(view: Box): StreamSet | undefined {
 }
 
 /*******************************************************/
+/* vector field glyphs (core flow/glyphs.ts): arrows on a lattice whose spacing follows the view */
+
+/** most lattice points a frame samples; the spacing is coarsened until the lattice fits */
+const GLYPH_MAX_POINTS = 100_000;
+/** 3D lattices are spaced this many times wider than the control says: glyphs at every depth share the screen */
+const GLYPH_SPACING_3D = 2;
+const glyphSpacingPx = (): number => num("vspace") ?? 24;
+const glyphStyle = (): GlyphStyle => (ui.vglyph.value === "head" || ui.vglyph.value === "triangle" ? ui.vglyph.value : "arrow");
+
+/** the world rectangle the canvas shows (bounding box of its corners: flips and quarter turns keep it a rectangle) */
+function visibleWorld(): Box {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const cs = [renderer.toWorld(0, 0), renderer.toWorld(w, 0), renderer.toWorld(0, h), renderer.toWorld(w, h)];
+  return new Box([Math.min(...cs.map((c) => c[0])), Math.min(...cs.map((c) => c[1]))], [Math.max(...cs.map((c) => c[0])), Math.max(...cs.map((c) => c[1]))]);
+}
+
+/**
+ * The glyph lattice of vector use `v` inside `region` (the view, or the cropped box in 3D) with nearest-neighbour
+ * distance `spacing` (world), anchored at the field's box corner so a pan moves no glyph; coarsened while it would
+ * exceed GLYPH_MAX_POINTS. Undefined when the region misses the field.
+ */
+function glyphLattice(v: VectorUse, region: Box, spacing: number): Lattice | undefined {
+  const box = v.data.box.intersect(region);
+  if (!box || !(spacing > 0)) return undefined;
+  let lat = latticeIn(box, spacing, v.data.box.a);
+  while (lat.pointCount > GLYPH_MAX_POINTS) { spacing *= 1.5; lat = latticeIn(box, spacing, v.data.box.a); }
+  return lat.pointCount ? lat : undefined;
+}
+const latticeKey = (l: Lattice): string => `${l.spacing.toExponential(6)}|${l.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}`;
+
+interface GlyphSet { lines: Float64Array[]; colours?: (Float64Array | undefined)[]; maxNorm: number; key: string }
+let glyphCache: GlyphSet | undefined;
+/** the last normalizing norm shown in the panel (CPU paths set it directly, the fused path reads it back) */
+let glyphMaxShown = NaN;
+/**
+ * 2D glyphs for the CPU / read-back paths: the field is sampled on every coset of the lattice through the sampler
+ * (synchronous on the CPU, asynchronous on the GPU — the previous set stays until the new one lands), then core
+ * builds the arrows; colours are the V_C value at each glyph's point.
+ */
+function glyphs2d(): GlyphSet | undefined {
+  const v = glyphVector();
+  if (!v) { glyphCache = undefined; return undefined; }
+  const lat = glyphLattice(v, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
+  if (!lat) { glyphCache = undefined; return undefined; }
+  const vc = slotScalar("vc"), style = glyphStyle();
+  const key = [v.id, latticeKey(lat), vc?.id ?? "", style].join("|");
+  if (glyphCache?.key === key) return glyphCache;
+  const parts = lat.cosets.map((g) => sampler.request(`vec:${v.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`, v.data, g));
+  if (parts.some((p) => !p)) return glyphCache; // still sampling
+  const vectors = new Float64Array(lat.pointCount * 2);
+  let o = 0;
+  for (const p of parts) { vectors.set(p!, o); o += p!.length; }
+  const points = latticePoints(lat);
+  const g = arrowGlyphs(points, vectors, 2, lat.spacing, { style });
+  let colours: (Float64Array | undefined)[] | undefined;
+  if (vc) {
+    const toParam = paramOf(vc);
+    colours = g.lines.map((l, k) => { const p = g.point[k]!, val = vc.data.value([points[2 * p]!, points[2 * p + 1]!]); return new Float64Array(l.length / 2).fill(val === undefined ? NaN : toParam(val)); });
+  }
+  glyphCache = { lines: g.lines, colours, maxNorm: g.maxNorm, key };
+  return glyphCache;
+}
+
+/*******************************************************/
 /* render */
 
 function renderEmpty(): void {
@@ -649,9 +728,20 @@ function render(): void {
     if (tail !== null) layer.particles = { lengths: st.lines.map((l) => l.length), phases: st.lines.map((l) => l.phase), step: st.step, tail: tail * st.cell, split: num("ssplit") ?? 1, travel: state.animClock * 10 * st.cell };
     scene.lines.push(layer);
   }
-  if (modes.render === "gpu" && fused && gpuRenderer) renderGpu(grid, box, scene, iso, st);
+  const gl = fusedCompute ? undefined : glyphs2d();
+  if (gl) {
+    glyphMaxShown = gl.maxNorm;
+    if (!gpuDraw) {
+      const layer: LineLayer = { lines: gl.lines, color: [1, 1, 1], width: 1.5, alpha: num("vAlpha") ?? 1 };
+      const vc = slotScalar("vc");
+      if (gl.colours && vc) { layer.values = gl.colours; layer.cmap = mapOf(vc); layer.select = selectOf(vc); }
+      scene.lines.push(layer);
+    }
+  }
+  if (modes.render === "gpu" && fused && gpuRenderer) renderGpu(grid, box, scene, iso, st, gl);
   else renderer.render(scene);
   updateIsoNotches();
+  glyphLabels();
 
   // labels
   $("resv").textContent = `${grid.size.join("×")}${fused?.info.segments ? ` · ${fmtCount(fused.info.segments)} segs` : ""}${tier() === "moving" && autoRes2.moving !== autoRes2.settled ? ` · settles at ${autoRes2.resolution("settled")}` : ""}`;
@@ -667,6 +757,13 @@ function render(): void {
   $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
   $("tailv").textContent = ui.tail.value ?? "";
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
+}
+/** the vector field panel's readouts (both arms) */
+function glyphLabels(): void {
+  $("vspacev").textContent = `${ui.vspace.value ?? "—"} px`;
+  $("vAlphav").textContent = ui.vAlpha.value === null ? "—" : (+ui.vAlpha.value).toFixed(2);
+  const gv = glyphVector();
+  $("vmaxv").textContent = gv && Number.isFinite(glyphMaxShown) && glyphMaxShown > 0 ? `|${gv.name}| = ${fmt3(glyphMaxShown)}` : "—";
 }
 
 /*******************************************************/
@@ -725,6 +822,11 @@ function view3dOf(): View3D | undefined {
     streamColour: () => slotScalar("sc"),
     streamOpts: () => ({ count: num("lines") ?? 0, maxSteps: num("slen")!, sign: streamSign(), ...streamMode(), alpha: num("sAlpha") ?? 1, tail: num("tail"), split: num("ssplit") ?? 1, clock: state.animClock }),
     plan: streamPlan,
+    glyphVector: () => glyphVector(),
+    glyphColour: () => slotScalar("vc"),
+    glyphSpacingPx: () => glyphSpacingPx() * GLYPH_SPACING_3D,
+    glyphStyle,
+    glyphLattice: (v, region, spacing) => glyphLattice(v as VectorUse, region, spacing),
   });
   return view3d;
 }
@@ -748,6 +850,8 @@ function render3d(): void {
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
   CROP_IDS.forEach((id, d) => { $(`${id}v`).textContent = fmtCrop(cropPreviewing ? [cropEl(id).lo, cropEl(id).hi] : cropCommitted[d]!); });
   updateIsoNotches();
+  glyphMaxShown = v.glyphMaxNorm;
+  glyphLabels();
 }
 
 /*******************************************************/
@@ -759,7 +863,7 @@ function valueMap(u: ScalarUse): ValueMap {
 }
 function gridKey(u: { id: string }, grid: DenseGrid): string { return `${u.id}|${grid.size.join("x")}|${grid.box.intervals.flat().join(",")}`; }
 
-function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | undefined, st: StreamSet | undefined): void {
+function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | undefined, st: StreamSet | undefined, gl: GlyphSet | undefined): void {
   const F = fused!, R = gpuRenderer!;
   const gs: GpuScene = { view: renderer.gpuView, clip: box, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], lines: [] };
   const fusedCompute = modes.compute === "gpu";
@@ -830,6 +934,23 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(st.cell), ...(st.colours ? colour : {}) });
     }
   }
+  // vector field glyphs
+  const gv = glyphVector();
+  if (gv) {
+    const vc = slotScalar("vc");
+    const colour = (vc ? { map: valueMap(vc), lut: lutOf(vc) } : {}) as Partial<GpuLineLayer>;
+    const alpha = num("vAlpha") ?? 1;
+    if (fusedCompute) {
+      const lat = glyphLattice(gv, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
+      if (lat) {
+        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), glyphStyle(), vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
+        gs.lines.push({ segs, width: 1.5, alpha, color: [1, 1, 1], ...colour });
+      }
+    } else if (gl) {
+      const segs = F.uploadedSegments(`glyph|${gl.key}`, () => packPolylines(gl.lines, gl.colours), false);
+      gs.lines.push({ segs, width: 1.5, alpha, color: [1, 1, 1], ...(gl.colours ? colour : {}) });
+    }
+  }
   R.resize();
   R.render(gs);
   renderer.render(scene2d, true); // box, points, labels on the transparent overlay
@@ -851,6 +972,7 @@ function colourSlots(): [Slot, ScalarUse][] {
   const c = slotScalar("c"); if (is2 && ui.showScalar.checked && c) out.push(["c", c]);
   const ic = slotScalar("ic"); if (ui.showIso.checked && ic) out.push(["ic", ic]);
   const sc = slotScalar("sc"); if (streamVector() && sc) out.push(["sc", sc]);
+  const vc = slotScalar("vc"); if (glyphVector() && vc) out.push(["vc", vc]);
   return out;
 }
 const legendUses = new Map<string, ScalarUse>();
@@ -859,6 +981,7 @@ function shapeSlots(): [Slot, ScalarUse][] {
   const out: [Slot, ScalarUse][] = [];
   const iv = slotScalar("iv"); if (ui.showIso.checked && iv) out.push(["iv", iv]);
   const sg = state.sel.sg; if (streamsOn() && sg && usable.scalars.includes(sg)) { const u = useScalar(sg); if (u) out.push(["sg", u]); }
+  const vg = state.sel.vg; if (glyphsOn() && vg && usable.scalars.includes(vg)) { const u = useScalar(vg); if (u) out.push(["vg", u]); }
   return out;
 }
 function updateInfo(): void {
@@ -882,13 +1005,12 @@ function updateInfo(): void {
     const [l, r] = cd.flip ? [hi, lo] : [lo, hi];
     const map = state.maps[f.id] ?? 0;
     // the bar is a colormap interval control (cmapInterval.ts); bars of fields used only for shape are fixed-mask,
-    // and a bar used only as the S_∇ source (no colour, no isolines) has nothing to select
-    const interval = slots.some((k) => k !== "sg");
+    // and a bar used only as the S_∇ / V_∇ source (no colour, no isolines) has nothing to select
+    const interval = slots.some((k) => k !== "sg" && k !== "vg");
     const title = coloured
       ? `${MAPS[map % MAPS.length]}${cd.log ? `, log${cd.log}` : ""} — drag on the bar to select the drawn interval; click the name to cycle the colormap`
       : `not used for colour${cd.log ? ` (log${cd.log})` : ""}${interval ? " — drag on the bar: isolines are only drawn at levels inside the selection" : ""}`;
-    const order: Slot[] = ["c", "iv", "ic", "sg", "sc"];
-    const slotHtml = order.filter((k) => slots.includes(k)).map((k) => SLOT_HTML[k]).join(" ");
+    const slotHtml = SLOTS.filter((k) => slots.includes(k)).map((k) => SLOT_HTML[k]).join(" ");
     const barCls = `bar${coloured ? "" : " plain"}${interval ? " isl cmap" : ""}`;
     const barAttrs = interval ? ` data-min="0" data-max="1" data-step="0.001"${coloured ? "" : " data-notoggle"}` : "";
     rows.push(`<div class="lrow" data-use="${f.id}"><span class="lname${coloured ? " cycle" : ""}" title="${f.name}${coloured ? " — click to cycle the colormap" : ""}"><span class="slot">${slotHtml}</span>${f.name}</span><span class="lval">${cd.format(l)}</span><div class="${barCls}" data-use="${f.id}"${barAttrs} style="background:#000" title="${title}"><span class="notches"></span>${detent}<span class="pip" data-pip="${f.id}"></span></div><span class="lval">${cd.format(r)}</span></div>`);
@@ -941,10 +1063,14 @@ function showCursor(x: number, y: number): void {
   if (!b || !viewBox.contains([x, y], 1e-12)) { hideCursor(); return; }
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const lines: string[] = [`<b>${esc(currentSpace()?.name ?? "")}:</b> ${fmt3(x)} ${fmt3(y)}`];
-  const vf = streamVector();
-  if (vf) { const g = vf.data.value([x, y]); if (g) lines.push(`<b>${esc(vf.name)}:</b> ${g.map(fmt3).join(" ")}`); }
+  const seenV = new Set<string>();
+  for (const vf of [streamVector(), glyphVector()]) {
+    if (!vf || seenV.has(vf.id)) continue;
+    seenV.add(vf.id);
+    const g = vf.data.value([x, y]); if (g) lines.push(`<b>${esc(vf.name)}:</b> ${g.map(fmt3).join(" ")}`);
+  }
   const seen = new Set<string>();
-  const uses = [...colourSlots(), ...shapeSlots()].sort((a, b) => ["c", "iv", "ic", "sg", "sc"].indexOf(a[0]) - ["c", "iv", "ic", "sg", "sc"].indexOf(b[0])).map(([, u]) => u);
+  const uses = [...colourSlots(), ...shapeSlots()].sort((a, b) => slotIndex(a[0]) - slotIndex(b[0])).map(([, u]) => u);
   for (const f of uses) {
     if (!f || seen.has(f.id)) continue;
     seen.add(f.id);
@@ -976,6 +1102,8 @@ const metrics = new MetricsTable({
     { key: "ic", label: "I", sub: "C", tip: SLOT_TIP.ic, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
     { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click() },
     { key: "sc", label: "S", sub: "C", tip: SLOT_TIP.sc, type: "scalar", visible: streamsOn, toggle: () => ui.showStream.click() },
+    { key: "vg", label: "V", sub: "∇", tip: SLOT_TIP.vg, type: "vector", visible: glyphsOn, toggle: () => ui.showVec.click() },
+    { key: "vc", label: "V", sub: "C", tip: SLOT_TIP.vc, type: "scalar", visible: glyphsOn, toggle: () => ui.showVec.click() },
   ],
   sel: () => state.sel,
   lockedSel: () => state.lockedSel,
@@ -1091,7 +1219,7 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
-  rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = "";
+  rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; glyphCache = undefined; viewBoxKey = "";
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !buildErrors.has(id) && bundle.scalarField(id).domain === m),
     vectors: bundle.vectorFieldIds.filter((id) => !buildErrors.has(id) && bundle.vectorField(id).domain === m),
@@ -1106,7 +1234,8 @@ function setSpace(id: string, fromUser: boolean): void {
   // exact gradient when the bundle has one, otherwise the symbolic gradient of the field itself
   const first = usable.scalars[0] ?? NONE;
   const exact = first ? bundle.scalarField(first).spec.exactGradient : undefined;
-  const sel: Sel = { c: first, iv: first, ic: NONE, sg: exact && usable.vectors.includes(exact) ? exact : first, sc: NONE };
+  const vec = exact && usable.vectors.includes(exact) ? exact : first;
+  const sel: Sel = { c: first, iv: first, ic: NONE, sg: vec, sc: NONE, vg: vec, vc: NONE };
   state.sel = { ...sel }; state.lockedSel = { ...sel };
   state.dir = { iso: 1, stream: 1 }; syncPlayGlyphs();
   viewCustom = false;
@@ -1265,7 +1394,7 @@ window.addEventListener("keydown", (e) => {
 for (const id of CHECKS) { ui[id].addEventListener("change", () => { state.dirty = true; saveOptsSoon(); }); }
 for (const id of VALUES) { ui[id].addEventListener("input", () => { state.dirty = true; }); ui[id].addEventListener("change", saveOptsSoon); }
 for (const id of ["isoValue", "split"] as const) ui[id].addEventListener("input", () => { isoLastChange = performance.now(); });
-for (const id of ["showScalar", "showIso", "showStream"] as const) ui[id].addEventListener("change", () => { buildMetrics(); updateInfo(); });
+for (const id of ["showScalar", "showIso", "showStream", "showVec"] as const) ui[id].addEventListener("change", () => { buildMetrics(); updateInfo(); });
 ui.lines.addEventListener("change", () => { buildMetrics(); updateInfo(); });
 
 /*******************************************************/

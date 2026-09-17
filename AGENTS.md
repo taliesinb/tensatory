@@ -39,13 +39,13 @@ schema/            @tensatory/schema  - bundle schema as TS types (+ BUNDLE_VERS
 packages/core/     @tensatory/core    - runtime: zod parsing, NdArray, symbolic
                                         expressions (normalize / compile / diff),
                                         field data, stats, codomains, Bundle
-                                        registry, isolines, streamlines.
-                                        Isomorphic; no DOM. Tests in test/.
+                                        registry, isolines, streamlines, glyph
+                                        lattices. Isomorphic; no DOM. Tests in test/.
 packages/gpu/      @tensatory/gpu     - WebGPU backend beside core: WGSL
                                         transpiler, compute-shader sampling,
                                         geometry kernels (marching squares,
-                                        projection, fused isolines/streamlines,
-                                        marching tetrahedra), WebGPU 2D and 3D
+                                        projection, fused isolines/streamlines/
+                                        glyphs, marching tetrahedra), WebGPU 2D and 3D
                                         renderers; tests assert CPU/GPU
                                         agreement (Dawn node bindings).
 apps/viewer/       @tensatory/viewer  - Vite + vanilla TS viewer: 2D arm (canvas
@@ -97,9 +97,10 @@ profiling test.
   (`6.24·10⁻⁵`, unicode superscripts).
 * Viewer: one super-stack of panels top-left (`bundle`, `system` — closed by
   default: compute / render, device, `mem cap`, live memory —, `2D space`,
-  `colorfield`, `isolines`, `streamlines`), the `mappings` matrix bottom-left,
-  cursor pane + legend bottom-right. The matrix assigns fields to slots C,
-  I_V, I_C, S_∇, S_C; rows are every scalar AND vector field; a vector slot
+  `colorfield`, `isolines`, `streamlines`, `vector field`), the `mappings`
+  matrix bottom-left, cursor pane + legend bottom-right. The matrix assigns
+  fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND
+  vector field; a vector slot
   given a scalar uses its gradient (∇ glyph), a scalar slot given a vector uses
   its norm (|·| glyph; log-scaled codomain, since gradient norms span orders
   of magnitude and vanish at critical points). Column headers toggle their
@@ -127,6 +128,23 @@ profiling test.
   never imported by production code). Per-bundle options in localStorage
   (`tensatory.opts.<file>`), only user-panned/zoomed views are persisted;
   any control id / slot key can be overridden from the URL.
+* Vector field glyphs (`notes/glyphs.md`; `core/src/flow/glyphs.ts`,
+  `gpu/src/glyphs.ts`): the V_∇ field as static arrows on the densest
+  lattice — hexagonal in 2D, face-centred cubic in 3D — represented as
+  interleaved `DenseGrid` cosets so every sampling path serves it. Spacing =
+  the `vector field` panel's pixels × world-per-pixel (3D: at the camera
+  target, ×2), anchored at the field's box corner (pans move no glyph), over
+  the view ∩ field box (3D: the cropped box); capped at 100k points. Glyphs
+  have length budget `L = 0.9 · spacing · |v| / max |v|` with the maximum
+  over the vectors ACTUALLY sampled (the `longest` readout) and three styles
+  (`glyph`: arrow = centred shaft + head; head = a chevron of length L
+  centred on the point; triangle = narrow outlined triangle, base on the
+  point, apex at the arrow's tip), all within L/2 of the point so none
+  overlaps; ≤ 3 `Seg` / `Seg3` records each, drawn by the line pipelines,
+  coloured by V_C. Fused path:
+  one kernel per (field, colour) — measure (`atomicMax` on norm bits) + emit
+  — with the lattice as a dispatch parameter. Linear normalization only;
+  rescaling for heavy-tailed norms is the planned follow-up. No animation.
 * Isolines (`core/src/iso`): `contourField` always uses the best available
   method. Sampled fields: marching squares on their grid. Symbolic fields:
   marching squares only seeds topology; every vertex is then projected onto

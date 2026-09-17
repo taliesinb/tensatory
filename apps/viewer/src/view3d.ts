@@ -6,7 +6,7 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
-import { Box, DenseGrid, DenseScalarFieldData, DenseVectorFieldData, boxBlur, contourField, integrateFromSeeds, isoContours, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, streamlineSeeds, type PointSet, type ScalarFieldData, type StreamlineMode, type StreamlinePlan, type StreamlineSeeds, type VectorFieldData } from "@tensatory/core";
+import { Box, DenseGrid, DenseScalarFieldData, DenseVectorFieldData, arrowGlyphs, boxBlur, contourField, integrateFromSeeds, isoContours, latticePoints, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, streamlineSeeds, type GlyphStyle, type Lattice, type PointSet, type ScalarFieldData, type StreamlineMode, type StreamlinePlan, type StreamlineSeeds, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
   SEG_FLOATS,
@@ -16,6 +16,7 @@ import {
   allocSegments3,
   blurResidentSync,
   boxEdges,
+  fusedGlyphs,
   fusedIsolines,
   fusedIsosurface,
   fusedStreamlines3,
@@ -27,6 +28,7 @@ import {
   regionAspect,
   resetMesh,
   resetSegments,
+  resetSegments3,
   planeSampler,
   planeSlicer,
   sampleResidentSync,
@@ -35,6 +37,7 @@ import {
   uploadSegments,
   uploadSegments3,
   type Camera3D,
+  type FusedGlyphs,
   type FusedIsolines,
   type FusedIsosurface,
   type FusedStreamlines3,
@@ -110,6 +113,14 @@ export interface View3DContext {
   streamOpts(): StreamOpts3;
   /** planned seeds (JL / coverage), cached by main.ts */
   plan(key: string, field: VectorFieldData, opts: { count: number; maxSteps: number; step: number; sign: 1 | -1; box: Box; mode: StreamlineMode; bidirectional: boolean }): StreamlinePlan;
+  /** the V∇ field (arrow glyphs on an FCC lattice) when the vector field panel is on */
+  glyphVector(): VectorUse3 | undefined;
+  glyphColour(): Use3 | undefined;
+  /** glyph spacing in css px at the camera's target depth */
+  glyphSpacingPx(): number;
+  glyphStyle(): GlyphStyle;
+  /** the lattice of `v` inside `region` at world `spacing` (main.ts: anchored, capped), undefined when empty */
+  glyphLattice(v: VectorUse3, region: Box, spacing: number): Lattice | undefined;
 }
 
 /**
@@ -138,6 +149,8 @@ export class View3D implements MemoryUser {
   cameraCustom = false;
   /** what the last frame drew: for the resolution row and the adaptive-resolution loop */
   info: Frame3DInfo = { n: 0, grid: [], triangles: 0, capacity: 0, overflow: false };
+  /** the normalizing norm of the glyphs drawn (the longest vector sampled); NaN when none */
+  glyphMaxNorm = NaN;
   private box = Box.unit(3);
   private boxKey = "";
   // ∝ n³
@@ -157,6 +170,10 @@ export class View3D implements MemoryUser {
   // streamlines: fused kernels and their segment sets
   private readonly streamKernels = new Cache<FusedStreamlines3>(8, (k) => k.destroy());
   private readonly streamSets = new Cache<GpuSegments3>(8, (s) => s.destroy(), bufBytes);
+  // glyphs: fused kernel per (field, colour) with one set re-dispatched per lattice; CPU sets per lattice
+  private readonly glyphKernels = new Cache<FusedGlyphs>(4, (k) => k.destroy());
+  private readonly glyphSets = new Cache<{ segs: GpuSegments3; stamp: string; pending: boolean; read: string }>(4, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
+  private readonly glyphCpu = new Cache<{ segs: GpuSegments3; max: number }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
@@ -165,7 +182,7 @@ export class View3D implements MemoryUser {
   }
 
   private get volumeCaches(): Cache<unknown>[] { return [this.grids, this.cpuValues, this.vgrids, this.vsampled] as Cache<unknown>[]; }
-  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels] as Cache<unknown>[]; }
+  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels] as Cache<unknown>[]; }
 
   clear(): void {
     for (const c of [...this.volumeCaches, ...this.surfaceCaches]) c.clear();
@@ -190,7 +207,7 @@ export class View3D implements MemoryUser {
   trim(bytes: number): number {
     let freed = 0;
     // biggest, least essential first: CPU meshes and face lines are cheap to rebuild, value grids are not
-    for (const c of [this.cpuMeshes, this.faceCpu, this.faces, this.meshes, this.streamSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.grids]) {
+    for (const c of [this.cpuMeshes, this.faceCpu, this.glyphCpu, this.faces, this.meshes, this.streamSets, this.glyphSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.grids]) {
       if (freed >= bytes) break;
       freed += c.trim(bytes - freed);
     }
@@ -469,6 +486,51 @@ export class View3D implements MemoryUser {
     };
   }
 
+  /**
+   * Arrow glyphs of the V∇ field on an FCC lattice inside the cropped box, spaced `glyphSpacingPx` px at the camera's
+   * target depth (so zooming in refines the lattice). GPU compute: the fused kernel (glyphs.ts) re-dispatched per
+   * lattice into a resident Seg3 set; CPU compute: core samples the cosets and builds the arrows, uploaded per lattice.
+   */
+  private glyphLayer(v: VectorUse3, cbox: Box): GpuLineLayer3D | undefined {
+    const c = this.c;
+    const worldPerPx = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.regionHeight();
+    const lat = c.glyphLattice(v, cbox, c.glyphSpacingPx() * worldPerPx);
+    if (!lat) return undefined;
+    const vc = c.glyphColour(), style = c.glyphStyle();
+    const latKey = `${lat.spacing.toExponential(6)}|${lat.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}|${style}`;
+    const kk = `${v.id}|${vc?.id ?? ""}`;
+    let segs: GpuSegments3;
+    if (c.compute() === "gpu") {
+      const kernel = this.glyphKernels.getOr(kk, () => fusedGlyphs(c.gpu, v.data, vc?.data));
+      const need = kernel.capacityFor(lat);
+      let e = this.glyphSets.get(kk);
+      if (e && (e.segs.capacity < need || e.segs.capacity > need * 4)) { this.glyphSets.delete(kk); e = undefined; }
+      if (!e) e = this.glyphSets.set(kk, { segs: allocSegments3(c.gpu, Math.ceil(need * 1.5), false), stamp: "", pending: false, read: "" });
+      if (e.stamp !== latKey) { resetSegments3(c.gpu, e.segs); kernel.dispatch(e.segs, lat, style); e.stamp = latKey; this.readGlyphMax(e, kernel); }
+      segs = e.segs;
+    } else {
+      const entry = this.glyphCpu.getOr(`${kk}|${latKey}`, () => {
+        const pts = latticePoints(lat);
+        const vectors = new Float64Array(lat.pointCount * 3);
+        let o = 0;
+        for (const g of lat.cosets) { const s = v.data.sampleOn(g); vectors.set(s, o); o += s.length; }
+        const g = arrowGlyphs(pts, vectors, 3, lat.spacing, { style });
+        const colours = vc ? g.lines.map((l, k) => { const p = g.point[k]!; return new Float64Array(l.length / 3).fill(vc.data.value([pts[3 * p]!, pts[3 * p + 1]!, pts[3 * p + 2]!]) ?? NaN); }) : undefined;
+        return { segs: uploadSegments3(c.gpu, packPolylines3(g.lines, colours), false), max: g.maxNorm };
+      });
+      segs = entry.segs; this.glyphMaxNorm = entry.max;
+    }
+    const colour = vc ? c.colour(vc) : undefined;
+    return { segs, width: 1.5, color: [1, 1, 1], ...(colour ? { map: colour.map, lut: colour.lut } : {}) };
+  }
+  /** one readback of the normalizing norm in flight per set; a newer dispatch is read after it */
+  private readGlyphMax(e: { stamp: string; pending: boolean; read: string }, kernel: FusedGlyphs): void {
+    if (e.pending) return;
+    e.pending = true;
+    const stamp = e.stamp;
+    void kernel.readMaxNorm().then((m) => { e.read = stamp; if (m !== this.glyphMaxNorm) { this.glyphMaxNorm = m; this.c.invalidate(); } }).catch(() => {}).finally(() => { e.pending = false; if (e.stamp !== e.read) this.readGlyphMax(e, kernel); });
+  }
+
   /** a cached uploaded 3D segment set */
   private segs3(key: string, make: () => Float32Array): GpuSegments3 {
     return this.lines3.getOr(key, () => uploadSegments3(this.c.gpu, make(), false));
@@ -478,7 +540,8 @@ export class View3D implements MemoryUser {
     const c = this.c;
     const iv = c.showIso() ? c.isoField() : undefined;
     const sv = c.streamVector();
-    const box = iv?.data.box ?? sv?.data.box ?? this.box;
+    const gv = c.glyphVector();
+    const box = iv?.data.box ?? sv?.data.box ?? gv?.data.box ?? this.box;
     const key = box.intervals.flat().join(",");
     if (key !== this.boxKey) { this.boxKey = key; this.box = box; if (!this.cameraCustom) this.fit(box); }
     const cbox = this.cropped(box, c.crop());
@@ -506,6 +569,7 @@ export class View3D implements MemoryUser {
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, View3D.STREAM_N)); if (layer) lines.push(layer); }
+    if (gv) { const layer = this.glyphLayer(gv, cbox); if (layer) lines.push(layer); } else this.glyphMaxNorm = NaN;
     this.renderer.resize();
     this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
     this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);

@@ -32,3 +32,5 @@ export { SEG3_FLOATS, SEG3_WGSL, SEG3_APPEND_WGSL, allocSegments3, resetSegments
 export { fusedStreamlines3, packSeeds3, SEED3_FLOATS } from "./fused3d";
 export type { FusedStreamlines3 } from "./fused3d";
 export type { GpuSegments3 } from "./lines3d";
+export { fusedGlyphs, packLattice } from "./glyphs";
+export type { FusedGlyphs } from "./glyphs";

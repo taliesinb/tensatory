@@ -197,6 +197,16 @@ No kernel bakes its dispatch grid: it travels as a header in the params /
 data buffer (`gridWgsl`, `packGrid` in `wgsl.ts`), so one pipeline per field
 serves every resolution and crop — see [resolution.md](resolution.md).
 
+## Stage 7 (done): glyphs
+
+`src/glyphs.ts`, `fusedGlyphs` ([glyphs.md](glyphs.md)): a measure kernel
+(field evaluated at every lattice point, norm folded into one `atomicMax`
+over the f32 bit pattern — positive floats order like u32, non-finite skipped)
+and an emit kernel appending three `Seg` / `Seg3` records per point with the
+same arrow formulas as core. One kernel per (field, colour); the lattice
+(packed coset grids) and the set's capacity travel in the params, so a pan or
+zoom re-dispatches without compiling or re-uploading a dense field's data.
+
 ## Next stages
 
 1. Interval-arithmetic quadtree seeding for exact isolines (topology still

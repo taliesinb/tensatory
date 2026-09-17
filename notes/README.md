@@ -9,6 +9,7 @@ the short summary; when a decision changes, update both.
 | [symbolic.md](symbolic.md) | the expression language: syntax, namespaces, normalization, compilation (CSE), symbolic differentiation |
 | [field-data.md](field-data.md) | runtime field data: `symbolic` vs `sampled`, sample grids, derivatives to any order, pullbacks, "uses" (gradient / norm) |
 | [isolines.md](isolines.md) | marching squares, exact projected isolines, streamline integration, smoothing |
+| [glyphs.md](glyphs.md) | static vector-field glyphs: hex / FCC lattices as coset grids, view-driven spacing, arrows normalized to the longest sampled vector, the fused atomicMax kernel |
 | [viewer.md](viewer.md) | the 2D viewer: panels, slots and the mappings matrix, legend, rendering, persistence, URL overrides |
 | [performance.md](performance.md) | where time goes, what was done about it, and what is left |
 | [gpu.md](gpu.md) | the WebGPU backend: WGSL transpilation, compute-shader sampling, CPU/GPU agreement tests, Dawn-in-node pitfalls |
@@ -27,6 +28,6 @@ expression in a small closed language, evaluable anywhere), and fields can be
 differentiation) or by pulling back the domain. `@tensatory/schema` holds the
 types, `@tensatory/core` parses bundles (zod), builds field objects, samples
 them on grids, differentiates them, contours them (exactly, for symbolic
-fields) and integrates streamlines; it has no DOM dependency so it can run in
+fields), integrates streamlines and lays out vector glyphs; it has no DOM dependency so it can run in
 a browser, a worker, or on a server. `@tensatory/viewer` is a framework-free
 Canvas 2D viewer whose UI is ported from the loss-landscape prototype.

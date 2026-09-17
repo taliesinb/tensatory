@@ -4,11 +4,12 @@
 // needs no readback and no await. Results are cached by key; a level change
 // re-dispatches into the same segment set.
 
-import type { DenseGrid, ScalarFieldData, StreamlineSeeds, VectorFieldData } from "@tensatory/core";
+import type { DenseGrid, GlyphStyle, Lattice, ScalarFieldData, StreamlineSeeds, VectorFieldData } from "@tensatory/core";
 import {
   SEG_FLOATS,
   allocSegments,
   blurResidentSync,
+  fusedGlyphs,
   fusedIsolines,
   fusedStreamlines,
   resetSegments,
@@ -16,6 +17,7 @@ import {
   smoothedIsolines,
   uploadGrid,
   uploadSegments,
+  type FusedGlyphs,
   type FusedIsolines,
   type FusedStreamlineOptions,
   type FusedStreamlines,
@@ -45,6 +47,9 @@ export class FusedGeometry implements MemoryUser {
   private readonly isoSets = new Cache<Counted>(32, (s) => s.segs.destroy(), (s) => s.segs.buffer.size);
   private readonly streamKernels = new Cache<{ kernel: FusedStreamlines; segs: GpuSegments }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly uploaded = new Cache<GpuSegments>(32, (s) => s.destroy(), bufBytes);
+  // glyphs: one kernel per (field, colour) — the lattice is a dispatch parameter — and one segment set per kernel
+  private readonly glyphKernels = new Cache<FusedGlyphs>(4, (k) => k.destroy());
+  private readonly glyphSets = new Cache<{ segs: GpuSegments; stamp: string; pending: boolean; read: string }>(4, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly complexity = new Map<string, Complexity>();
   /** what the last frame's isoline sets held (summed over the sets used) */
   info: FusedInfo = { segments: 0, capacity: 0, overflow: false };
@@ -53,7 +58,7 @@ export class FusedGeometry implements MemoryUser {
   constructor(readonly gpu: GpuBackend, private readonly invalidate: () => void) {}
 
   clear(): void {
-    for (const c of [this.grids, this.blurred, this.smoothKernels, this.isoKernels, this.isoSets, this.streamKernels, this.uploaded] as Cache<unknown>[]) c.clear();
+    for (const c of [this.grids, this.blurred, this.smoothKernels, this.isoKernels, this.isoSets, this.streamKernels, this.uploaded, this.glyphSets, this.glyphKernels] as Cache<unknown>[]) c.clear();
     this.complexity.clear();
   }
   /** call at the start of a frame: the info accumulates over the frame's isoline sets */
@@ -66,11 +71,11 @@ export class FusedGeometry implements MemoryUser {
     return Object.fromEntries(Object.entries(e).map(([k, c]) => [k, `${c.size} entries, ${(c.bytes / 2 ** 20).toFixed(1)} MB (${(c.liveBytes / 2 ** 20).toFixed(1)} live)`]));
   }
   memory(): { volume: number; surface: number; cpu: number } {
-    return { volume: this.grids.liveBytes + this.blurred.liveBytes, surface: this.isoSets.liveBytes + this.streamKernels.liveBytes + this.uploaded.liveBytes, cpu: 0 };
+    return { volume: this.grids.liveBytes + this.blurred.liveBytes, surface: this.isoSets.liveBytes + this.streamKernels.liveBytes + this.uploaded.liveBytes + this.glyphSets.liveBytes, cpu: 0 };
   }
   trim(bytes: number): number {
     let freed = 0;
-    for (const c of [this.uploaded, this.isoSets, this.streamKernels, this.smoothKernels, this.blurred, this.grids] as Cache<unknown>[]) {
+    for (const c of [this.uploaded, this.glyphSets, this.isoSets, this.streamKernels, this.smoothKernels, this.blurred, this.grids] as Cache<unknown>[]) {
       if (freed >= bytes) break;
       freed += c.trim(bytes - freed);
     }
@@ -161,6 +166,35 @@ export class FusedGeometry implements MemoryUser {
       kernel.dispatch(segs);
       return { kernel, segs };
     }).segs;
+  }
+
+  /**
+   * Arrow glyphs of `field` on `lattice` (three segments per point), coloured by `colour`. The kernel is built once
+   * per `kernelKey` (field + colour) and re-dispatched whenever `latticeKey` or the `style` changes (a pan, zoom or
+   * spacing change); the set is regrown when the lattice outgrows it. `onMax` receives the normalizing norm once the
+   * readback lands.
+   */
+  glyphs(kernelKey: string, field: VectorFieldData, lattice: Lattice, latticeKey: string, style: GlyphStyle, colour: ScalarFieldData | undefined, onMax?: (max: number) => void): GpuSegments {
+    latticeKey = `${latticeKey}|${style}`;
+    const kernel = this.glyphKernels.getOr(kernelKey, () => fusedGlyphs(this.gpu, field, colour));
+    const need = kernel.capacityFor(lattice);
+    let e = this.glyphSets.get(kernelKey);
+    if (e && (e.segs.capacity < need || e.segs.capacity > need * 4)) { this.glyphSets.delete(kernelKey); e = undefined; }
+    if (!e) e = this.glyphSets.set(kernelKey, { segs: allocSegments(this.gpu, Math.ceil(need * 1.5), false), stamp: "", pending: false, read: "" });
+    if (e.stamp !== latticeKey) {
+      resetSegments(this.gpu, e.segs);
+      kernel.dispatch(e.segs, lattice, style);
+      e.stamp = latticeKey;
+      if (onMax) this.readGlyphMax(e, kernel, onMax);
+    }
+    return e.segs;
+  }
+  /** one maximum readback in flight per set; a dispatch during the wait is read after it (the label follows the last lattice) */
+  private readGlyphMax(e: { stamp: string; pending: boolean; read: string }, kernel: FusedGlyphs, onMax: (max: number) => void): void {
+    if (e.pending) return;
+    e.pending = true;
+    const stamp = e.stamp;
+    void kernel.readMaxNorm().then((m) => { e.read = stamp; onMax(m); }).catch(() => {}).finally(() => { e.pending = false; if (e.stamp !== e.read) this.readGlyphMax(e, kernel, onMax); });
   }
 
   /** CPU-computed lines packed as Seg records (GPU render of CPU geometry) */

@@ -14,7 +14,7 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 | `src/sampler.ts` | field values on grids: GPU (async, read back) or CPU, cached, NaN outside the field box, optional agreement check |
 | `src/gpuGeometry.ts` | GPU compute + canvas render: exact isolines and streamlines computed on the GPU and read back asynchronously |
 | `src/gpuFused.ts` | GPU render: resident grids, fused isoline / streamline kernels appending into resident segment sets, uploaded CPU geometry |
-| `src/main.ts` | state, slots and "uses", sampling cache, isolines / streamlines pipelines, legend, cursor pane, persistence, URL overrides, interaction, frame loop |
+| `src/main.ts` | state, slots and "uses", sampling cache, isolines / streamlines / glyph pipelines, legend, cursor pane, persistence, URL overrides, interaction, frame loop |
 | `src/colormap.ts` | viridis / plasma / gray / okhue / turbo (polynomial fits) |
 | `src/interval.ts` | the interval slider: two nullable ends, full / half / none kinds, drag / click / wheel / keyboard gestures, `cmap` variant drawn as a bracket |
 | `src/cmapInterval.ts` | colormap interval selection: `Selection` (+ stretch / full, clip / mask modes), `selectParam`, `lutFor` (RGBA LUTs with masked alpha), the legend control `makeCmapInterval` |
@@ -43,14 +43,17 @@ pipelines and either draw with Canvas 2D or upload their results. See
   triangle count, read-only), `2D space` (points / box flags; view: fit,
   flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
   ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
-  strat / JL / cover; lines, length, opacity, tail, split, ▶).
+  strat / JL / cover; lines, length, opacity, tail, split, ▶), `vector field`
+  (off by default: spacing in px, glyph: arrow / head / triangle, opacity,
+  the `longest` readout; see [glyphs.md](glyphs.md)).
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 
 ## Slots and the mappings matrix
 
 Slots: **C** colorfield, **I_V** isoline value, **I_C** isoline colour,
-**S_∇** streamline direction (vector), **S_C** streamline colour. Rows are
+**S_∇** streamline direction (vector), **S_C** streamline colour, **V_∇**
+glyph vector field, **V_C** glyph colour. Rows are
 every scalar *and* vector field of the bundle. A slot resolves its field to a
 "use": a vector slot given a scalar uses its gradient (∇ glyph), a scalar
 slot given a vector uses its norm (|·| glyph), otherwise the field itself.
@@ -58,15 +61,16 @@ Derived norms get a log-scaled codomain (`{min: 0, log: "10"}`): gradient
 norms are heavy-tailed — thousands in the corners of the Rosenbrock box,
 vanishing at the minimum — and a linear range hides everything but the corners.
 Defaults: C = I_V = first scalar field, colour slots none (a colour slot equal
-to C would paint lines the raster's own colour and hide them), S_∇ = the
+to C would paint lines the raster's own colour and hide them), S_∇ = V_∇ = the
 field's `exactGradient` if any, else the field (→ its gradient). Column
 headers toggle their panel; disabled columns stay visible, dimmed.
 
 ## View box and grid
 
 The view box is the union of the boxes of all selected uses (fields in one
-bundle may differ); rasters are transparent outside their own box, streamline
-seeds stay inside the vector field's box. The sampling grid is the fields'
+bundle may differ, the S_∇ and V_∇ fields included); rasters are transparent
+outside their own box, streamline seeds and glyph lattices stay inside their
+vector field's box. The sampling grid is the fields'
 native grid when every selected sampled field shares one grid filling the
 view box, else the adaptive resolution along the longer side
 ([resolution.md](resolution.md): two tiers, moving ≤ settled, ladder 32 …
@@ -114,11 +118,11 @@ view box, else the adaptive resolution along the longer side
 Colormaps are per **field use**, so a field mapped to several slots gets one
 bar listing its slots (`C I_C  x² + y²`); clicking the field's *name* cycles
 its colormap. Fields that shape the picture without colouring it (I_V, the
-scalar behind S_∇) get an all-black bar. Bars carry min/max (swapped for
+scalar behind S_∇ or V_∇) get an all-black bar. Bars carry min/max (swapped for
 flipped codomains), a red detent at the value at the bundle's centre point (a
 single-point set such as θ*), white notches at the isoline levels (I_V's bar),
 and a white pip at the cursor value. The cursor pane lists the space
-coordinates, the S_∇ vector, then every legend scalar.
+coordinates, the S_∇ and V_∇ vectors, then every legend scalar.
 
 ### Colormap interval selection
 

@@ -59,7 +59,13 @@ to `NotSupportedError`. Nothing outside JSON has ever been loaded.
    real GPU frame times in the adaptive resolution instead of vsync-quantized
    rAF intervals; reuse same-sized resident buffers across frames (a moving
    crop allocates and frees its grids every frame).
-10. **CPU path**: a Web Worker for contouring / integration in `compute = cpu`
+10. **Glyph rescaling** ([glyphs.md](glyphs.md)): the arrows are normalized
+   linearly against the longest vector sampled, which leaves most of a
+   heavy-tailed field (gradient norms spanning orders of magnitude) as dots —
+   add a `scale` choice (linear / log / rank or quantile), and perhaps a
+   "comet" glyph (width tapering along the shaft, which the line pipelines'
+   particle ramp already provides).
+11. **CPU path**: a Web Worker for contouring / integration in `compute = cpu`
    mode; `diff` emitting shared references rather than copies (smaller trees
    before CSE); compiling value + gradient as one function for projection
    ([performance.md](performance.md)).
@@ -69,7 +75,8 @@ to `NotSupportedError`. Nothing outside JSON has ever been loaded.
 Kept here so the list above reads against what exists: spaces and the 3D arm
 (marching tetrahedra CPU + GPU, exact ∇f projection, crop with face outlines,
 3D streamlines, CPU Taubin, WebGPU renderer with weighted-blended OIT,
-depth-tested lines), the full GPU path (WGSL transpiler, fused kernels,
+depth-tested lines), static vector-field glyphs on hex / FCC lattices in both
+arms, the full GPU path (WGSL transpiler, fused kernels,
 drawIndirect, statistics / blur / smoothing passes, `compute` × `render`
 modes), adaptive resolution with a memory cap, colormap interval selections
 on every legend bar. None of it required a change to the bundle format.
