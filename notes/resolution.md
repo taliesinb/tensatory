@@ -174,3 +174,7 @@ failed step even without a recomputed sample — a paused frame at the moving
 tier's grid never recomputes — and a hold decision re-renders once (the
 render before it may have been refused for recolouring).
 
+The top-right flash (`#resFlash`) shows ↑ / ↓ for a ladder step and ↻ for a
+remeasure, as inline SVG strokes matching the compile gear — text glyphs came
+out of different fallback fonts per browser (Safari drew `⟳` small and thin).
+

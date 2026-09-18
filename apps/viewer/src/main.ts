@@ -425,14 +425,15 @@ const tier = (): Tier => ((ui.showIso.checked && slotScalar("iv") && isoMoving()
 /** a glyph in the top-right corner of the viewport whenever the loop acts (↑ / ↓ a tier step, ⟳ a remeasure):
  *  makes it possible to tell a feedback adjustment from any other stutter */
 let flashTimer: ReturnType<typeof setTimeout> | undefined;
-function flash(glyph: string, title: string): void {
+/** the resolution flash, top right: one of the SVG glyphs in #resFlash (text glyphs drew from different fallback fonts per browser) */
+function flash(glyph: "up" | "down" | "remeasure", title: string): void {
   const el = $("resFlash");
-  el.textContent = glyph; el.title = title; el.classList.add("on");
+  el.dataset.glyph = glyph; el.title = title; el.classList.add("on");
   clearTimeout(flashTimer); flashTimer = setTimeout(() => el.classList.remove("on"), 700);
 }
 for (const a of [autoRes2, autoRes3]) {
-  a.onChange = (_tier, dir) => { flash(dir > 0 ? "↑" : "↓", a.note); state.dirty = true; saveOptsSoon(); };
-  a.onRemeasure = () => { flash("⟳", "remeasuring"); fused?.redo(); view3d?.redo(); isoCache = undefined; state.dirty = true; };
+  a.onChange = (_tier, dir) => { flash(dir > 0 ? "up" : "down", a.note); state.dirty = true; saveOptsSoon(); };
+  a.onRemeasure = () => { flash("remeasure", "remeasuring"); fused?.redo(); view3d?.redo(); isoCache = undefined; state.dirty = true; };
 }
 const MB = 2 ** 20;
 /** the memory cap (MB), global: `tensatory.memcap`, ?memcap= */
