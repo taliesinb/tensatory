@@ -100,7 +100,7 @@ label[data-tip]:not(.tick) { cursor: help; }
 #status { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: #9ab; pointer-events: none; max-width: 60vw; text-align: center; }
 #status.err { color: #f66; }
 /* adaptive-resolution activity: ↑ / ↓ a tier step, ⟳ a remeasure; fades out */
-/* the resolution flash: ↑ / ↓ a ladder step, ↻ remeasuring — SVG glyphs of one weight (see notes/resolution.md) */
+/* the resolution flash: ↑ / ↓ a ladder step, a stopwatch while remeasuring — SVG glyphs of one weight (see notes/resolution.md) */
 #resFlash { position: absolute; top: 10px; right: 14px; width: 22px; height: 22px; color: #93c5fd; opacity: 0; transition: opacity .5s ease-out; pointer-events: none; filter: drop-shadow(0 0 4px rgba(0,0,0,.8)); }
 #resFlash.on { opacity: .9; transition: none; }
 #resFlash svg { display: block; }
