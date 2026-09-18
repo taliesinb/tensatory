@@ -310,7 +310,7 @@ export class View3D implements MemoryUser {
   static readonly FLING_SNAP_DEG = 30;
   /** the spin turns at this fraction of the release velocity: a slow fling is hard on a trackpad, and a spin at the
    *  full flick rate is too fast to look at */
-  static readonly FLING_GAIN = 0.25;
+  static readonly FLING_GAIN = 0.125;
 
   /** a drag begins: any spin stops */
   flingCancel(): void { this.flingVel = undefined; this.flingTrail.length = 0; }
