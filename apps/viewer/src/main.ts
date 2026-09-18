@@ -40,7 +40,7 @@ import {
 import { MAPS, cmap, type Colormap } from "./colormap";
 import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lutFor, makeCmapInterval, selectParam, selectionKey } from "./cmapInterval";
 import { makeIntervalSlider, type IntervalEl } from "./interval";
-import { installLogCapture, showError, status } from "./log";
+import { installLogCapture, showError, status, statusAwaitingPaint } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import type { Manifold, PointSet } from "@tensatory/core";
 import type { BundleSpec } from "@tensatory/schema";
@@ -1602,6 +1602,7 @@ function frame(now: number): void {
   if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
   controls.setEnabled(!animating());
   if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
+  if (state.dirty && statusAwaitingPaint()) { requestAnimationFrame(frame); return; } // let "animations paused" paint before the heavy frame it triggers
   if (state.dirty) {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();

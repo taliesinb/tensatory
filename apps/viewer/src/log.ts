@@ -18,11 +18,18 @@ export function installLogCapture(): void {
   $("logClose")?.addEventListener("click", () => $("logModal")?.classList.remove("open"));
 }
 
+let statusUnpainted = false;
 export function status(s: string): void {
   const el = $("status");
   if (el) { el.textContent = s; el.classList.remove("err"); }
-  if (s) push("status", [s]);
+  if (s) { push("status", [s]); statusUnpainted = true; }
 }
+/**
+ * A status message was set and has not had a paint yet. rAF callbacks run BEFORE the frame's paint, so a heavy
+ * render in the same frame (a remesh, a submit the browser blocks on) would delay the message for seconds: the
+ * frame loop yields one frame when this is true. Clears on read.
+ */
+export function statusAwaitingPaint(): boolean { const p = statusUnpainted; statusUnpainted = false; return p; }
 
 /** an error, shown in red on the status line (the full log is behind the L button) */
 export function showError(e: unknown): void {
