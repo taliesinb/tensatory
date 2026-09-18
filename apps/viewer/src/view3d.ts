@@ -38,8 +38,13 @@ import {
   uploadMesh,
   uploadSegments,
   uploadSegments3,
+  freshProgress,
+  isResidentGrid,
+  VERT_LAYOUT,
+  SEG3_LAYOUT,
   type Camera3D,
   type ColourSource,
+  type RecolourProgress,
   type FusedGlyphs,
   type FusedIsolines,
   type FusedIsosurface,
@@ -56,6 +61,7 @@ import {
   type ValueMap,
 } from "@tensatory/gpu";
 import { Cache, uidOf, type MemoryUser } from "./cache";
+import type { Recolour } from "./recolour";
 
 export interface Use3 { id: string; data: ScalarFieldData }
 export interface VectorUse3 { id: string; data: VectorFieldData }
@@ -76,6 +82,10 @@ export type CropRange = [number | null, number | null];
 
 export interface View3DContext {
   gpu: GpuBackend;
+  /** progressive exact recolouring of resident-coloured sets (registered per frame, stepped by the frame loop) */
+  recolour: Recolour;
+  /** the isosurface level is at rest (not animating / dragged): recolouring may proceed */
+  settled(): boolean;
   /** the WebGPU canvas (#gpu) and the Canvas 2D overlay above it (#gl) */
   canvas: HTMLCanvasElement;
   overlay: HTMLCanvasElement;
@@ -136,7 +146,7 @@ export interface View3DContext {
  * detected overflow — the set is then reallocated for the true count and dispatched again. The counts also
  * feed `Complexity`, which sizes new sets from what the field actually produced instead of a worst case.
  */
-interface Counted<S extends { capacity: number; indirect: GPUBuffer; destroy(): void }> { set: S; stamp: string; pending: boolean; count: number; overflow: boolean }
+interface Counted<S extends { capacity: number; indirect: GPUBuffer; destroy(): void }> { set: S; stamp: string; pending: boolean; count: number; overflow: boolean; recolour?: RecolourProgress }
 /** records (triangles / segments) a family of sets (field, colour, options — not the grid) needs, at the resolution it was measured */
 interface Complexity { records: number; n: number; t: number }
 interface Face { values: GpuGrid; sampler: PlanePass; kernel: FusedIsolines; depth: number; sets: Counted<GpuSegments>[] }
@@ -177,6 +187,7 @@ export class View3D implements MemoryUser {
   // streamlines: fused kernels and their segment sets
   private readonly streamKernels = new Cache<FusedStreamlines3>(8, (k) => k.destroy());
   private readonly streamSets = new Cache<GpuSegments3>(8, (s) => s.destroy(), bufBytes);
+  private readonly streamRecolour = new WeakMap<GpuSegments3, RecolourProgress>();
   // glyphs: fused kernel per (field, colour) with one set re-dispatched per lattice; CPU sets per lattice
   private readonly glyphKernels = new Cache<FusedGlyphs>(4, (k) => k.destroy());
   private readonly glyphSets = new Cache<{ segs: GpuSegments3; stamp: string; pending: boolean; read: string }>(4, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
@@ -376,7 +387,9 @@ export class View3D implements MemoryUser {
       if (cs && (cs.set.capacity < want / MARGIN || cs.set.capacity > want * 4)) { this.meshes.delete(mk); cs = undefined; } // too small for what we now expect, or wastefully large
       if (!cs) cs = this.meshes.set(mk, { set: allocMesh(this.c.gpu, want), stamp: "", pending: false, count: 0, overflow: false });
       const stamp = `${kk}|${level}`;
-      if (cs.stamp !== stamp) { resetMesh(this.c.gpu, cs.set); kernel.dispatch(cs.set, level); cs.stamp = stamp; this.track(cs, family, n, 0); } // count: the previous level's until the readback lands
+      if (cs.stamp !== stamp) { resetMesh(this.c.gpu, cs.set); kernel.dispatch(cs.set, level); cs.stamp = stamp; cs.recolour = freshProgress(); this.track(cs, family, n, 0); } // count: the previous level's until the readback lands
+      // resident (interpolated) colour: once the level rests, exact colours are written in over the frames
+      if (ic && isResidentGrid(icc.src) && this.c.settled()) this.c.recolour.add(ic.data, ic.id, VERT_LAYOUT, cs.set.buffer, cs.set.indirect, 3 * (cs.count || cs.set.capacity), (cs.recolour ??= freshProgress()));
       triangles += cs.count; capacity += cs.set.capacity;
       return cs.set;
     });
@@ -538,6 +551,8 @@ export class View3D implements MemoryUser {
       }
       this.streamSets.set(key, segs);
     }
+    // resident (interpolated) colour: exact colours are written in over the frames (the set is static once built)
+    if (sc && isResidentGrid(scc.src)) c.recolour.add(sc.data, sc.id, SEG3_LAYOUT, segs.buffer, segs.indirect, segs.capacity, (this.streamRecolour.get(segs) ?? this.streamRecolour.set(segs, freshProgress()).get(segs)!));
     const colour = sc ? c.colour(sc) : undefined;
     return (this.lastStreamLayer = {
       segs, width: 1.5, color: [1, 1, 1], alpha: o.alpha,

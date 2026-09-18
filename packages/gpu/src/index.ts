@@ -38,3 +38,5 @@ export { emitNetField, gpuTranspilable, netFieldFloats, setOpaqueLoopBounds, NET
 export type { NetFunction, NetEmitContext } from "./nets";
 export { colourCode, isResidentGrid } from "./colour";
 export type { ColourSource } from "./colour";
+export { recolourer, recolourStep, freshProgress, VERT_LAYOUT, SEG_LAYOUT, SEG3_LAYOUT } from "./recolour";
+export type { Recolourer, RecolourProgress, RecordLayout } from "./recolour";

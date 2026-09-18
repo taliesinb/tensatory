@@ -148,7 +148,10 @@ profiling test.
   selection once compiled a shader per drag event). Vertex colour in fused
   kernels is a `ColourSource` (`gpu/src/colour.ts`): the field per vertex,
   a resident grid interpolated (`residentReader`; costly fields, capped at
-  256² / 64³), or `"level"` (colour field = iso field). Reals only. `apps/viewer/public/bundles/iris.json` (from
+  256² / 64³), or `"level"` (colour field = iso field); resident-coloured
+  sets are recoloured EXACTLY over the frames once the level rests
+  (`gpu/src/recolour.ts`: interleaved batches, 32 k records per frame,
+  written in place). Reals only. `apps/viewer/public/bundles/iris.json` (from
   `tools/iris/train.py`, PyTorch once-off) is the example: a 4-16-3 MLP, its
   validation set and θ*, 2 / 3 orthogonal random directions;
   `core/test/iris.test.ts` checks loss / accuracy against PyTorch to 1e-9,

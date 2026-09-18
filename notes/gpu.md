@@ -295,6 +295,19 @@ per vertex — with I_C = loss on 3.45 M triangles ~10 M net evaluations per
 level, a Safari perma-freeze. Now colouring loss surfaces by accuracy costs
 one 64³ sampling (~70 ms) and lookups.
 
+**Resident colour sharpens progressively** (`gpu/src/recolour.ts`, viewer
+`recolour.ts`). Interpolated colour is aliased on a surface, so once the level
+is at rest a recolour kernel evaluates the colour field's own program at a
+batch of records per frame and writes exact colours into the set's buffer in
+place (mesh `Vert.c`, `Seg` / `Seg3` `ca` / `cb`). Records are visited
+INTERLEAVED — with G frames to go, frame f takes records f, f + G, f + 2G, … —
+so every batch is spread over the whole geometry and the image sharpens
+uniformly (dither-like) rather than wiping. Budget 32 k records per frame
+across the registered sets (~9 ms for the iris net); the 3.45 M-triangle
+isosurfaces (10 M vertices) are exact after ~5 s, the 2D sets in a frame or
+two. Progress lives on the set and resets with its stamp; the frame loop
+keeps rendering while any set is pending.
+
 **Exact projection of nets is latency-bound.** Measured on the iris loss at
 192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
 351 segments. Not arithmetic: even with a single evaluation per projection

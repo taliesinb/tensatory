@@ -27,11 +27,13 @@ import {
   type GpuSegments,
   type SmoothedIsolines,
   type ColourSource,
+  type RecolourProgress,
+  freshProgress,
 } from "@tensatory/gpu";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 
 /** a segment set with its count read back after every dispatch (see `track`) */
-interface Counted { segs: GpuSegments; stamp: string; pending: boolean; count: number; overflow: boolean }
+interface Counted { segs: GpuSegments; stamp: string; pending: boolean; count: number; overflow: boolean; recolour?: RecolourProgress }
 /** segments a family of isoline sets (field, colour, options — not the grid) produced, at the resolution measured */
 interface Complexity { records: number; n: number; t: number }
 const bufBytes = (o: { buffer: GPUBuffer }) => o.buffer.size;
@@ -47,7 +49,7 @@ export class FusedGeometry implements MemoryUser {
   // ∝ n
   private readonly isoKernels = new Cache<FusedIsolines>(16, () => {});
   private readonly isoSets = new Cache<Counted>(32, (s) => s.segs.destroy(), (s) => s.segs.buffer.size);
-  private readonly streamKernels = new Cache<{ kernel: FusedStreamlines; segs: GpuSegments }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
+  private readonly streamKernels = new Cache<{ kernel: FusedStreamlines; segs: GpuSegments; recolour?: RecolourProgress }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly uploaded = new Cache<GpuSegments>(32, (s) => s.destroy(), bufBytes);
   // glyphs: one kernel per (field, colour) — the lattice is a dispatch parameter — and one segment set per kernel
   private readonly glyphKernels = new Cache<FusedGlyphs>(4, (k) => k.destroy());
@@ -143,7 +145,7 @@ export class FusedGeometry implements MemoryUser {
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|smooth`;
     const cs = this.isoSet(setKey, family, values, kernel.capacity);
     const stamp = `${kernelKey}|${level}|it${iterations}`;
-    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, iterations); cs.stamp = stamp; this.track(cs, family, Math.max(...values.grid.size)); }
+    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, iterations); cs.stamp = stamp; cs.recolour = freshProgress(); this.track(cs, family, Math.max(...values.grid.size)); }
     this.info.segments += cs.count; this.info.capacity += cs.segs.capacity;
     return cs.segs;
   }
@@ -157,9 +159,18 @@ export class FusedGeometry implements MemoryUser {
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|${exact ? "exact" : "ms"}`; // the kernel key without its grid part
     const cs = this.isoSet(setKey, family, values, kernel.capacity);
     const stamp = `${kernelKey}|${level}|${tol.toExponential(3)}`;
-    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, tol); cs.stamp = stamp; this.track(cs, family, Math.max(...values.grid.size)); }
+    if (cs.stamp !== stamp) { resetSegments(this.gpu, cs.segs); kernel.dispatch(cs.segs, level, tol); cs.stamp = stamp; cs.recolour = freshProgress(); this.track(cs, family, Math.max(...values.grid.size)); }
     this.info.segments += cs.count; this.info.capacity += cs.segs.capacity;
     return cs.segs;
+  }
+
+  /** recolouring progress of an isoline set (by its set key) or a streamline set (by its key): total = count if known, else capacity */
+  recolourProgress(key: string): { total: number; progress: RecolourProgress } | undefined {
+    const cs = this.isoSets.get(key);
+    if (cs) return { total: cs.count || cs.segs.capacity, progress: (cs.recolour ??= freshProgress()) };
+    const st = this.streamKernels.get(key);
+    if (st) return { total: st.segs.capacity, progress: (st.recolour ??= freshProgress()) };
+    return undefined;
   }
 
   /** segments of the streamlines through resident `vectors` from `seeds` (key covers everything that affects them) */

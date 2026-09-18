@@ -47,7 +47,8 @@ import { FusedGeometry } from "./gpuFused";
 import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
-import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource } from "@tensatory/gpu";
+import { Recolour } from "./recolour";
+import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -171,6 +172,8 @@ const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
 let geometry: GpuGeometry | undefined; // GPU compute with canvas rendering: asynchronous, read back
 let fused: FusedGeometry | undefined; // GPU rendering: resident grids and segment sets
+let recolour: Recolour | undefined; // progressive exact recolouring of resident-coloured sets (both arms)
+const recolourer3d = (): Recolour => (recolour ??= new Recolour(sampler.gpu!));
 let gpuRenderer: GpuRenderer | undefined;
 type Compute = "cpu" | "gpu"; type Render = "canvas" | "gpu";
 const modes: { compute: Compute; render: Render } = { compute: "cpu", render: "canvas" };
@@ -183,6 +186,7 @@ function applyModes(): void {
   geometry = gpu && modes.compute === "gpu" && modes.render === "canvas" ? (geometry ?? new GpuGeometry(gpu, () => { state.dirty = true; })) : undefined;
   if (gpu && modes.render === "gpu") {
     fused ??= new FusedGeometry(gpu, () => { state.dirty = true; });
+    recolour ??= new Recolour(gpu);
     gpuRenderer ??= new GpuRenderer(gpu, $<HTMLCanvasElement>("gpu"));
   } else { fused?.clear(); fused = undefined; }
   document.body.classList.toggle("gpu-render", modes.render === "gpu" || spaceDims() === 3);
@@ -865,6 +869,8 @@ function view3dOf(): View3D | undefined {
     colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
     streamVector: () => streamVector(),
     streamColour: () => slotScalar("sc"),
+    recolour: recolourer3d(),
+    settled: () => !isoMoving(),
     streamOpts: () => ({ count: num("lines") ?? 0, maxSteps: num("slen")!, sign: streamSign(), ...streamMode(), alpha: num("sAlpha") ?? 1, tail: num("tail"), split: num("ssplit") ?? 1, clock: state.animClock }),
     plan: streamPlan,
     glyphVector: () => glyphVector(),
@@ -966,6 +972,8 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
         const segs = !exact && line > 0
           ? F.smoothedIsolines(kernelKeyC, `${kernelKey}|${k}`, values, icc.src, level, line)
           : F.isolines(kernelKeyC, `${kernelKey}|${k}`, f.data, values, icc.src, level, tol, exact);
+        // resident (interpolated) colour: exact colours are written in over the frames once the level rests
+        if (ic && isResidentGrid(icc.src) && !isoMoving() && recolour) { const p = F.recolourProgress(`${kernelKey}|${k}`); if (p) recolour.add(ic.data, ic.id, SEG_LAYOUT, segs.buffer, segs.indirect, p.total, p.progress); }
         gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
       });
     } else if (iso) {
@@ -1001,6 +1009,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       if (seeds) {
         const scc = colourSource(sc, grid);
         const segs = F.streamlines(`${key}|${scc.key}`, vectors, seeds, iopts, scc.src);
+        if (sc && isResidentGrid(scc.src) && recolour) { const p = F.recolourProgress(`${key}|${scc.key}`); if (p) recolour.add(sc.data, sc.id, SEG_LAYOUT, segs.buffer, segs.indirect, p.total, p.progress); }
         gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(cell), ...colour });
       }
     } else if (st) {
@@ -1527,6 +1536,8 @@ function frame(now: number): void {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();
     try { render(); } catch (e) { showError(e); state.dirty = false; }
+    // progressive exact recolouring: a batch per frame over the sets the render registered; more frames while any is left
+    if (recolour?.pending && recolour.step()) state.dirty = true;
     const a = autoRes();
     const overCap = governMemory(a.capBytes);
     const bytes = memoryNow();

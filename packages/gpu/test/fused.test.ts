@@ -14,7 +14,7 @@ import {
   marchingSquaresSegments,
   streamlineSeeds,
 } from "@tensatory/core";
-import { GpuBackend, SEG_FLOATS, allocSegments, fusedIsolines, fusedStreamlines, readGrid, readSegments, resetSegments, sampleResident, uploadGrid } from "../src";
+import { GpuBackend, SEG_FLOATS, SEG_LAYOUT, allocSegments, freshProgress, fusedIsolines, fusedStreamlines, readGrid, readSegments, recolourStep, recolourer, resetSegments, sampleResident, uploadGrid } from "../src";
 
 let gpu: GpuBackend | undefined;
 beforeAll(async () => { gpu = await GpuBackend.create(); });
@@ -127,6 +127,41 @@ describe("fused isolines", () => {
       expect(level[o + 4]).toBeCloseTo(1.1, 6); expect(level[o + 5]).toBeCloseTo(1.1, 6);
     }
     res.destroy(); cres.destroy();
+  });
+});
+
+describe("progressive recolouring", () => {
+  it("interleaved batches make every segment's colour exact, each visited once", async () => {
+    if (!gpu) return;
+    const g = new DenseGrid([25, 19], bowl.box);
+    const vals = bowl.sampleOn(g);
+    const dense = buildScalarFieldData({ type: "dense", box: bowl.box.intervals, samples: { type: "inline", shape: [25, 19], data: Array.from(vals) } }, 2);
+    const res = uploadGrid(gpu, g, vals, 1);
+    const cres = await sampleResident(gpu, waves, new DenseGrid([9, 7], waves.box)); // coarse: visibly interpolated
+    const kernel = fusedIsolines(gpu, dense, res, cres);
+    const segs = allocSegments(gpu, kernel.capacity, false);
+    await kernel.run(segs, 1.1, 1e-3);
+    const before = await readSegments(gpu, segs);
+    const n = before.length / SEG_FLOATS;
+    // the count is only known on the GPU: schedule from the capacity in 7 interleaved frames
+    const r = recolourer(gpu, waves, SEG_LAYOUT);
+    const jobs = [{ r, buffer: segs.buffer, indirect: segs.indirect, total: segs.capacity, progress: freshProgress() }];
+    let frames = 0;
+    while (recolourStep(jobs, Math.ceil(segs.capacity / 7))) frames++;
+    expect(frames + 1).toBe(jobs[0]!.progress.frames);
+    const after = await readSegments(gpu, segs);
+    let changed = 0;
+    for (let i = 0; i < n; i++) {
+      const o = i * SEG_FLOATS;
+      for (const [pos, col] of [[0, 4], [2, 5]] as const) {
+        const exact = waves.fn([after[o + pos]!, after[o + pos + 1]!], -1);
+        expect(after[o + col]).toBeCloseTo(exact, 4);
+        if (Math.abs(before[o + col]! - exact) > 1e-3) changed++;
+      }
+      expect(after[o]).toBe(before[o]); expect(after[o + 1]).toBe(before[o + 1]); // geometry untouched
+    }
+    expect(changed).toBeGreaterThan(n / 4); // the coarse grid really was interpolated
+    segs.destroy(); res.destroy(); cres.destroy();
   });
 });
 
