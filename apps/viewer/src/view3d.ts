@@ -32,6 +32,7 @@ import {
   resetSegments3,
   planeSampler,
   planeSlicer,
+  readGrid,
   sampleResidentSync,
   uploadGrid,
   uploadMesh,
@@ -458,10 +459,29 @@ export class View3D implements MemoryUser {
   }
 
   /** the vector field sampled on the volume grid (what streamlines are integrated through, like the 2D arm) */
-  private sampledVector(v: VectorUse3, grid: DenseGrid): DenseVectorFieldData {
+  /**
+   * The S∇ field sampled on `grid` for CPU-side work (JL / coverage planning, CPU integration). On the GPU arm the
+   * resident vector grid the fused kernel reads is read back ASYNCHRONOUSLY (undefined until it lands; the caller
+   * keeps the previous layer) — `sampleOn` here would evaluate a net-backed gradient in the CPU reference
+   * evaluator at 64³ points, tens of seconds on the main thread.
+   */
+  private sampledVector(v: VectorUse3, grid: DenseGrid): DenseVectorFieldData | undefined {
     if (v.data.kind === "sampled" && v.data instanceof DenseVectorFieldData) return v.data;
-    return this.vsampled.getOr(gridKey(v, grid), () => new DenseVectorFieldData(grid, v.data.sampleOn(grid)));
+    const key = gridKey(v, grid);
+    const have = this.vsampled.get(key);
+    if (have) return have;
+    if (this.c.compute() !== "gpu") return this.vsampled.getOr(key, () => new DenseVectorFieldData(grid, v.data.sampleOn(grid)));
+    if (!this.vreading.has(key)) {
+      this.vreading.add(key);
+      const vectors = this.vgrids.getOr(`vec:${key}`, () => sampleResidentSync(this.c.gpu, v.data, grid));
+      void readGrid(this.c.gpu, vectors).then((f32) => {
+        this.vsampled.set(key, new DenseVectorFieldData(grid, Float64Array.from(f32)));
+        this.c.invalidate();
+      }).catch(() => {}).finally(() => this.vreading.delete(key));
+    }
+    return undefined;
   }
+  private readonly vreading = new Set<string>();
 
   /** streamlines of the S∇ field: one segment set per (field, grid, options), particles by the renderer */
   private streamLayer(v: VectorUse3, box: Box, grid: DenseGrid): GpuLineLayer3D | undefined {
@@ -478,26 +498,33 @@ export class View3D implements MemoryUser {
       const gpu = c.compute() === "gpu";
       let seeds: StreamlineSeeds | undefined, plan: StreamlinePlan | undefined;
       if (o.mode === "stratified") seeds = streamlineSeeds(vbox, o.count, 12345);
-      else { plan = c.plan(key, this.sampledVector(v, vgrid), { count: o.count, mode: o.mode, ...iopts }); seeds = plan.seeds; }
+      else {
+        const field = this.sampledVector(v, vgrid);
+        if (!field) return this.lastStreamLayer; // the vectors are still being read back: keep showing the previous set
+        plan = c.plan(key, field, { count: o.count, mode: o.mode, ...iopts }); seeds = plan.seeds;
+      }
       if (gpu) {
         const vectors = this.vgrids.getOr(`vec:${gridKey(v, vgrid)}`, () => sampleResidentSync(c.gpu, v.data, vgrid));
         const kernel = this.streamKernels.getOr(key, () => fusedStreamlines3(c.gpu, vectors, seeds!, iopts, sc?.data));
         segs = allocSegments3(c.gpu, kernel.capacity, true);
         kernel.dispatch(segs);
       } else {
-        const lines = plan?.lines ?? integrateFromSeeds(this.sampledVector(v, vgrid), seeds, iopts);
+        const field = this.sampledVector(v, vgrid);
+        if (!field) return this.lastStreamLayer;
+        const lines = plan?.lines ?? integrateFromSeeds(field, seeds, iopts);
         const colours = sc ? lines.map((l) => { const out = new Float64Array(l.points.length / 3); for (let i = 0; i < out.length; i++) out[i] = sc.data.value([l.points[3 * i]!, l.points[3 * i + 1]!, l.points[3 * i + 2]!]) ?? NaN; return out; }) : undefined;
         segs = uploadSegments3(c.gpu, packStreamlines3(lines, step, colours), true);
       }
       this.streamSets.set(key, segs);
     }
     const colour = sc ? c.colour(sc) : undefined;
-    return {
+    return (this.lastStreamLayer = {
       segs, width: 1.5, color: [1, 1, 1],
       particles: o.tail === null ? undefined : { tail: o.tail * cell, split: o.split, travel: o.clock * 10 * cell },
       ...(colour ? { map: colour.map, lut: colour.lut } : {}),
-    };
+    });
   }
+  private lastStreamLayer: GpuLineLayer3D | undefined;
 
   /**
    * Arrow glyphs of the V∇ field on an FCC lattice inside the cropped box, spaced `glyphSpacingPx` px at the camera's
