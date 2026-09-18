@@ -45,8 +45,9 @@
 // Everything else here works with inline arrays for toy sizes.
 
 import type { ArraySpec, AxisSize, SizedArraySpec } from "./arrays";
+import type { RandomWidgetSpec } from "./distribution";
 import type { BoxSpec } from "./geometry";
-import type { DimIndex, Int, Real, ShowString } from "./math";
+import type { DimIndex, Int, Real, RealPos, ShowString } from "./math";
 import type { ScalarBinaryOp, ScalarNaryOp, ScalarUnaryOp } from "./symbolic";
 
 export type NetId = string;
@@ -173,27 +174,45 @@ export type BoundNetSpec = {
   description?: ShowString;
 };
 
-// Displacement: "around" a net. Takes a net and K displacement records; each
-// key names an array of the net — an input, an internal node (an activation),
-// a bound-away input, or a baked constant — and each value is an array of
-// that array's per-example shape. The result is a net with one ADDITIONAL
-// input `coeffs` of shape [K] such that every named array A is replaced,
-// everywhere it is used, by
-//   A + sum_k coeffs[k] * directions[k][A]      (a missing key = zero direction)
+// Displacement: "around" a net. Takes a net and K DIRECTIONS; each direction
+// names arrays of the net — an input, an internal node (an activation), a
+// bound-away input, or a baked constant — and gives, per named array, an
+// array of that array's per-example shape. The result is a net with one
+// ADDITIONAL input `coeffs` of shape [K] such that every named array A is
+// replaced, everywhere it is used, by
+//   A + sum_k coeffs[k] * directions[k].arrays[A]   (a missing key = zero direction)
 // while everything else (inputs, outputs, other nodes) keeps its name and
 // shape. `bind` supplies the origin (theta*), `displace` the directions, and a
 // net with `coeffs` as its sole remaining input is a field of the coordinates
 // (see the default rule under FIELDS BACKED BY NETS). Because any array can be
 // displaced, "around" is flexible: parameter subspaces (random / PCA /
 // Hessian directions), but equally perturbations of an activation or of the
-// data. Displacing several arrays with one record moves them together.
+// data. Displacing several arrays with one direction moves them together.
 export type DisplacedNetSpec = {
   type: "displace";
   net: NetId | NetSpec;
   coeffs?: ArrayName;                          // the new [K] input; defaults to "t"
-  directions: Record<ArrayName, ArraySpec>[];  // K records; K >= 1
+  directions: DirectionSpec[];                 // K >= 1
   name?: ShowString;
   description?: ShowString;
+};
+
+// One direction. The arrays of a direction are ONE vector in the joint space
+// of the named arrays: `norm` fixes its Euclidean length over all of them
+// together (the loss-landscape convention "each direction as long as theta*"
+// is `norm: "origin"`: the joint norm of the displaced arrays' own values,
+// which must therefore be constants — bound inputs or baked arrays, not
+// nodes), then `scale` multiplies it. Without `norm` the arrays are used as
+// given (times `scale`). A random direction is one whose arrays are `random`
+// (schema/distribution.ts); `widget` asks for a Controls-pane row for the
+// whole direction: reseed re-salts every random array in it, the scale
+// slider edits `scale` — so a row per direction, not per array.
+export type DirectionSpec = {
+  arrays: Record<ArrayName, ArraySpec>;
+  norm?: RealPos | "origin";
+  scale?: RealPos;                             // defaults to 1
+  name?: ShowString;
+  widget?: RandomWidgetSpec | null;
 };
 
 // The gradient operator. Takes a net, optionally binds some inputs, and
@@ -320,8 +339,18 @@ export type NetVectorFieldDataSpec = {
 //     // ... and the 2D subspace around it: one input t: [2]
 //     "mlp_pca": {
 //       "type": "displace", "net": "mlp_star",
-//       "directions": [{ "W1": "pca/d0/W1", "b1": "pca/d0/b1", "W2": "pca/d0/W2", "b2": "pca/d0/b2" },
-//                      { "W1": "pca/d1/W1", "b1": "pca/d1/b1", "W2": "pca/d1/W2", "b2": "pca/d1/b2" }]
+//       "directions": [{ "arrays": { "W1": "pca/d0/W1", "b1": "pca/d0/b1", "W2": "pca/d0/W2", "b2": "pca/d0/b2" } },
+//                      { "arrays": { "W1": "pca/d1/W1", "b1": "pca/d1/b1", "W2": "pca/d1/W2", "b2": "pca/d1/b2" } }]
+//     },
+//     // a random 2D subspace: gaussian directions, each as long as θ*, with a Controls row each (reseed + scale)
+//     "mlp_rand": {
+//       "type": "displace", "net": "mlp_star",
+//       "directions": [{ "name": "d₀", "norm": "origin", "widget": {},
+//                        "arrays": { "W1": { "type": "random", "shape": [784, 128], "dist": { "type": "gaussian", "seed": "d0/W1" } },
+//                                    "b1": { "type": "random", "shape": [128],      "dist": { "type": "gaussian", "seed": "d0/b1" } },
+//                                    "W2": { "type": "random", "shape": [128, 10],  "dist": { "type": "gaussian", "seed": "d0/W2" } },
+//                                    "b2": { "type": "random", "shape": [10],       "dist": { "type": "gaussian", "seed": "d0/b2" } } } },
+//                      { "name": "d₁", "norm": "origin", "widget": {}, "arrays": { ...likewise with seeds "d1/W1" etc. } }]
 //     }
 //   },
 //   "fields": {

@@ -371,8 +371,9 @@ function inferDisplace(spec: DisplacedNetSpec, nets: NetResolver, path: string[]
     throw new SpecError(`coefficient input "${t}" collides with an array of the net; choose another \`coeffs\` name`, [...path, "coeffs"]);
   const K = spec.directions.length;
   spec.directions.forEach((dir, k) => {
-    for (const [n, a] of Object.entries(dir)) {
-      const p = [...path, "directions", String(k), n];
+    if (Object.keys(dir.arrays).length === 0) throw new SpecError(`direction ${k} names no arrays`, [...path, "directions", String(k), "arrays"]);
+    for (const [n, a] of Object.entries(dir.arrays)) {
+      const p = [...path, "directions", String(k), "arrays", n];
       const target = sig.inputs[n] ?? sig.nodes[n];
       if (!target) throw new SpecError(`"${n}" is neither an input nor an internal array of the net`, p);
       const s = arraySpecShape(a, p);

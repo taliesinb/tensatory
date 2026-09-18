@@ -9,6 +9,13 @@ import { describe, expect, it } from "vitest";
 import { Bundle, DenseGrid, NdArray, SymbolicScalarFieldData, SymbolicVectorFieldData } from "../src";
 
 const bundle = Bundle.parse(JSON.parse(readFileSync(join(__dirname, "../../../apps/viewer/public/bundles/iris.json"), "utf8")));
+// the viewer's fields use random directions (iris_rnd2 / iris_rnd3, drawn from seeds); the PyTorch reference was
+// computed along the fixed inline directions kept in iris_rand2 / iris_rand3, so give those fields of their own
+const refFields = (net: string, dims: number) => ({
+  loss: { kind: "scalar", codomain: "celoss", domain: `rand${dims}`, data: { type: "net", net, output: "loss", box: Array.from({ length: dims }, () => [-1, 1]) } },
+  acc: { kind: "scalar", codomain: "fraction", domain: `rand${dims}`, data: { type: "net", net, output: "acc", box: Array.from({ length: dims }, () => [-1, 1]) } },
+});
+const reference = new Bundle({ ...bundle.spec, fields: { ...bundle.spec.fields, ...Object.fromEntries(Object.entries(refFields("iris_rand2", 2)).map(([k, v]) => [`${k}2`, v])), ...Object.fromEntries(Object.entries(refFields("iris_rand3", 3)).map(([k, v]) => [`${k}3`, v])) } } as typeof bundle.spec);
 const ref = JSON.parse(readFileSync(join(__dirname, "fixtures/iris-reference.json"), "utf8")) as {
   points2: number[][]; loss2: number[]; acc2: number[];
   points3: number[][]; loss3: number[]; acc3: number[];
@@ -20,6 +27,25 @@ describe("iris bundle vs PyTorch", () => {
     expect(bundle.net("iris_star").signature.inputs).toEqual({});
     expect(bundle.net("iris_rand2").signature.inputs).toEqual({ t: [2] });
     expect(bundle.net("iris_rand3").signature.inputs).toEqual({ t: [3] });
+    expect(bundle.net("iris_rnd2").signature.inputs).toEqual({ t: [2] });
+    expect(bundle.net("iris_rnd3").signature.inputs).toEqual({ t: [3] });
+  });
+
+  it("the random directions are as long as θ* and d₀ / d₁ are the same draws in both spaces", () => {
+    const norm = (xs: ArrayLike<number>) => { let s = 0; for (let i = 0; i < xs.length; i++) s += xs[i]! * xs[i]!; return Math.sqrt(s); };
+    const star = bundle.net("iris_star").program;
+    const thetaNorm = norm(Float64Array.from(["W1", "b1", "W2", "b2"].flatMap((a) => Array.from(star.consts[a]!.arr.data))));
+    const p2 = bundle.net("iris_rnd2").program, p3 = bundle.net("iris_rnd3").program;
+    for (const [prog, K] of [[p2, 2], [p3, 3]] as const) {
+      for (let k = 0; k < K; k++) {
+        const dk = Float64Array.from(["W1", "b1", "W2", "b2"].flatMap((a) => { const c = prog.consts[`${a}__dispd`]!; const n = c.arr.size / K; return Array.from(c.arr.data.subarray(k * n, (k + 1) * n)); }));
+        expect(norm(dk)).toBeCloseTo(thetaNorm, 9);
+      }
+    }
+    for (const a of ["W1", "b1", "W2", "b2"]) {
+      const c2 = p2.consts[`${a}__dispd`]!.arr, c3 = p3.consts[`${a}__dispd`]!.arr;
+      expect(Array.from(c3.data.subarray(0, c2.size))).toEqual(Array.from(c2.data));
+    }
   });
 
   it("loss and accuracy at θ* match PyTorch", () => {
@@ -30,12 +56,12 @@ describe("iris bundle vs PyTorch", () => {
   });
 
   it("loss and accuracy along 2 and 3 random directions match PyTorch (field evaluation)", () => {
-    const loss2 = bundle.scalarField("loss2").data, acc2 = bundle.scalarField("acc2").data;
+    const loss2 = reference.scalarField("loss2").data, acc2 = reference.scalarField("acc2").data;
     ref.points2.forEach((p, i) => {
       expect(loss2.value(p), `loss2 at ${p}`).toBeCloseTo(ref.loss2[i]!, 9);
       expect(acc2.value(p), `acc2 at ${p}`).toBeCloseTo(ref.acc2[i]!, 12);
     });
-    const loss3 = bundle.scalarField("loss3").data, acc3 = bundle.scalarField("acc3").data;
+    const loss3 = reference.scalarField("loss3").data, acc3 = reference.scalarField("acc3").data;
     ref.points3.forEach((p, i) => {
       expect(loss3.value(p), `loss3 at ${p}`).toBeCloseTo(ref.loss3[i]!, 9);
       expect(acc3.value(p), `acc3 at ${p}`).toBeCloseTo(ref.acc3[i]!, 12);

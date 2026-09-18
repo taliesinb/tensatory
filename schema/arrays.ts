@@ -1,5 +1,6 @@
 import type { IntNonNeg, Int, Real } from "./math";
 import type { ConstArgName, SymbolicScalar, SymbolicVector } from "./symbolic";
+import type { RandomWidgetSpec, ScalarDistributionSpec } from "./distribution";
 
 export type ArrayPath = string;
 // "/" has special meaning. "foo/bar", depending on underlying storage, means:
@@ -23,6 +24,7 @@ export type SizedArraySpec =
   | OneHotArraySpec
   | ManyHotArraySpec
   | SymbolicArraySpec
+  | SymbolicRandomArraySpec
   | SizedArrayHandleSpec;
 
 // values embedded directly in the JSON, flattened in row-major order
@@ -80,6 +82,17 @@ export type SizedArrayHandleSpec = {
   shape: ArrayShape; // the size of the resulting array, must match what is loaded after `part` is applied
   path: ArrayPath;
   part?: ArrayPart;
+};
+
+export type SymbolicRandomArraySpec = SymbolicRandomScalarArraySpec;
+
+// each cell's value is an independent draw from `dist` (see distribution.ts);
+// the array is a pure function of the spec and the distribution's seed
+export type SymbolicRandomScalarArraySpec = {
+  type: "random";
+  shape: ArrayShape;
+  dist: ScalarDistributionSpec;
+  widget?: RandomWidgetSpec | null; // present: a row in the viewer's Controls pane (reseed; scale slider for location–scale dists)
 };
 
 /*******************************************************/

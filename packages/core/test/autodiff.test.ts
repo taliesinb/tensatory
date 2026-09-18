@@ -123,7 +123,7 @@ describe("autodiff: every op vs finite differences", () => {
   });
   it("displace: gradient wrt the coefficients", () => {
     const bowl: NetSpec = { type: "def", inputs: { p: [2] }, nodes: { h: { op: "square", val: "p" }, f: { op: "reduce", fn: "sum", val: "h" } }, outputs: { f: [] } };
-    const around: NetSpec = { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ p: inline([1, 0]) }, { p: inline([0, 1]) }] };
+    const around: NetSpec = { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ arrays: { p: inline([1, 0]) } }, { arrays: { p: inline([0, 1]) } }] };
     checkGrad({ op: "call", net: "around", inputs: { t: "x" }, output: "f" }, { x: [0.3, -0.7] }, {}, { bowl, around });
   });
   it("einsum diagonals: extraction and embedding are each other's adjoints (the op set is closed)", () => {

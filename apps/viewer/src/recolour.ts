@@ -29,6 +29,9 @@ export class Recolour {
   private dispatchedLastFrame = false;
   constructor(private readonly gpu: GpuBackend) {}
 
+  /** forget the kernels (a bundle change or revision: the field behind a key is not the same field any more) */
+  clear(): void { this.kernels.clear(); this.jobs = []; }
+
   /** a render begins: it re-registers the sets it draws (the list persists between renders so batches can run
    *  every frame while the image is refreshed only every few — re-rendering four translucent million-triangle
    *  shells is ~40 ms of GPU, far more than a batch) */

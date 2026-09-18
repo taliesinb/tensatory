@@ -11,6 +11,7 @@ import type {
   ShapeSpec,
 } from "@tensatory/schema";
 import { ArraySchema, SizedArraySchema } from "../arrays/spec";
+import { RandomWidgetSchema } from "../arrays/random";
 import { SCALAR_BINARY_OPS, SCALAR_NARY_OPS, SCALAR_UNARY_OPS } from "../symbolic/spec";
 
 export const ARRAY_REDUCE_FNS = ["sum", "mean", "prod", "max", "min", "logsumexp"] as const satisfies readonly ArrayReduceFn[];
@@ -57,6 +58,14 @@ export const ArrayExprSchema: z.ZodType<ArrayExpr> = z.lazy(() =>
 
 const netCommon = { name: z.string().optional(), description: z.string().optional() };
 
+export const DirectionSchema = z.object({
+  arrays: z.record(name, ArraySchema),
+  norm: z.union([z.number().positive(), z.literal("origin")]).optional(),
+  scale: z.number().positive().optional(),
+  name: z.string().optional(),
+  widget: RandomWidgetSchema.nullable().optional(),
+});
+
 export const NetSchema: z.ZodType<NetSpec> = z.lazy(() =>
   z.discriminatedUnion("type", [
     z.object({
@@ -77,7 +86,7 @@ export const NetSchema: z.ZodType<NetSpec> = z.lazy(() =>
       type: z.literal("displace"),
       net: z.union([name, NetSchema]),
       coeffs: name.optional(),
-      directions: z.array(z.record(name, ArraySchema)).min(1),
+      directions: z.array(DirectionSchema).min(1),
       ...netCommon,
     }),
     z.object({

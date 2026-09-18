@@ -40,7 +40,8 @@ pipelines and either draw with Canvas 2D or upload their results. See
   storage, L = log, ⤒ = open a local JSON), `system` (closed by default:
   compute / render modes, device, `mem cap`, live memory with the adaptive
   resolution's last decision, and `iso res` — the current grid and segment /
-  triangle count, read-only), `2D space` (points / box flags; view: fit,
+  triangle count, read-only), `controls` (only when the bundle asks for
+  rows, see below), `2D space` (points / box flags; view: fit,
   flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
   ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
   strat / JL / cover; lines, length, opacity, tail, split, ▶), `vector field`
@@ -48,6 +49,28 @@ pipelines and either draw with Canvas 2D or upload their results. See
   the `longest` readout; see [glyphs.md](glyphs.md)).
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
+
+## Controls: reseed and rescale random directions
+
+A bundle's `random` arrays and random directions of displaced nets may ask
+for a row (`widget`, schema/distribution.ts; core `controlRows`). The
+`controls` panel (`src/controls.ts`) shows one row per id: the label, a
+nullable log-spaced scale slider (multiplier; unset = ×1, the bundle's own
+scale) and ↻ (reseed: a fresh 32-bit salt; shift-click = the bundle's own
+seeds). Rows hold **adjustments**, saved per bundle (`controls` in the
+options); they never edit the bundle. Applying one = `state.bundle = new
+Bundle(adjustSpec(baseSpec, adjust))`, `revision++`, and `clearFieldCaches()`
+(sample / range caches, GPU grids / kernels / sets, recolourers) — the same
+clears as a bundle switch minus selections, view, colormaps and intervals,
+which are keyed by field id and stay valid. Nothing is recompiled: a
+reseed or rescale changes constant VALUES, never shapes, so every program
+emits byte-identical WGSL and the device's pipeline cache (keyed by code)
+hits; only the packed `data` buffers differ, and those are uploaded per
+dispatch anyway (`gpu/test/nets.test.ts` asserts the identity). The rebuild
+is ~40 ms of JS for iris (bundle build + coarse CPU statistics for the
+ranges); adjustments commit on release, the rows are inert while an
+animation plays. Rows are per bundle, not per space (iris shows d₂ in the 2D
+space, where it does nothing). Live dragging is the planned follow-up.
 
 ## Slots and the mappings matrix
 
@@ -172,7 +195,7 @@ rebuilt from that state (widgets are re-created on each `updateInfo`).
 
 Per bundle in `localStorage["tensatory.opts.<file>"]`: every control, locked
 slot selections, colormaps, colormap interval selections, animation
-directions, and the view — but a
+directions, Controls-pane adjustments (`controls`: `{ rowId: { seed?, scale? } }`), and the view — but a
 *fitted* view is never saved (only flips/rotation), so it always re-fits to
 the current layout; only user-panned/zoomed views are restored. Collapsed
 panels are global. Query parameters override anything after load:

@@ -7,6 +7,7 @@
 export * from "./math";
 export * from "./geometry";
 export * from "./arrays";
+export * from "./distribution";
 export * from "./symbolic";
 export * from "./codomain";
 export * from "./statistics";

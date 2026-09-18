@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ArrayExpr, BundleSpec, NetDefinitionSpec, NetSpec } from "@tensatory/schema";
-import { Bundle, DenseGrid, SymbolicVectorFieldData, type NetScalarFieldData, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { Bundle, DenseGrid, SymbolicVectorFieldData, adjustSpec, type NetScalarFieldData, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
 import { GpuBackend, NET_MAX_FLOATS, buildSampleProgram, emitNetField, gpuSampleOn, gpuTranspilable, netFieldFloats } from "../src";
 
 let gpu: GpuBackend | undefined;
@@ -152,6 +152,19 @@ describe("iris bundle on the GPU", () => {
     const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: loss }, vectors: {} });
     await agree(grad, new DenseGrid([24, 24], loss.box), "∇loss", 1e-3);
     await agree(loss.derivative(0).derivative(1), new DenseGrid([16, 16], loss.box), "∂²loss/∂t0∂t1", 2e-3);
+  });
+
+  it("reseeding / rescaling a direction changes the packed data but not one byte of WGSL (no recompile)", () => {
+    const grid = new DenseGrid([32, 32], bundle.scalarField("loss2").data.box);
+    const base = buildSampleProgram(bundle.scalarField("loss2").data, grid);
+    const adjusted = new Bundle(adjustSpec(bundle.spec, { d0: { seed: 12345, scale: 0.5 }, d1: { seed: 7 } }));
+    const other = buildSampleProgram(adjusted.scalarField("loss2").data, grid);
+    expect(other.code).toBe(base.code);
+    expect(other.data.length).toBe(base.data.length);
+    expect(Array.from(other.data)).not.toEqual(Array.from(base.data));
+    // the same for the gradient program the isoline / streamline kernels use
+    const grad = (b: Bundle) => new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: b.scalarField("loss2").data }, vectors: {} });
+    expect(buildSampleProgram(grad(adjusted), grid).code).toBe(buildSampleProgram(grad(bundle), grid).code);
   });
 
   it("is fast: 256² points in one dispatch", async () => {

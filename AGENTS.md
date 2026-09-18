@@ -81,6 +81,24 @@ profiling test.
   coordinates. Charts / affine frames (`schema/mappings.ts`) come later.
 * Dense grids are row-major ("C" order, last axis fastest), matching numpy.
   Grid position (0,…,0) is at box corner `a`, the last at `b`.
+* Random arrays (`schema/distribution.ts`, `core/src/arrays/random.ts`):
+  `{type:"random", shape, dist, widget?}`; every distribution has
+  `seed: null | int | string`; continuous ones are location–scale
+  (`uniform` Z∈[-1,1), `gaussian`, `laplace`, `exponential`, `studentT`),
+  discrete: `bernoulli`, `discrete`, `integers`. Cell i is a pure function of
+  (seed, i) — a counter-based hash stream — so cells are order- and
+  chunking-independent. A displaced net's direction is
+  `{ arrays, norm?: number | "origin", scale?, name?, widget? }`: ONE vector
+  over all its arrays, `norm` its joint length (`"origin"` = that of the
+  displaced constants), `scale` a multiplier. `widget` = a row in the
+  viewer's `controls` panel; rows hold ADJUSTMENTS (per-bundle options:
+  `{ seed?: salt, scale?: multiplier }` by row id) that core's `adjustSpec`
+  folds into a spec (salt hashed into every governed random array's seed,
+  multiplier into the scale) and the viewer rebuilds the Bundle from
+  (`revision++`, `clearFieldCaches()`). Shapes never change, so the WGSL is
+  byte-identical and NO shader recompiles (pipelines are cached by code;
+  `gpu/test/nets.test.ts` asserts it); rows commit on release and are inert
+  while an animation plays; live dragging is a follow-up.
 * Field data has `kind: "symbolic" | "sampled"`. Sampled data has
   `samplePoints`. Pointwise-derived data is sampled iff any argument is; all
   sampled arguments must have IDENTICAL sample points (error otherwise).
@@ -155,7 +173,10 @@ profiling test.
   refreshed every 4th frame — a re-render costs more than a batch). Reals
   only. `apps/viewer/public/bundles/iris.json` (from
   `tools/iris/train.py`, PyTorch once-off) is the example: a 4-16-3 MLP, its
-  validation set and θ*, 2 / 3 orthogonal random directions;
+  validation set and θ*, 2 / 3 RANDOM directions (`iris_rnd2/3`: gaussian
+  `random` arrays with seeds, `norm: "origin"`, a Controls row each) for the
+  viewer plus the 3 fixed inline orthogonal directions (`iris_rand2/3`, no
+  fields) the PyTorch reference was computed along;
   `core/test/iris.test.ts` checks loss / accuracy against PyTorch to 1e-9,
   `core/test/autodiff.test.ts` every op's gradient against finite
   differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,
@@ -169,7 +190,8 @@ profiling test.
   marks); they never change values. Numbers are formatted compactly
   (`6.24·10⁻⁵`, unicode superscripts).
 * Viewer: one super-stack of panels top-left (`bundle`, `system` — closed by
-  default: compute / render, device, `mem cap`, live memory —, `2D space`,
+  default: compute / render, device, `mem cap`, live memory —, `controls`
+  when the bundle has rows, `2D space`,
   `colorfield`, `isolines`, `streamlines`, `vector field`), the `mappings`
   matrix bottom-left, cursor pane + legend bottom-right. The matrix assigns
   fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND

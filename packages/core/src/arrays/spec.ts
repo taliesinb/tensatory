@@ -6,6 +6,7 @@ import { NotSupportedError, SpecError } from "../errors";
 import { compileScalar, compileVector, emptyEnv, normalizeScalar, normalizeVector, pureContext } from "../symbolic";
 import { SymbolicScalarSchema, SymbolicVectorSchema } from "../symbolic/spec";
 import { NdArray } from "./ndarray";
+import { RandomArraySchema, buildRandomArray } from "./random";
 
 const axisSize = z.number().int().nonnegative();
 const axisPos = z.number().int();
@@ -61,6 +62,7 @@ export const SizedArraySchema: z.ZodType<SizedArraySpec> = z.discriminatedUnion(
   ManyHotArraySchema,
   SymbolicScalarArraySchema,
   SymbolicVectorArraySchema,
+  RandomArraySchema,
   SizedArrayHandleSchema,
 ]);
 
@@ -138,6 +140,8 @@ export function buildArray(spec: SizedArraySpec, path: string[] = []): NdArray {
       }
       return arr;
     }
+    case "random":
+      return buildRandomArray(spec, path);
     case "handle":
       throw new NotSupportedError(`external array handles ("${spec.path}") are not supported yet`, path);
   }

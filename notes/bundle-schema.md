@@ -62,8 +62,25 @@ and move the sample points along. Details in [field-data.md](field-data.md).
 
 `SizedArraySpec` (shape known without loading): `inline` (flat row-major
 `data`), `constant`, `oneHot` / `manyHot`, `symbolic` / `symbolicv` (each cell
-is an expression of its integer grid position relative to `origin`), and
+is an expression of its integer grid position relative to `origin`), `random`
+(each cell an independent draw from a `dist`, `schema/distribution.ts`), and
 `handle` (external `path` into npz / npy / zarr / bin — **not implemented**).
+
+Random arrays: every distribution carries `seed: RandomSeed` (`null` = the
+runtime picks one, int, or a hashed string). Cell *i* is a pure function of
+(seed, *i*) — a counter-based hash stream (`core/src/arrays/random.ts`) — so
+cells can be drawn in any order or chunking and a shape change keeps the
+surviving cells. Continuous distributions are location–scale (`loc + scale·Z`):
+`uniform` (Z ∈ [-1, 1), so `scale` is the half-width), `gaussian`, `laplace`,
+`exponential`, `studentT` (`df`); discrete ones: `bernoulli` (`p`, `hot`/`cold`
+— Rademacher is `hot 1, cold -1`), `discrete` (`values`, `probs`), `integers`
+(`[lo, hi)`). An optional `widget` asks the viewer for a row in the Controls
+pane: a `reseed` button for every distribution plus a log-spaced `scale`
+slider (`scaleRange`, `scaleSteps`) for location–scale ones — so a displaced
+net's random directions can be resampled and rescaled from the UI. Note that
+`random` is per array: a direction spanning several arrays (W1, b1, W2, b2)
+normalized jointly, as `tools/iris/train.py` does, needs a normalization
+option on the `displace` record (planned).
 Dense grids and arrays are row-major ("C" order, last axis fastest), matching
 numpy; grid position (0,…,0) sits at box corner `a`.
 

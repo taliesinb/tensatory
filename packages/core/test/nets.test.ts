@@ -319,9 +319,9 @@ describe("displace", () => {
   it("adds a [K] coefficient input; targets may be inputs, nodes, bound inputs or constants", () => {
     const b = bundle({
       bowl,
-      around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ p: inline([1, 0]) }, { p: inline([0, 1]) }] },
-      onNode: { type: "displace", net: "bowl", coeffs: "s", directions: [{ h: inline([1, 1]) }] },
-      onConst: { type: "displace", net: { type: "def", inputs: {}, arrays: { c: inline([3]) }, nodes: { d: { op: "mul", vals: ["c", 2] } }, outputs: { d: [1] } }, directions: [{ c: inline([1]) }] },
+      around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ arrays: { p: inline([1, 0]) } }, { arrays: { p: inline([0, 1]) } }] },
+      onNode: { type: "displace", net: "bowl", coeffs: "s", directions: [{ arrays: { h: inline([1, 1]) } }] },
+      onConst: { type: "displace", net: { type: "def", inputs: {}, arrays: { c: inline([3]) }, nodes: { d: { op: "mul", vals: ["c", 2] } }, outputs: { d: [1] } }, directions: [{ arrays: { c: inline([1]) } }] },
     });
     expect(b.net("around").signature.inputs).toEqual({ t: [2] });
     expect(b.net("onNode").signature.inputs).toEqual({ p: [2], s: [1] });
@@ -329,10 +329,33 @@ describe("displace", () => {
   });
 
   it("rejects unknown targets, wrong shapes, name collisions", () => {
-    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", directions: [{ q: inline([1, 0]) }] } }).net("d")).toThrow(/"q" is neither an input nor an internal array/);
-    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", directions: [{ p: inline([1, 0, 0]) }] } }).net("d")).toThrow(/direction 0 of "p" has shape \[3\], "p" has \[2\]/);
-    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", coeffs: "h", directions: [{ p: inline([1, 0]) }] } }).net("d")).toThrow(/collides/);
+    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", directions: [{ arrays: { q: inline([1, 0]) } }] } }).net("d")).toThrow(/"q" is neither an input nor an internal array/);
+    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", directions: [{ arrays: { p: inline([1, 0, 0]) } }] } }).net("d")).toThrow(/direction 0 of "p" has shape \[3\], "p" has \[2\]/);
+    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", coeffs: "h", directions: [{ arrays: { p: inline([1, 0]) } }] } }).net("d")).toThrow(/collides/);
     expect(NetSchema.safeParse({ type: "displace", net: "bowl", directions: [] }).success).toBe(false);
+    expect(NetSchema.safeParse({ type: "displace", net: "bowl", directions: [{ p: inline([1, 0]) }] }).success).toBe(false); // needs `arrays`
+    expect(() => bundle({ bowl, d: { type: "displace", net: "bowl", directions: [{ arrays: {} }] } }).net("d")).toThrow(/names no arrays/);
+  });
+
+  it("norm / scale treat a direction as one vector over all its arrays", () => {
+    // two arrays a: [2], c: [1] bound to (3, 4) and (0): the joint origin norm is 5
+    const two: NetDefinitionSpec = { type: "def", inputs: { a: [2], c: [1] }, nodes: { s: { op: "reduce", fn: "sum", val: { op: "concat", vals: ["a", "c"], axis: 0 } } }, outputs: { s: [] } };
+    const star = { type: "bind", net: "two", bind: { a: inline([3, 4]), c: inline([0]) } } as const;
+    const at = (id: string, t: number[]) => bundle({ two, [id]: nets[id]! }).net(id).evaluate({ t: new NdArray([t.length], Float64Array.from(t)) }).s!.data[0]!;
+    const nets: Record<string, NetSpec> = {
+      raw: { type: "displace", net: star, directions: [{ arrays: { a: inline([1, 1]), c: inline([1]) } }] },
+      scaled: { type: "displace", net: star, directions: [{ arrays: { a: inline([1, 1]), c: inline([1]) }, scale: 2 }] },
+      unit: { type: "displace", net: star, directions: [{ arrays: { a: inline([0, 3]), c: inline([4]) }, norm: 1 }] }, // |(0,3,4)| = 5 -> (0, .6, .8)
+      origin: { type: "displace", net: star, directions: [{ arrays: { a: inline([0, 3]), c: inline([4]) }, norm: "origin", scale: 0.5 }] }, // -> length 5, then halved
+      partial: { type: "displace", net: star, directions: [{ arrays: { c: inline([2]) }, norm: "origin" }] }, // origin norm over `c` alone is 0
+      onNode: { type: "displace", net: "two", directions: [{ arrays: { s: inline([1], []) }, norm: "origin" }] },
+    };
+    expect(at("raw", [1])).toBeCloseTo(7 + 3, 12);
+    expect(at("scaled", [1])).toBeCloseTo(7 + 6, 12);
+    expect(at("unit", [1])).toBeCloseTo(7 + 1.4, 12);
+    expect(at("origin", [1])).toBeCloseTo(7 + 0.5 * 5 * 1.4, 12);
+    expect(() => at("partial", [1])).toThrow(/target norm is 0/);
+    expect(() => bundle({ two, onNode: nets.onNode! }).net("onNode").program).toThrow(/bound input or a baked array/);
   });
 });
 
@@ -495,7 +518,7 @@ describe("net-backed fields", () => {
     // f(t) = |(1, 2) + t0 (1, 0) + t1 (0, 1)|^2
     const b = build({ type: "net", net: "around", output: "f", box: [[-1, 1], [-1, 1]] }, "scalar", {
       bowl,
-      around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ p: inline([1, 0]) }, { p: inline([0, 1]) }] },
+      around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ arrays: { p: inline([1, 0]) } }, { arrays: { p: inline([0, 1]) } }] },
     });
     const f = b.scalarField("f").data;
     expect(f.value([0, 0])).toBeCloseTo(5, 12);
@@ -507,7 +530,7 @@ describe("net-backed fields", () => {
       tensatory: "0.1", manifolds: { line: { numDims: 1 } },
       nets: {
         bowl,
-        around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ h: inline([1, 1]) }] },
+        around: { type: "displace", net: { type: "bind", net: "bowl", bind: { p: inline([1, 2]) } }, directions: [{ arrays: { h: inline([1, 1]) } }] },
       },
       fields: { f: { kind: "scalar", data: { type: "net", net: "around", output: "f", box: [[-2, 2]] } } },
     } satisfies BundleSpec);

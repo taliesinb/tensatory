@@ -13,7 +13,9 @@ import {
   SymbolicScalarFieldData,
   SymbolicVectorFieldData,
   TensatoryError,
+  adjustSpec,
   arrowGlyphs,
+  controlRows,
   boxBlur,
   contourField,
   integrateFromSeeds,
@@ -23,6 +25,7 @@ import {
   planStreamlines,
   streamlineSeeds,
   taubinSmooth,
+  type Adjustments,
   type ContourResult,
   type GlyphStyle,
   type Lattice,
@@ -40,6 +43,7 @@ import { makeIntervalSlider, type IntervalEl } from "./interval";
 import { installLogCapture, showError, status } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import type { Manifold, PointSet } from "@tensatory/core";
+import type { BundleSpec } from "@tensatory/schema";
 import { Renderer2D, type LineLayer, type Scene, type TriangleLayer } from "./render2d";
 import { Sampler, type Values } from "./sampler";
 import { GpuGeometry } from "./gpuGeometry";
@@ -48,6 +52,7 @@ import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
+import { ControlsPane } from "./controls";
 import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
@@ -148,7 +153,14 @@ const SLOT_TIP: Record<Slot, string> = {
 const slotIndex = (k: Slot): number => SLOTS.indexOf(k);
 
 interface State {
+  /** the bundle in use: the parsed one, or the one rebuilt from `baseSpec` with the Controls pane's `adjust` applied */
   bundle: Bundle | undefined;
+  /** the parsed bundle's spec, as loaded */
+  baseSpec: BundleSpec | undefined;
+  /** Controls-pane adjustments (per bundle option): reseed salts and scale multipliers by row id */
+  adjust: Adjustments;
+  /** bumped whenever `bundle` is rebuilt from adjustments (a frame key component: the fields are new objects) */
+  revision: number;
   bundleFile: string; // for options storage
   /** the selected space (manifold id) of the bundle; fields, point sets and the view belong to it */
   space: string;
@@ -166,7 +178,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1245,7 +1257,7 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
 interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
-interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
+interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments }
 /**
  * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
  * their own 3D defaults (a volume wants more, fainter lines with several particles each; the HTML `data-value`s
@@ -1263,7 +1275,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
     ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
-    maps: state.maps, intervals: state.intervals, space: state.space,
+    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust,
     spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
@@ -1371,10 +1383,55 @@ function aboutText(bundle: Bundle): string {
 }
 function setAbout(text: string): void { const el = $("pickAbout"); el.firstElementChild!.textContent = text; el.dataset.tip = text; }
 
-function setBundle(bundle: Bundle, file: string, wantSpace?: string | null): void {
-  state.bundle = bundle; state.bundleFile = file;
-  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; viewBoxKey = ""; state.maps = {}; state.intervals = {};
+/*******************************************************/
+/* controls: adjustments (reseed / scale) of the bundle's random directions and arrays */
+
+const controls = new ControlsPane($("controlsPanel"));
+
+/** the bundle with the current adjustments applied (the parsed bundle itself when there are none) */
+function adjustedBundle(parsed: Bundle): Bundle {
+  const adj = Object.fromEntries(Object.entries(state.adjust).filter(([, a]) => a.seed !== undefined || (a.scale !== undefined && a.scale !== 1)));
+  state.adjust = adj;
+  return Object.keys(adj).length ? new Bundle(adjustSpec(parsed.spec, adj)) : parsed;
+}
+
+/**
+ * Forget everything derived from the bundle's fields (a rebuild made them new objects): CPU sample and range
+ * caches, GPU grids / kernels / sets (their code is cached by the device by text and survives), the recolourers.
+ * Selections, view, colormaps and intervals are keyed by field id and stay.
+ */
+function clearFieldCaches(): void {
+  rangeCache.clear(); sampler.clear(); geometry?.clear(); fused?.clear(); view3d?.clear(); recolour?.clear(); gradCache.clear(); useCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; glyphCache = undefined; viewBoxKey = "";
+}
+
+/** a Controls row changed: rebuild the bundle from the base spec with the adjustments, keep everything else */
+function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void {
+  if (!state.baseSpec) return;
+  const next = { ...state.adjust }; if (a.seed === undefined && (a.scale === undefined || a.scale === 1)) delete next[id]; else next[id] = a;
+  state.adjust = next;
+  try {
+    state.bundle = adjustedBundle(new Bundle(state.baseSpec));
+    buildErrors = state.bundle.buildAll();
+    state.revision++;
+    clearFieldCaches();
+    updateInfo();
+  } catch (e) { showError(e); }
+  saveOptsSoon();
+  state.dirty = true;
+}
+
+/** whether an animation is playing: the Controls rows are inert then (a rebuild would stutter it) */
+const animating = (): boolean => !state.paused && ((ui.isoAnim.checked && !!slotScalar("iv")) || (ui.anim.checked && num("lines") !== null && !!streamVector()));
+
+function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
+  state.bundleFile = file; state.baseSpec = parsed.spec;
+  state.adjust = readOpts().controls ?? {};
+  let bundle: Bundle;
+  try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; bundle = parsed; } // stale adjustments (the bundle changed): drop them
+  state.bundle = bundle; state.revision++;
+  clearFieldCaches(); state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
+  controls.build(controlRows(parsed.spec), () => state.adjust, applyAdjustment);
   const errors = buildErrors;
   setAbout(aboutText(bundle));
   $("pickErrRow").style.display = errors.size ? "" : "none";
@@ -1514,7 +1571,7 @@ let lastT = performance.now();
 let pendingFrame: (Omit<FrameReport, "ms"> & { t0: number; jsMs: number }) | undefined;
 let lastFrameKey = "", lastTier: Tier = "settled";
 /** what a frame recomputes when it changes: grid, levels, slots, options (CPU compute has no dispatch counter to watch) */
-const frameKey = () => [spaceDims(), autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
+const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
 /** what the resolution is spent on: failed steps are remembered per context */
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
@@ -1534,6 +1591,7 @@ function frame(now: number): void {
   }
   if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
   if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
+  controls.setEnabled(!animating());
   if (state.dirty) {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();

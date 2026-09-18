@@ -18,6 +18,9 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .tick { color: #171c28; font-size: 14px; line-height: 1; cursor: pointer; user-select: none; padding: 0 2px; width: auto !important; flex: none; }
 .tick.on { color: #3b82f6; }
 .sl.disabled, .ds.disabled, .ch.disabled { pointer-events: none; opacity: .5; }
+#controlsPanel.inert .body { opacity: .45; pointer-events: none; }
+.row.ctl .reseed { font-size: 15px; color: #7a86a3; flex: none; }
+.row.ctl .reseed:hover { color: #e8ecf5; }
 .strip .tick { color: #3a4358; }
 .strip .tick.on { color: #3b82f6; }
 .panel .body { padding: 6px 12px 8px; }

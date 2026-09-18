@@ -106,25 +106,56 @@ function displaceProgram(inner: Program, spec: DisplacedNetSpec, nets: ProgramRe
   inferNet(spec, nets, path); // validates targets and direction shapes
   const t = coeffsName(spec);
   const K = spec.directions.length;
-  const targets = [...new Set(spec.directions.flatMap((d) => Object.keys(d)))];
+  const targets = [...new Set(spec.directions.flatMap((d) => Object.keys(d.arrays)))];
   const consts = { ...inner.consts };
   const shapes: Record<string, Shape> = { ...inner.shapes, [t]: [K] };
-  // stacked directions per target: [K, ...shape], zero where a record omits the target
   for (const a of targets) {
     const shape = inner.shapes[a]!;
     if (shape.some((d) => typeof d === "string")) throw new SpecError(`cannot displace "${a}": its shape ${JSON.stringify(shape)} has symbolic sizes`, [...path, "directions"]);
-    const dims = shape as number[];
+  }
+  // per direction: its arrays, built once, and the factor `norm` / `scale` apply to the direction as ONE vector
+  const built = spec.directions.map((dir, k) => {
+    const p = [...path, "directions", String(k)];
+    const arrays = new Map(Object.entries(dir.arrays).map(([a, d]) => [a, buildSized(d, [...p, "arrays", a])] as const));
+    let factor = dir.scale ?? 1;
+    if (dir.norm !== undefined) {
+      const sq = (arr: NdArray) => { let s = 0; for (const v of arr.data) s += v * v; return s; };
+      let target: number;
+      if (dir.norm === "origin") {
+        // the joint norm of the displaced arrays' own values: constants only (a node has no value before evaluation)
+        let s = 0;
+        for (const a of arrays.keys()) {
+          const c = inner.consts[a];
+          if (!c) throw new SpecError(`norm "origin" needs "${a}" to be a bound input or a baked array of the net, not an input or a node`, [...p, "norm"]);
+          s += sq(c.arr);
+        }
+        target = Math.sqrt(s);
+      } else target = dir.norm;
+      let s = 0;
+      for (const arr of arrays.values()) s += sq(arr);
+      const have = Math.sqrt(s);
+      if (!(have > 0)) throw new SpecError(`direction ${k} is zero, it cannot be normalized`, [...p, "norm"]);
+      if (!(target > 0)) throw new SpecError(`direction ${k}: the target norm is ${target}`, [...p, "norm"]);
+      factor *= target / have;
+    }
+    return { arrays, factor };
+  });
+  // stacked directions per target: [K, ...shape], zero where a direction omits the target
+  for (const a of targets) {
+    const dims = inner.shapes[a] as number[];
     const n = dims.reduce((p, s) => p * s, 1);
     const stacked = new NdArray([K, ...dims]);
-    spec.directions.forEach((rec, k) => {
-      const d = rec[a];
-      if (d) stacked.data.set(buildSized(d, [...path, "directions", String(k), a]).data, k * n);
+    built.forEach(({ arrays, factor }, k) => {
+      const d = arrays.get(a);
+      if (!d) return;
+      const off = k * n;
+      for (let i = 0; i < n; i++) stacked.data[off + i] = factor * d.data[i]!;
     });
     const dn = `${a}${DISP}d`;
     if (dn in shapes) throw new SpecError(`internal name "${dn}" is taken`, path);
     consts[dn] = { arr: stacked, shape: [K, ...dims] };
     shapes[dn] = [K, ...dims];
-    shapes[`${a}${DISP}`] = shape;
+    shapes[`${a}${DISP}`] = dims;
   }
   const dispExpr = (a: string): ArrayExpr => {
     const letters = Array.from({ length: inner.shapes[a]!.length }, (_, i) => String.fromCharCode(0x61 + i)).join(""); // a b c ...

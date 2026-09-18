@@ -31,7 +31,7 @@ is an output of shape `[]` like any other. `BundleSpec.nets` maps `NetId` →
 |---|---|
 | `def` | `inputs: {name: shape}`, `nodes: {name: ArrayExpr}` (a DAG, any order), `arrays` (baked constants), `outputs: {name: shape}` — the declared output shapes are *checked* against the inferred ones |
 | `bind` | fix some inputs to `ArraySpec`s → a net over the remaining inputs; bound inputs become internal arrays |
-| `displace` | K direction records over any arrays of the net → the same net plus a `[K]` input `coeffs` (default `t`); every named array A becomes `A + Σₖ tₖ·directions[k][A]` wherever it is used |
+| `displace` | K directions (`{ arrays, norm?, scale?, name?, widget? }`) over any arrays of the net → the same net plus a `[K]` input `coeffs` (default `t`); every named array A becomes `A + Σₖ tₖ·directions[k].arrays[A]` wherever it is used (each direction scaled to `norm` × `scale`) |
 | `grad` | net (+ optional `bind`) → a net whose outputs are gradients `d(of)/d(wrt)` plus `keep`-ed forward outputs |
 
 One namespace per net for inputs, nodes and constant arrays.
@@ -90,26 +90,46 @@ axis and `reshape` with `-1` absorbing a symbolic size are errors.
 
 ```jsonc
 "iris_star":  { "type": "bind", "net": "iris_val", "bind": { "W1": …θ*… } },          // no inputs left
-"iris_rand2": { "type": "displace", "net": "iris_star", "directions": [d0, d1] }     // one input t: [2]
+"iris_rnd2":  { "type": "displace", "net": "iris_star",
+                "directions": [{ "arrays": { "W1": …, "b1": …, "W2": …, "b2": … }, "norm": "origin", "widget": { "id": "d0" } }, …] }  // one input t: [2]
 ```
 
-A direction record maps array names to arrays of matching per-example shape;
-the keys may be inputs, internal nodes (activations), inputs bound away by
-`bind`, or baked constants — a missing key is a zero direction, several keys
-in one record move together. `bind` supplies the origin, `displace` the
-directions, and since the displaced net's sole remaining input is `t: [K]`,
-the field needs nothing but `net` + `output` + `box` (see below). "Around" is
-therefore flexible: parameter subspaces (random / PCA / Hessian directions),
-but equally a perturbation of a hidden activation or of the data. This
-replaced an earlier `frame` sugar on the field spec: one mechanism, and it
-composes (displace a grad net, displace along the output of another net…).
+A direction (`DirectionSpec`) has `arrays`: array names → arrays of matching
+per-example shape; the names may be inputs, internal nodes (activations),
+inputs bound away by `bind`, or baked constants — a missing name is a zero
+direction, several names in one direction move together. `bind` supplies the
+origin, `displace` the directions, and since the displaced net's sole
+remaining input is `t: [K]`, the field needs nothing but `net` + `output` +
+`box` (see below). "Around" is therefore flexible: parameter subspaces
+(random / PCA / Hessian directions), but equally a perturbation of a hidden
+activation or of the data. This replaced an earlier `frame` sugar on the
+field spec: one mechanism, and it composes (displace a grad net, displace
+along the output of another net…).
 
-Implementation (`program.ts`): the inner program gains a constant
-`A__dispd = [K, …shape(A)]` per target and a node
-`A__disp = A + einsum("k,k…->…", t, A__dispd)` right after `A` is available;
-every later use of `A` — in nodes, `call` inputs and the output map — is
-renamed to `A__disp`. So displacement is an ordinary graph rewrite and the
-evaluator knows nothing about it.
+A direction's arrays are ONE vector in the joint space of the named arrays:
+`norm` fixes its Euclidean length over all of them together — a number, or
+`"origin"` for the joint norm of the displaced arrays' own values (the
+loss-landscape convention "each direction as long as θ*"; the arrays must
+then be constants: bound inputs or baked arrays, a node has no value before
+evaluation) — and `scale` multiplies it afterwards. Random directions are
+directions whose arrays are `random` (bundle-schema.md): the iris bundle's
+are gaussian with seeds `"d0/W1"` etc. and `norm: "origin"`, so a direction
+is a fresh draw per seed, normalized like the fixed ones were. Random draws
+are not orthogonalized (in 131 dimensions the cosines are ~0.09).
+
+`widget` on a direction asks the viewer for a Controls-pane row for the whole
+direction (reseed + scale); see viewer.md "Controls". Rows never edit the
+bundle: core's `adjustSpec` (bundle/controls.ts) returns a spec with the
+row's salt hashed into every random array of the direction and its
+multiplier folded into `scale`.
+
+Implementation (`program.ts`): each direction's arrays are built, its factor
+(`scale` × `norm` / joint norm) computed, and the inner program gains a
+constant `A__dispd = [K, …shape(A)]` per target (direction k scaled by its
+factor) and a node `A__disp = A + einsum("k,k…->…", t, A__dispd)` right after
+`A` is available; every later use of `A` — in nodes, `call` inputs and the
+output map — is renamed to `A__disp`. So displacement is an ordinary graph
+rewrite and the evaluator knows nothing about it.
 
 ## grad
 
