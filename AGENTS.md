@@ -186,10 +186,15 @@ profiling test.
   d0..d2) for the viewer's 8 fields per space, plus the 3 fixed inline
   orthogonal directions (`iris_rand2/3`, `iris_trn_rand2/3`, no fields) the
   PyTorch reference was computed along. The training-set nets (N = 120)
-  exceed `NET_MAX_FLOATS`, so those fields are CPU-sampled (`costly`);
-  the CPU evaluator prunes a field's program to its output (`pruneProgram`,
-  `evalPoints`); the GPU emitter gets the FULL program — pruning its input
-  exposed a latent emitter bug in the gradient (see notes/nets.md).
+  exceed `NET_MAX_FLOATS` batched, so the emitter STREAMS the dataset axis
+  (`NetEmitter.streamed`: nodes carrying N computed one example at a time
+  in `for n < N`, reductions / contractions over N accumulate; legal when N
+  only ends in a reduction, else `StreamError` and the batched emission
+  stands; classification by dependence so autodiff's `1/N` seeds are
+  uniform and the gradient is one pass) — `train/loss` 3731 → 159 floats,
+  all 12 training fields on the GPU. The CPU evaluator prunes a field's
+  program to its output (`pruneProgram`, `evalPoints`); the streamed
+  emission prunes to the wanted outputs too.
   `core/test/iris.test.ts` checks every output against PyTorch to 1e-9,
   `core/test/autodiff.test.ts` every op's gradient against finite
   differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,

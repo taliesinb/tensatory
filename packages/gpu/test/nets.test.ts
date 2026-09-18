@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ArrayExpr, BundleSpec, NetDefinitionSpec, NetSpec } from "@tensatory/schema";
 import { Bundle, DenseGrid, SymbolicVectorFieldData, adjustSpec, type NetScalarFieldData, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
-import { GpuBackend, NET_MAX_FLOATS, buildSampleProgram, emitNetField, gpuSampleOn, gpuTranspilable, netFieldFloats } from "../src";
+import { GpuBackend, NET_MAX_FLOATS, buildSampleProgram, emitNetField, gpuSampleOn, gpuTranspilable, netFieldFloats, setEmitStream } from "../src";
 
 let gpu: GpuBackend | undefined;
 beforeAll(async () => {
@@ -152,6 +152,40 @@ describe("iris bundle on the GPU", () => {
     const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: loss }, vectors: {} });
     await agree(grad, new DenseGrid([24, 24], loss.box), "∇loss", 1e-3);
     await agree(loss.derivative(0).derivative(1), new DenseGrid([16, 16], loss.box), "∂²loss/∂t0∂t1", 2e-3);
+  });
+
+  it("streaming the dataset axis: the training-set nets (N = 120) fit, and agree with the CPU evaluator", async () => {
+    // batched, the [N, 16] hidden layer alone is 1920 floats; streamed, the footprint is one example's
+    for (const id of ["trainLoss2", "trainAcc2", "objective2", "lossSetosa2"]) {
+      const fd = bundle.scalarField(id).data as NetScalarFieldData;
+      const batched = emitNetField("x", fd.field, { D: 2, upload: () => 0, stream: "never", maxFloats: 1e9 })!;
+      const auto = emitNetField("x", fd.field, { D: 2, upload: () => 0 })!;
+      expect(batched.floats).toBeGreaterThan(NET_MAX_FLOATS);
+      expect(auto.streamed).toBe(true);
+      expect(auto.floats).toBeLessThan(600);
+      expect(gpuTranspilable(fd)).toBe(true);
+      expect(gpuTranspilable(fd.gradient())).toBe(true);
+      const declared = [...auto.code.matchAll(/array<f32, (\d+)>/g)].reduce((n, m) => n + Number(m[1]), 0);
+      expect(declared).toBe(auto.floats);
+      await agree(fd, new DenseGrid([40, 40], fd.box), id);
+    }
+    const loss = bundle.scalarField("trainLoss2").data as NetScalarFieldData;
+    const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: loss }, vectors: {} });
+    await agree(grad, new DenseGrid([24, 24], loss.box), "∇train/loss", 1e-3);
+    await agree(loss.derivative(0).derivative(1), new DenseGrid([12, 12], loss.box), "∂²train/loss", 3e-3);
+    const l3 = bundle.scalarField("trainLoss3").data;
+    await agree(l3, new DenseGrid([10, 10, 10], l3.box), "trainLoss3");
+  });
+
+  it("streamed and batched emissions of the same program agree (validation fields forced to stream)", async () => {
+    if (!gpu) return;
+    setEmitStream("always");
+    try {
+      for (const id of ["loss2", "acc2"]) { const fd = bundle.scalarField(id).data as NetScalarFieldData; expect(emitNetField("x", fd.field, { D: 2, upload: () => 0 })!.streamed).toBe(true); await agree(fd, new DenseGrid([32, 32], fd.box), `${id} streamed`); }
+      const loss = bundle.scalarField("loss2").data;
+      const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, 2, { scalars: { f: loss }, vectors: {} });
+      await agree(grad, new DenseGrid([20, 20], loss.box), "∇loss streamed", 1e-3);
+    } finally { setEmitStream("auto"); }
   });
 
   it("reseeding / rescaling a direction changes the packed data but not one byte of WGSL (no recompile)", () => {

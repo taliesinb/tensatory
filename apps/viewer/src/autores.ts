@@ -176,10 +176,12 @@ export class AutoRes {
     const idx = r.tier === "moving" ? this.moving : this.settled;
     const top = this.steps.length - 1;
     if (r.overCap) { this.fail(r.ctx, r.tier, idx); this.set(r.tier, idx - 1, "mem cap"); return; }
-    if (r.recomputed && r.ms > FRAME_BUDGET_MS && (!this.fill || this.fill.ctx !== r.ctx || r.ms / this.steps[idx]! ** this.dims >= this.fill.ms / this.fill.n ** this.dims * 0.5)) this.fill = { ms: r.ms, n: this.steps[idx]!, ctx: r.ctx }; // (a cheaper later sample at the same rung was a cache hit, not a cheaper fill)
+    // (not a frame that compiled shaders — in Safari that is seconds of compile, no fill; and a cheaper later sample
+    // at the same rung was a cache hit, not a cheaper fill)
+    if (r.recomputed && !r.compiled && r.ms > FRAME_BUDGET_MS && (!this.fill || this.fill.ctx !== r.ctx || r.ms / this.steps[idx]! ** this.dims >= this.fill.ms / this.fill.n ** this.dims * 0.5)) this.fill = { ms: r.ms, n: this.steps[idx]!, ctx: r.ctx };
     // CPU work is deterministic, not a hiccup: a recompute that spent more than the fill budget on the main thread
     // (a costly field sampled at this rung) fails the rung at once, whatever tier asked for it
-    if (r.recomputed && (r.jsMs ?? 0) > FILL_BUDGET_MS && idx > 0) {
+    if (r.recomputed && !r.compiled && (r.jsMs ?? 0) > FILL_BUDGET_MS && idx > 0) {
       let to = idx - 1;
       while (to > 0 && r.jsMs! * (this.steps[to]! / this.steps[idx]!) ** this.dims > FILL_BUDGET_MS) to--;
       this.fail(r.ctx, r.tier, idx); this.set(r.tier, to, `cpu ${r.jsMs!.toFixed(0)}ms`); return;

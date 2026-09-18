@@ -52,11 +52,17 @@ export const NET_MAX_FLOATS = 2000;
 let OPAQUE_BOUNDS = true;
 export function setOpaqueLoopBounds(on: boolean): void { OPAQUE_BOUNDS = on; }
 
+/** default streaming mode (NetEmitContext.stream overrides): auto = stream when the batched emission does not fit */
+let STREAM: "auto" | "always" | "never" = "auto";
+export function setEmitStream(mode: "auto" | "always" | "never"): void { STREAM = mode; sizeCache = new WeakMap(); }
+
 /** what the emitter needs from the program builder */
 export interface NetEmitContext {
   readonly D: number;
   /** override of NET_MAX_FLOATS (diagnostics) */
   readonly maxFloats?: number;
+  /** stream the dataset axis (see NetEmitter.streamed): auto = when the batched emission exceeds the limit (default) */
+  readonly stream?: "auto" | "always" | "never";
   /** pack an array into the shared `data` buffer; returns its element offset */
   upload(data: ArrayLike<number>): number;
 }
@@ -83,10 +89,19 @@ const NARY = new Set(["add", "mul", "min", "max", "mean", "rms"]);
 /** an array inside the emitted function */
 interface Arr {
   readonly shape: readonly number[];
-  /** priv: function-scope array `base[i]`; data: storage `data[base + i]`; lit: a scalar expression; point: the point `p` ([D]) */
-  readonly kind: "priv" | "data" | "lit" | "point";
+  /** priv: function-scope array `base[i]`; data: storage `data[base + i]`; lit: a scalar expression (uniform over
+   *  the shape); point: the point `p` ([D]); view: one example of a batched priv / data array (streaming) */
+  readonly kind: "priv" | "data" | "lit" | "point" | "view";
   readonly base: string;
+  /** view: the full array's shape, the streamed axis and the loop variable indexing it, where the array lives */
+  readonly full?: readonly number[];
+  readonly sAxis?: number;
+  readonly sVar?: string;
+  readonly store?: "priv" | "data";
 }
+
+/** a program the streaming emitter cannot stream (the caller falls back to the batched emission) */
+export class StreamError extends Error {}
 
 const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1);
 const strides = (shape: readonly number[]): number[] => { const s = new Array<number>(shape.length); for (let d = shape.length - 1, acc = 1; d >= 0; d--) { s[d] = acc; acc *= shape[d]!; } return s; };
@@ -153,6 +168,11 @@ class NetEmitter {
       case "point": return this.ctx.D === 1 ? "p" : `p[${idx[0]}]`;
       case "priv": return `${a.base}[${this.flat(a.shape, idx)}]`;
       case "data": return `data[${a.base} + ${this.flat(a.shape, idx)}]`;
+      case "view": {
+        const fullIdx = [...idx]; fullIdx.splice(a.sAxis!, 0, a.sVar!);
+        const f = this.flat(a.full!, fullIdx);
+        return a.store === "data" ? `data[${a.base} + ${f}]` : `${a.base}[${f}]`;
+      }
     }
   }
 
@@ -194,6 +214,14 @@ class NetEmitter {
 
   /** emit a whole program with its inputs bound to arrays; returns the outputs */
   program(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string): Record<string, Arr> {
+    const { env, sizeOf } = this.bindEnv(prog, inputs, path);
+    const outputs = new Set(Object.values(prog.outputs));
+    this.emitNodes(prog.nodes, env, sizeOf, path, outputs, !this.inCall);
+    return Object.fromEntries(Object.entries(prog.outputs).map(([o, n]) => [o, env.get(n)!]));
+  }
+
+  /** bind a program's inputs and constants: the starting environment and the concrete symbolic sizes */
+  private bindEnv(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string): { env: Map<string, Arr>; sizeOf: (d: number | string) => number; sizes: Map<string, number> } {
     const env = new Map<string, Arr>();
     const sizes = new Map<string, number>();
     const bind = (name: string, actual: readonly number[], declared: Shape) => {
@@ -219,14 +247,22 @@ class NetEmitter {
       if (s === undefined) throw new Error(`${path}: symbolic size "${d}" is not bound`);
       return s;
     };
+    return { env, sizeOf, sizes };
+  }
+
+  /**
+   * Emit a list of nodes into `env`, with liveness-driven reuse of function-scope arrays when `manage` (not inside
+   * an inlined call): names in `keep` are never released (outputs, values a later phase reads). `compute` overrides
+   * how a node's value is produced (the streaming emitter's per-example / accumulating nodes).
+   */
+  private emitNodes(nodes: readonly { name: string; expr: ArrayExpr }[], env: Map<string, Arr>, sizeOf: (d: number | string) => number, path: string, keep: ReadonlySet<string>, manage: boolean, compute?: (node: { name: string; expr: ArrayExpr }, env: Map<string, Arr>) => Arr): void {
     // liveness: the last node that reads each name; outputs and everything a nested (inlined) call produces live on
     const lastUse = new Map<string, number>();
-    prog.nodes.forEach((node, i) => { for (const dep of exprNames(node.expr)) lastUse.set(dep, i); });
-    const outputs = new Set(Object.values(prog.outputs));
-    const top = this.scratch.length === 0 && this.owners.size === 0 && !this.inCall;
+    nodes.forEach((node, i) => { for (const dep of exprNames(node.expr)) lastUse.set(dep, i); });
+    const top = manage;
     const releaseDying = (node: { name: string; expr: ArrayExpr }, i: number) => {
       for (const dep of exprNames(node.expr)) {
-        if (lastUse.get(dep) !== i || outputs.has(dep)) continue;
+        if (lastUse.get(dep) !== i || keep.has(dep)) continue;
         const a = env.get(dep);
         if (!a || a.kind !== "priv") continue;
         const own = this.owners.get(a.base);
@@ -235,12 +271,12 @@ class NetEmitter {
         if (own.size === 0) { this.owners.delete(a.base); this.release(a.base); }
       }
     };
-    prog.nodes.forEach((node, i) => {
+    nodes.forEach((node, i) => {
       this.scratch = [];
       // an elementwise node writes element i from the operands' element i (or a broadcast of a smaller operand): an
       // operand that dies here can be its output buffer — release it first so alloc picks it up (in-place update)
       if (top && isElementwise(node.expr)) releaseDying(node, i);
-      const val = this.expr(node.expr, env, sizeOf, `${path}.${node.name}`);
+      const val = compute ? compute(node, env) : this.expr(node.expr, env, sizeOf, `${path}.${node.name}`);
       env.set(node.name, val);
       if (!top) return;
       // a folded node may ALIAS an operand (`add(x, 0)` is x): if that operand was just released, take it back
@@ -252,13 +288,278 @@ class NetEmitter {
       // operands whose last reader this was
       releaseDying(node, i);
     });
-    return Object.fromEntries(Object.entries(prog.outputs).map(([o, n]) => [o, env.get(n)!]));
   }
+  /*******************************************************/
+  /* streaming: the dataset axis in time instead of space */
+
+  /**
+   * Emit `prog` with its symbolic axis S (the dataset axis, "N") STREAMED: instead of materializing every `[N, …]`
+   * intermediate — the [N, 16] hidden layer alone is 1920 floats at N = 120, past Safari's 8 KB of function
+   * variables — the nodes that carry S are computed one example at a time inside `for n < N`, and the nodes that
+   * consume S (a reduce over it, an einsum contracting it: the loss's mean, the weight gradients' `ij,ik->kj`)
+   * ACCUMULATE across the loop. Same batched program, same loops per op; the N loop merely moves outside the whole
+   * per-example chain, so the footprint is that of one example. Semantically nothing changes: a streamed program
+   * is legal exactly when S only ever ends in a reduction (no op couples examples) — anything else throws
+   * StreamError and the caller keeps the batched emission.
+   *
+   * Nodes are classified by DEPENDENCE, not shape: a node whose value does not depend on a batched name — autodiff's
+   * `1/N` seed `add(mul(nll, 0), 1)` has shape [N, 1] but reads nothing — is uniform and emitted once, outside
+   * (`elementwise` folds it to one scalar). Levels: a batched node depending (through a non-batched node) on an
+   * accumulated result belongs to a later loop, which recomputes the per-example chain it needs (the gradient of a
+   * mean needs no second pass thanks to the fold above). Only the nodes `wanted` outputs need are emitted.
+   */
+  streamed(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string, wanted: readonly string[]): Record<string, Arr> {
+    const { env, sizeOf } = this.bindEnv(prog, inputs, path);
+    const fail = (why: string): never => { throw new StreamError(`${path}: cannot stream: ${why}`); };
+    // the streamed axis: the symbolic size of the largest concrete extent
+    const symbolic = new Map<string, number>();
+    for (const sh of [...Object.values(prog.inputs), ...Object.values(prog.consts).map((c) => c.shape)]) for (const d of sh) if (typeof d === "string") symbolic.set(d, sizeOf(d));
+    if (!symbolic.size) fail("no symbolic axis");
+    const S = [...symbolic.entries()].sort((a, b) => b[1] - a[1])[0]![0], n = symbolic.get(S)!;
+    // full (symbolic) shapes of every name
+    const names = new Map<string, Shape>();
+    for (const [k, sh] of Object.entries(prog.inputs)) names.set(k, sh);
+    for (const [k, c] of Object.entries(prog.consts)) names.set(k, c.shape);
+    const shapeEnv = { names, axisNames: new Set(symbolic.keys()), nets: this.nets };
+    for (const node of prog.nodes) names.set(node.name, inferExpr(node.expr, shapeEnv, [path, node.name]));
+    const sPos = (sh: Shape): number | undefined => { const i = sh.indexOf(S); if (i >= 0 && sh.indexOf(S, i + 1) >= 0) fail(`"${S}" appears twice in a shape`); return i < 0 ? undefined : i; };
+    const sPosOfExpr = (x: ArrayExpr): number | undefined => (typeof x === "number" ? undefined : typeof x === "string" ? sPos(names.get(x) ?? fail(`unknown name ${x}`)) : x.op === "arg" ? sPos(names.get(x.name)!) : sPos(inferExpr(x, shapeEnv, [path])));
+    const concrete = (sh: Shape) => sh.map((d) => sizeOf(d));
+    const rest = (sh: Shape) => { const p = sPos(sh); return concrete(p === undefined ? sh : sh.filter((_, i) => i !== p)); };
+    // only what the wanted outputs need
+    const byName = new Map(prog.nodes.map((nd) => [nd.name, nd]));
+    const needed = new Set<string>();
+    const visit = (nm: string) => { const nd = byName.get(nm); if (!nd || needed.has(nm)) return; needed.add(nm); for (const d of exprNames(nd.expr)) visit(d); };
+    const wantedNames = wanted.map((o) => prog.outputs[o] ?? fail(`no output "${o}"`));
+    wantedNames.forEach(visit);
+    const nodes = prog.nodes.filter((nd) => needed.has(nd.name));
+    // classification and scheduling (see above)
+    const batched = new Set<string>(), lvl = new Map<string, number>(), avail = new Map<string, number>(), kind = new Map<string, "batched" | "boundary" | "plain">();
+    for (const [k, sh] of names) if (!byName.has(k)) { if (sPos(sh) !== undefined) { batched.add(k); lvl.set(k, 0); } else avail.set(k, -1); }
+    for (const nd of nodes) {
+      const deps = [...effectiveNames(nd.expr)];
+      const depBatched = deps.some((d) => batched.has(d));
+      const hasS = sPos(names.get(nd.name)!) !== undefined;
+      const need = Math.max(0, ...deps.map((d) => (batched.has(d) ? lvl.get(d)! : (avail.get(d) ?? -1) + 1)));
+      if (!depBatched) { kind.set(nd.name, "plain"); avail.set(nd.name, Math.max(-1, ...deps.map((d) => avail.get(d) ?? -1))); }
+      else if (hasS) { kind.set(nd.name, "batched"); batched.add(nd.name); lvl.set(nd.name, need); }
+      else { kind.set(nd.name, "boundary"); lvl.set(nd.name, need); avail.set(nd.name, need); }
+    }
+    for (const w of wantedNames) if (batched.has(w)) fail(`output "${w}" carries the streamed axis`);
+    const loops = Math.max(0, ...nodes.filter((nd) => kind.get(nd.name) !== "plain").map((nd) => lvl.get(nd.name)! + 1));
+    // names read outside the phase that computes them stay allocated
+    const group = (nm: string) => (kind.get(nm) === "batched" ? `b${lvl.get(nm)}` : `p${avail.get(nm)}`);
+    const keep = new Set(wantedNames);
+    for (const nd of nodes) for (const d of exprNames(nd.expr)) if (byName.has(d) && needed.has(d) && group(d) !== group(nd.name)) keep.add(d);
+    const hints = (inLoop: boolean) => { const h = new Map<string, readonly number[]>(); for (const [k, sh] of names) h.set(k, inLoop ? rest(sh) : concrete(sh)); return h; };
+    const plainAt = (k: number) => nodes.filter((nd) => kind.get(nd.name) === "plain" && avail.get(nd.name) === k);
+
+    this.shapeHints = hints(false);
+    this.emitNodes(plainAt(-1), env, sizeOf, path, keep, !this.inCall);
+    for (const nd of plainAt(-1)) if (sPos(names.get(nd.name)!) !== undefined && env.get(nd.name)!.kind !== "lit") fail(`"${nd.name}" has the streamed axis but depends on no batched value and is not uniform`);
+
+    for (let L = 0; L < loops; L++) {
+      const boundaries = nodes.filter((nd) => kind.get(nd.name) === "boundary" && lvl.get(nd.name) === L);
+      // the per-example chain this loop needs: batched nodes reachable from its boundaries through batched names
+      const body = new Set<string>();
+      const grow = (nm: string) => { for (const d of exprNames(byName.get(nm)!.expr)) if (batched.has(d) && byName.has(d) && !body.has(d)) { body.add(d); grow(d); } };
+      boundaries.forEach((b) => grow(b.name));
+      // accumulators
+      const accs = new Map<string, { acc: Arr; fn: string }>();
+      for (const b of boundaries) {
+        const { fn } = this.perExample(b.expr, sPosOfExpr, S, n, path);
+        if (!fn) fail(`"${b.name}" consumes the streamed axis with "${typeof b.expr === "object" ? b.expr.op : b.expr}", not a reduction`);
+        this.scratch = [];
+        const acc = this.alloc(concrete(names.get(b.name)!));
+        this.scratch = [];
+        (this.owners.get(acc.base) ?? this.owners.set(acc.base, new Set()).get(acc.base)!).add(b.name);
+        const init = fn === "prod" ? "1.0" : fn === "max" || fn === "logsumexp" ? "-3.4e38" : fn === "min" ? "3.4e38" : "0.0";
+        this.loops(acc.shape, (i) => this.lines.push(`  ${this.read(acc, i)} = ${init};`));
+        accs.set(b.name, { acc, fn: fn! });
+      }
+      // the loop over examples: every array carrying S is read through a one-example view
+      const sVar = this.fresh("n");
+      this.lines.push(`  for (var ${sVar}: i32 = 0; ${sVar} < ${this.bound(n)}; ${sVar}++) {`);
+      const declared = new Set(this.sizes.keys());
+      const loopEnv = new Map<string, Arr>();
+      for (const [k, a] of env) { const p = sPos(names.get(k) ?? []); loopEnv.set(k, p === undefined ? a : this.view(a, p, sVar)); }
+      this.shapeHints = hints(true);
+      const order = nodes.filter((nd) => body.has(nd.name) || accs.has(nd.name));
+      // nothing defined outside the loop may be released (or written in place) inside it: the next example reads it
+      const outer = new Set(loopEnv.keys());
+      this.emitNodes(order, loopEnv, sizeOf, `${path}.n`, outer, !this.inCall, (nd, e) => {
+        const { expr, fn } = this.perExample(nd.expr, sPosOfExpr, S, n, path);
+        const v = this.expr(expr, e, sizeOf, `${path}.${nd.name}`);
+        const a = accs.get(nd.name);
+        if (!a) return this.reconcile(v, rest(names.get(nd.name)!), nd.name);
+        // accumulate this example's contribution
+        const src = this.reconcile(v, a.acc.shape, nd.name);
+        this.loops(a.acc.shape, (i) => {
+          const x = this.read(a.acc, i), y = this.read(src, i);
+          const upd = fn === "sum" || fn === "mean" ? `${x} + ${y}` : fn === "prod" ? `${x} * ${y}` : fn === "max" ? `max(${x}, ${y})` : fn === "min" ? `min(${x}, ${y})` : `lse2_(${x}, ${y})`;
+          this.lines.push(`  ${x} = ${upd};`);
+        });
+        return a.acc;
+      });
+      this.lines.push(`  }`);
+      // loop-scoped arrays are gone
+      for (const [sz, pool] of this.free) this.free.set(sz, pool.filter((b) => declared.has(b)));
+      for (const base of [...this.owners.keys()]) if (!declared.has(base)) this.owners.delete(base);
+      for (const nm of [...this.sizes.keys()]) if (!declared.has(nm)) this.sizes.delete(nm);
+      this.shapeHints = hints(false);
+      for (const [nm, { acc, fn }] of accs) {
+        if (fn === "mean") this.loops(acc.shape, (i) => this.lines.push(`  ${this.read(acc, i)} = ${this.read(acc, i)} / ${f32(n)};`));
+        env.set(nm, acc);
+      }
+      this.emitNodes(plainAt(L), env, sizeOf, path, keep, !this.inCall);
+    }
+    this.shapeHints = new Map();
+    return Object.fromEntries(wanted.map((o) => [o, env.get(prog.outputs[o]!)!]));
+  }
+
+  /** one example of a batched array (streaming): the loop variable indexes the streamed axis */
+  private view(a: Arr, sAxis: number, sVar: string): Arr {
+    const shape = a.shape.filter((_, i) => i !== sAxis);
+    if (a.kind === "lit") return { ...a, shape };
+    if (a.kind === "priv" || a.kind === "data") return { kind: "view", base: a.base, shape, full: a.shape, sAxis, sVar, store: a.kind };
+    throw new StreamError(`cannot view a ${a.kind} array per example`);
+  }
+
+  /** `v` as `shape` (an alias when contiguous and of the same size) */
+  private reconcile(v: Arr, shape: readonly number[], what: string): Arr {
+    if (v.shape.length === shape.length && v.shape.every((d, i) => d === shape[i])) return v;
+    if (size(v.shape) !== size(shape)) throw new StreamError(`"${what}": per-example shape [${v.shape}] is not [${shape}]`);
+    if (v.kind === "lit") return { ...v, shape };
+    return { ...this.materialize(v), shape };
+  }
+
+  /**
+   * Rewrite a node's expression for ONE example of its batched operands (their streamed axis dropped): axis
+   * arguments shift past it, einsum letters lose it. `fn` set means the node consumes the axis — the returned
+   * expression is this example's contribution, to be accumulated with `fn` across the loop.
+   */
+  private perExample(e: ArrayExpr, sPosOf: (x: ArrayExpr) => number | undefined, S: string, n: number, path: string): { expr: ArrayExpr; fn?: ArrayReduceFn } {
+    const fail = (why: string): never => { throw new StreamError(`${path}: cannot stream: ${why}`); };
+    if (typeof e !== "object") return { expr: e };
+    const rankOf = (x: ArrayExpr): number => (typeof x === "number" ? 0 : typeof x === "string" || x.op === "arg" ? (this.shapeHints.get(typeof x === "string" ? x : (x as { name: string }).name)?.length ?? 0) + (sPosOf(x) === undefined ? 0 : 1) : fail("rank of a nested expression"));
+    const norm = (axis: number, rank: number) => (axis < 0 ? rank + axis : axis);
+    const shift = (axis: number, s: number) => (axis < s ? axis : axis - 1);
+    if (isElementwise(e)) {
+      // broadcasting commutes with dropping S only when S sits at the same right-aligned position in every operand
+      const walk = (x: ArrayExpr, acc: Set<number>): void => {
+        if (typeof x === "number") return;
+        if (typeof x === "string" || x.op === "arg" || !isElementwise(x)) { const p = sPosOf(x); if (p !== undefined) acc.add(rankOf(x) - p); return; }
+        for (const k of ["val", "vals", "min", "max", "cond"] as const) { const v = (x as unknown as Record<string, ArrayExpr | ArrayExpr[]>)[k]; if (v === undefined) continue; if (Array.isArray(v)) v.forEach((y) => walk(y, acc)); else walk(v, acc); }
+      };
+      const pos = new Set<number>(); walk(e, pos);
+      if (pos.size > 1) fail(`elementwise operands hold "${S}" at different right-aligned positions`);
+      return { expr: e };
+    }
+    const op = e.op;
+    switch (op) {
+      case "arg": case "stopGradient": case "oneHot": return { expr: e };
+      case "matmul": {
+        const [a, b] = e.vals;
+        const ra = rankOf(a), rb = rankOf(b);
+        if (ra === 1 && rb === 1) return this.perExample({ op: "einsum", subscripts: "k,k->", vals: [a, b] }, sPosOf, S, n, path);
+        const L = Math.max(ra, rb) - 2;
+        const lead = Array.from({ length: Math.max(L, 0) }, (_, i) => String.fromCharCode(0x41 + i));
+        const la = lead.slice(lead.length - Math.max(ra - 2, 0)).join(""), lb = lead.slice(lead.length - Math.max(rb - 2, 0)).join("");
+        const sub = rb === 1 ? `${la}ik,k->${lead.join("")}i` : ra === 1 ? `k,${lb}kj->${lead.join("")}j` : `${la}ik,${lb}kj->${lead.join("")}ij`;
+        return this.perExample({ op: "einsum", subscripts: sub, vals: [a, b] }, sPosOf, S, n, path);
+      }
+      case "einsum": {
+        const text = e.subscripts.replace(/\s+/g, "");
+        const [lhs, rhs] = text.split("->");
+        const terms = lhs!.split(",");
+        let out = rhs;
+        if (out === undefined) { const count = new Map<string, number>(); for (const l of lhs!.replace(/,/g, "")) count.set(l, (count.get(l) ?? 0) + 1); out = [...count.entries()].filter(([, c]) => c === 1).map(([l]) => l).sort().join(""); }
+        let letter: string | undefined;
+        const newTerms = terms.map((t, k) => {
+          const p = sPosOf(e.vals[k]!);
+          if (p === undefined) return t;
+          const l = t[p]!;
+          if (letter !== undefined && letter !== l) fail(`einsum: "${S}" is "${letter}" in one operand and "${l}" in another`);
+          letter = l;
+          return t.slice(0, p) + t.slice(p + 1);
+        });
+        if (letter === undefined) return { expr: e };
+        terms.forEach((t, k) => { if (sPosOf(e.vals[k]!) === undefined && t.includes(letter!)) fail(`einsum: letter "${letter}" of the streamed axis also indexes an unbatched operand`); });
+        const summed = !out.includes(letter);
+        const newOut = out.replace(letter, "");
+        return { expr: { ...e, subscripts: `${newTerms.join(",")}->${newOut}` }, ...(summed ? { fn: "sum" as const } : {}) };
+      }
+      case "reduce": {
+        const p = sPosOf(e.val);
+        if (p === undefined) return { expr: e };
+        const r = rankOf(e.val);
+        const axes = (e.axes === undefined ? Array.from({ length: r }, (_, i) => i) : e.axes.map((a) => norm(a, r)));
+        if (!axes.includes(p)) return { expr: { ...e, axes: axes.map((a) => shift(a, p)) } };
+        const others = axes.filter((a) => a !== p).map((a) => shift(a, p));
+        if (e.fn === "logsumexp" && others.length) fail("logsumexp over the streamed axis together with other axes");
+        // this example's contribution: the reduction over the remaining axes (a mean of equal-count means is the mean)
+        const expr: ArrayExpr = others.length ? { ...e, axes: others, keepDims: false } : e.val;
+        return { expr, fn: e.fn };
+      }
+      case "argmax": case "argmin": case "softmax": case "logSoftmax": {
+        const p = sPosOf(e.val);
+        if (p === undefined) return { expr: e };
+        const ax = norm(e.axis ?? -1, rankOf(e.val));
+        if (ax === p) fail(`${op} along the streamed axis`);
+        return { expr: { ...e, axis: shift(ax, p) } };
+      }
+      case "reshape": {
+        const p = sPosOf(e.val);
+        if (p === undefined) return { expr: e };
+        const j = e.shape.indexOf(S);
+        if (j < 0 || e.shape.indexOf(S, j + 1) >= 0) fail(`reshape of a batched value must name "${S}" once in its shape`);
+        return { expr: { ...e, shape: e.shape.filter((_, i) => i !== j) } };
+      }
+      case "transpose": {
+        const p = sPosOf(e.val);
+        if (p === undefined) return { expr: e };
+        const r = rankOf(e.val);
+        const perm = e.perm ?? Array.from({ length: r }, (_, i) => r - 1 - i);
+        const j = perm.indexOf(p);
+        return { expr: { ...e, perm: perm.filter((_, i) => i !== j).map((q) => shift(q, p)) } };
+      }
+      case "concat": {
+        const ps = e.vals.map(sPosOf);
+        if (ps.every((p) => p === undefined)) return { expr: e };
+        if (ps.some((p) => p === undefined) || new Set(ps).size !== 1) fail("concat of batched and unbatched values");
+        const ax = norm(e.axis, rankOf(e.vals[0]!));
+        if (ax === ps[0]) fail("concat along the streamed axis");
+        return { expr: { ...e, axis: shift(ax, ps[0]!) } };
+      }
+      case "slice": {
+        const p = sPosOf(e.val);
+        if (p === undefined) return { expr: e };
+        const ax = norm(e.axis, rankOf(e.val));
+        if (ax === p) fail("slice along the streamed axis");
+        return { expr: { ...e, axis: shift(ax, p) } };
+      }
+      case "takeAlong": {
+        const p = sPosOf(e.val), q = sPosOf(e.indices);
+        if (p === undefined && q === undefined) return { expr: e };
+        const r = rankOf(e.val);
+        if (p === undefined || (q !== undefined && rankOf(e.indices) - q !== r - p)) fail("takeAlong: indices and values hold the streamed axis differently");
+        const ax = norm(e.axis, r);
+        if (ax === p) fail("takeAlong along the streamed axis");
+        return { expr: { ...e, axis: shift(ax, p!) } };
+      }
+      case "call": return fail("a call with batched inputs");
+      default: return { expr: e };
+    }
+  }
+
   private inCall = false;
+  /** shapes of names that are not in the environment (streaming: a batched name inside a folded `mul(x, 0)`) */
+  shapeHints: ReadonlyMap<string, readonly number[]> = new Map();
 
   /** shape of an expression whose operands are in `env` (symbolic sizes resolved) */
   private shapeOf(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number): number[] {
     const names = new Map<string, Shape>();
+    for (const [k, sh] of this.shapeHints) names.set(k, [...sh]);
     for (const [k, a] of env) names.set(k, a.shape);
     return dims(inferExpr(concretize(e, sizeOf), { names, axisNames: new Set(), nets: this.nets }, ["net"]), "net");
   }
@@ -331,11 +632,14 @@ class NetEmitter {
           : this.fill(v.shape, (i) => `(${this.read(v, i)} - ${this.readB(m, i)}) - log(${this.readB(s, i)})`);
       }
       case "reshape": {
-        const v = this.materialize(sub(e.val));
+        const v0 = sub(e.val);
+        if (v0.kind === "lit") return { ...v0, shape: outShape() }; // uniform: any shape
+        const v = this.materialize(v0);
         return { ...v, shape: outShape() }; // contiguous: an alias
       }
       case "transpose": {
         const v = sub(e.val);
+        if (v.kind === "lit") return { ...v, shape: outShape() };
         const r = v.shape.length;
         const perm = e.perm ?? Array.from({ length: r }, (_, i) => r - 1 - i);
         return this.fill(outShape(), (oi) => { const idx = new Array<string>(r); perm.forEach((p, d) => { idx[p] = oi[d]!; }); return this.read(v, idx); });
@@ -356,6 +660,7 @@ class NetEmitter {
       case "slice": {
         const v = sub(e.val);
         const shape = outShape();
+        if (v.kind === "lit") return { ...v, shape };
         const ax = norm(e.axis, v.shape.length);
         const n = v.shape[ax]!, step = e.step ?? 1;
         const clampIdx = (i: number | undefined, dflt: number, lo: number, hi: number) => (i === undefined ? dflt : Math.min(hi, Math.max(lo, i < 0 ? n + i : i)));
@@ -445,6 +750,9 @@ class NetEmitter {
     // a tree that folds to a literal or to one same-shaped operand needs no array
     const probe = scalar(e, shape.map((_, d) => `__i${d}`));
     if (/^[-+0-9.e()\s]+$/.test(probe) && !/__i/.test(probe)) return { shape, kind: "lit", base: probe };
+    // a tree whose value does not depend on the index (every operand a literal or size-1 broadcast — autodiff's
+    // `1/N` seeds): one scalar, held uniform over the shape (no array; the shape may include a streamed axis)
+    if (!/__i/.test(probe)) { const u = this.fresh("u"); this.lines.push(`  let ${u}: f32 = ${probe};`); return { shape, kind: "lit", base: u }; }
     if (typeof e === "object" && (e.op === "add" || e.op === "mul")) {
       const unit = e.op === "add" ? 0 : 1;
       const rest = (e as { vals: ArrayExpr[] }).vals.filter((v) => v !== unit);
@@ -524,6 +832,22 @@ class NetEmitter {
     });
     return out;
   }
+}
+
+/**
+ * Names an expression's VALUE depends on: `exprNames` minus the operands of a `mul` with a literal 0 among its
+ * operands — the emitter folds those to 0 without reading them (autodiff's `add(mul(x, 0), 1)` seeds), so a node
+ * built only from such references is uniform, whatever its shape says.
+ */
+function effectiveNames(e: ArrayExpr, out = new Set<string>()): Set<string> {
+  if (typeof e === "number") return out;
+  if (typeof e === "string") { out.add(e); return out; }
+  if (e.op === "arg") { out.add(e.name); return out; }
+  if (e.op === "call") { for (const x of Object.values(e.inputs)) effectiveNames(x, out); return out; }
+  if (e.op === "mul" && e.vals.some((v) => v === 0)) return out;
+  const rec = e as unknown as Record<string, ArrayExpr | ArrayExpr[]>;
+  for (const k of ["val", "vals", "min", "max", "cond", "indices"]) { const v = rec[k]; if (v === undefined) continue; if (Array.isArray(v)) v.forEach((x) => effectiveNames(x, out)); else effectiveNames(v, out); }
+  return out;
 }
 
 /** occurrences of each name in the program's node expressions (with multiplicity) */
@@ -609,6 +933,8 @@ export interface NetFunction {
   code: string;
   /** function-scope floats used */
   floats: number;
+  /** the dataset axis was streamed */
+  streamed: boolean;
 }
 
 /**
@@ -617,13 +943,26 @@ export interface NetFunction {
  * intermediates exceed NET_MAX_FLOATS (the caller falls back to CPU sampling).
  */
 export function emitNetField(name: string, field: NetField, ctx: NetEmitContext, outputs: string[] = [field.output]): NetFunction | undefined {
-  const em = new NetEmitter(ctx, field.nets);
   const D = ctx.D;
-  const inputs = new Map<string, Arr>([[pointInput(field.program), { shape: [D], kind: "point", base: "p" }]]);
+  const max = ctx.maxFloats ?? NET_MAX_FLOATS, mode = ctx.stream ?? STREAM;
   // A-normal form (every intermediate is a node, so liveness — array reuse, in-place updates — sees all of them),
   // then single-use elementwise producers fused back into their elementwise consumers (one loop, no intermediate)
-  const outs = em.program(fuseElementwise(anfProgram(field.program, field.nets)), inputs, "net");
-  if (em.floats > (ctx.maxFloats ?? NET_MAX_FLOATS)) return undefined;
+  const prog = fuseElementwise(anfProgram(field.program, field.nets));
+  // two emissions may run (batched, then streamed): the constants go into `data` once
+  const offsets = new Map<ArrayLike<number>, number>();
+  const upload = (d: ArrayLike<number>) => { let o = offsets.get(d); if (o === undefined) { o = ctx.upload(d); offsets.set(d, o); } return o; };
+  const attempt = (streamed: boolean) => {
+    const em = new NetEmitter({ ...ctx, upload }, field.nets);
+    const inputs = new Map<string, Arr>([[pointInput(field.program), { shape: [D], kind: "point", base: "p" }]]);
+    const outs = streamed ? em.streamed(prog, inputs, "net", outputs) : em.program(prog, inputs, "net");
+    return { em, outs, streamed };
+  };
+  let r = mode === "always" ? undefined : attempt(false);
+  if (mode !== "never" && (r === undefined || r.em.floats > max)) {
+    try { const s = attempt(true); if (r === undefined || s.em.floats < r.em.floats) r = s; } catch (e) { if (!(e instanceof StreamError)) throw e; }
+  }
+  if (r === undefined || r.em.floats > max) return undefined;
+  const { em, outs } = r;
   // the outputs' elements concatenated: a scalar, a vecD, or (value + gradient) a vec(D+1)
   const comps: string[] = [];
   for (const o of outputs) {
@@ -635,11 +974,11 @@ export function emitNetField(name: string, field: NetField, ctx: NetEmitContext,
   if (comps.length > 4) throw new Error(`net field function would return ${comps.length} components (max 4)`);
   const type = comps.length === 1 ? "f32" : vecType(comps.length);
   const ret = comps.length === 1 ? comps[0]! : `${type}(${comps.join(", ")})`;
-  return { code: `fn ${name}(p: ${vecType(D)}, pos: i32) -> ${type} {\n${em.lines.join("\n")}\n  return ${ret};\n}`, floats: em.floats };
+  return { code: `fn ${name}(p: ${vecType(D)}, pos: i32) -> ${type} {\n${em.lines.join("\n")}\n  return ${ret};\n}`, floats: em.floats, streamed: r.streamed };
 }
 
 /** function-scope floats a net field needs (a dry emission), cached per program */
-const sizeCache = new WeakMap<Program, number>();
+let sizeCache = new WeakMap<Program, number>();
 export function netFieldFloats(fd: NetScalarFieldData | NetVectorFieldData): number {
   let n = sizeCache.get(fd.field.program);
   if (n === undefined) {

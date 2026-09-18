@@ -328,21 +328,50 @@ that every displaced reference point is higher.
 
 GPU: the validation nets (N = 30) transpile (821 / 1661 floats for loss /
 its gradient); the training-set nets (N = 120: `h` alone is 1920 floats)
-exceed `NET_MAX_FLOATS`, so the 12 training fields are `costly` and sampled
-by core — correct, but slower (the resolution controller holds small grids;
-streamlines on 32 / 16 grids). An emitter that loops over examples
-accumulating `loss` instead of materializing `[N, 16]` would fix this.
-Dead-code elimination to the field's output (`pruneProgram`: `loss` needs
-none of `acc` / `loss0..2` / `obj`) is applied for the CPU evaluator
-(`evalPoints`, memoized per program — the 12³ gradient grid went from 1.9 s
-back to 0.35 s) but NOT for the GPU emitter: pruning `pred` / `acc` from
-the validation program changes the emitted gradient code enough to expose a
-latent emitter bug (∇loss off by 10³ at some points while the value agrees;
-keeping `acc` as an output restores agreement) — to be investigated before
-the emitter gets pruned input. Related and fixed: `componentProgram` named
-its node `__c<i>` without checking, so a component of a gradient of a
-component (second derivatives) defined `__c1` twice; evaluators resolved it
-by last-definition-wins, pruning by name did not.
+exceed it BATCHED, which is where STREAMING comes in (below). Dead-code
+elimination to the field's output (`pruneProgram`: `loss` needs none of
+`acc` / `loss0..2` / `obj`) is applied for the CPU evaluator (`evalPoints`,
+memoized per program — the 12³ gradient grid went from 1.9 s back to
+0.35 s). The GPU emitter's batched path still gets the full program; the
+streamed path prunes to the wanted outputs. (A "latent emitter bug" once
+seen with pruned input — ∇loss off by 10³ at some points — is not
+reproducible: value, gradient, components and second derivatives of pruned
+programs agree with the CPU in 2D and 3D. It was almost certainly the fixed
+`componentProgram` bug: it named its node `__c<i>` without checking, so a
+component of a gradient of a component defined `__c1` twice; evaluators
+resolved it by last-definition-wins, pruning by name did not.)
+
+### Streaming the dataset axis
+
+`NetEmitter.streamed` (`gpu/src/nets.ts`) emits the same batched program
+with its symbolic axis S ("N") in TIME instead of SPACE: the nodes whose
+shape carries S are computed one example at a time inside `for n < N`
+(reading the batched constants through a one-example VIEW), and the nodes
+that consume S — a `reduce` over it, an `einsum` / `matmul` contracting it:
+the loss's mean, the weight gradients' `ij,ik->kj` — ACCUMULATE across the
+loop (sum / mean / prod / max / min, logsumexp online). Per op nothing
+changes but the axis bookkeeping (`perExample`: axis arguments shift past
+S, einsum letters lose it, reshape must name S); the N loop moves outside
+the whole per-example chain, so `[N, 16]` becomes `[16]`. It is legal
+exactly when S only ever ends in a reduction — an op that couples examples
+(softmax / slice / concat / argmax along S, an einsum where S meets an
+unbatched operand, a call with batched inputs) throws `StreamError` and the
+batched emission stands. Classification is by DEPENDENCE, not shape:
+autodiff's `1/N` seed `add(mul(nll, 0), 1)` has shape [N, 1] but reads
+nothing (the emitter folds `mul(x, 0)`), so it is UNIFORM — `elementwise`
+folds an index-free tree to one scalar `let` — and lives outside the loop,
+which keeps the gradient at one pass (a batched node that needs an
+accumulated result belongs to a later loop that recomputes its per-example
+chain: rematerialization, supported but not needed here). Values defined
+outside the loop are never released or written in place inside it (the
+first version put the hidden layer into the bias array). `emitNetField`
+tries the batched emission first and streams when it does not fit
+(`stream: "auto"`; `setEmitStream("always")` forces it, for tests). iris:
+`train/loss` 3731 floats batched → 159 streamed (its gradient 424,
+`objective` 555); the 12 training fields are on the GPU (`gpuTranspilable`
+true, no longer `costly` for the viewer), in Safari too; `gpu/test/nets.test.ts`
+checks values, gradients and second derivatives against the CPU and the
+streamed against the batched emission of the validation fields.
 
 `packages/core/test/fixtures/iris-reference.json` holds PyTorch's float64
 validation loss / accuracy and training loss / accuracy / objective /

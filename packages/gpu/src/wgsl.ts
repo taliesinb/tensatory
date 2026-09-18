@@ -115,6 +115,7 @@ fn gelu_(x: f32) -> f32 { return 0.5 * x * (1.0 + erf_(x * 0.7071067811865476));
 fn silu_(x: f32) -> f32 { return x * sigmoid_(x); }
 fn elu_(x: f32) -> f32 { return select(exp(x) - 1.0, x, x > 0.0); }
 fn relu_(x: f32) -> f32 { return max(x, 0.0); }
+fn lse2_(a: f32, b: f32) -> f32 { let m = max(a, b); return m + log(exp(a - m) + exp(b - m)); }
 fn plogp_(x: f32) -> f32 { return select(x * log(x), 0.0, x == 0.0); }
 fn gauss_(x: f32) -> f32 { return exp(-0.5 * x * x); }
 fn round_(x: f32) -> f32 { return floor(x + 0.5); }
