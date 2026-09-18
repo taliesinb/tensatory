@@ -99,6 +99,12 @@ label[data-tip]:not(.tick) { cursor: help; }
 /* adaptive-resolution activity: ↑ / ↓ a tier step, ⟳ a remeasure; fades out */
 #resFlash { position: absolute; top: 10px; right: 14px; font-size: 22px; line-height: 1; color: #93c5fd; opacity: 0; transition: opacity .5s ease-out; pointer-events: none; text-shadow: 0 0 6px rgba(0,0,0,.8); }
 #resFlash.on { opacity: .9; transition: none; }
+/* the gear: top right, spinning while a shader compiles (async pipeline creation; see notes/gpu.md) */
+#gear { position: absolute; top: 10px; right: 44px; width: 22px; height: 22px; color: #93c5fd; opacity: 0; transition: opacity .25s ease-out; pointer-events: none; filter: drop-shadow(0 0 4px rgba(0,0,0,.8)); }
+#gear.on { opacity: .9; }
+#gear svg { display: block; animation: gear-spin 1.6s linear infinite; animation-play-state: paused; }
+#gear.on svg { animation-play-state: running; }
+@keyframes gear-spin { to { transform: rotate(360deg); } }
 #logModal { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none; z-index: 50; align-items: center; justify-content: center; }
 #logModal.open { display: flex; }
 .logbox { background: #0b0d12; border: 1px solid #2a2f3d; border-radius: 8px; width: min(760px, 92vw); max-height: 82vh; display: flex; flex-direction: column; }

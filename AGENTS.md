@@ -277,6 +277,13 @@ profiling test.
   panel's dir / mode (JL planning is dimension-generic). WebGPU only; compute
   cpu / gpu as in 2D. Matrix columns absent in a space are hidden
   (`SlotDef.present`).
+* Shader compiles are async (`createComputePipelineAsync`) with DEFERRED
+  dispatches (`GpuBackend.dispatch` queues behind a compile, in submission
+  order, with `write` for counter resets; `whenIdle()` gates readbacks and
+  buffer destroys); a frame that deferred does not present (`takeDeferred()`)
+  and `onPipelineReady` re-renders; the viewer spins a gear (`#gear`, top
+  right) while `compiling > 0`. Neither browser blocks JS on pipeline
+  creation — the stall used to land at first submit, freezing the frame.
 * WGSL: NaN tests must use bit patterns (`isnan_`), `v != v` is optimized away
   by Metal's fast-math.
 * Performance: the compiler does

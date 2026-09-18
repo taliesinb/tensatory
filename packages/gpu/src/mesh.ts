@@ -43,7 +43,7 @@ export function allocMesh(backend: GpuBackend, capacity: number): GpuMesh {
 }
 
 export function resetMesh(backend: GpuBackend, m: GpuMesh): void {
-  backend.device.queue.writeBuffer(m.indirect, 0, new Uint32Array([0, 1, 0, 0]));
+  backend.write(m.indirect, 0, new Uint32Array([0, 1, 0, 0]));
 }
 
 /** pack a CPU IsoMesh into Vert records */
@@ -62,13 +62,14 @@ export function packMesh(mesh: IsoMesh): Float32Array {
 export function uploadMesh(backend: GpuBackend, data: Float32Array): GpuMesh {
   const verts = data.length / VERT_FLOATS;
   const m = allocMesh(backend, Math.max(1, verts / 3));
-  if (verts) backend.device.queue.writeBuffer(m.buffer, 0, data as unknown as BufferSource);
-  backend.device.queue.writeBuffer(m.indirect, 0, new Uint32Array([verts, 1, 0, 0]));
+  if (verts) backend.write(m.buffer, 0, data as unknown as BufferSource);
+  backend.write(m.indirect, 0, new Uint32Array([verts, 1, 0, 0]));
   return m;
 }
 
 /** read a mesh back (tests / debugging) as an IsoMesh */
 export async function readMesh(backend: GpuBackend, m: GpuMesh): Promise<IsoMesh> {
+  await backend.whenIdle(); // deferred dispatches (async compiles) land first
   const dev = backend.device;
   const readInd = dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const readV = dev.createBuffer({ size: m.buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });

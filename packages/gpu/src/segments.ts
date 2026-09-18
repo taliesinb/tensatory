@@ -44,7 +44,7 @@ export function allocSegments(backend: GpuBackend, capacity: number, particles: 
 
 /** reset the instance counter of a segment set (before a kernel appends into it again) */
 export function resetSegments(backend: GpuBackend, s: GpuSegments): void {
-  backend.device.queue.writeBuffer(s.indirect, 0, new Uint32Array([6, 0, 0, 0]));
+  backend.write(s.indirect, 0, new Uint32Array([6, 0, 0, 0]));
 }
 
 /** pack polylines (optionally with per-vertex colour values) into Seg records */
@@ -99,13 +99,14 @@ export function packTriangles(tris: ArrayLike<number>, values?: ArrayLike<number
 export function uploadSegments(backend: GpuBackend, data: Float32Array, particles: boolean): GpuSegments {
   const count = data.length / SEG_FLOATS;
   const s = allocSegments(backend, Math.max(1, count), particles);
-  if (count) backend.device.queue.writeBuffer(s.buffer, 0, data as unknown as BufferSource);
-  backend.device.queue.writeBuffer(s.indirect, 0, new Uint32Array([6, count, 0, 0]));
+  if (count) backend.write(s.buffer, 0, data as unknown as BufferSource);
+  backend.write(s.indirect, 0, new Uint32Array([6, count, 0, 0]));
   return s;
 }
 
 /** read a segment set back (tests / debugging): the valid records, as Seg floats */
 export async function readSegments(backend: GpuBackend, s: GpuSegments): Promise<Float32Array> {
+  await backend.whenIdle(); // deferred dispatches (async compiles) land first
   const dev = backend.device;
   const readInd = dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const readSeg = dev.createBuffer({ size: s.buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });

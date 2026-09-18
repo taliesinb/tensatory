@@ -115,7 +115,7 @@ export function blurResidentSync(backend: GpuBackend, src: GpuGrid, radius: numb
     if (cur !== src.buffer) temps.push(cur);
     cur = out!;
   }
-  for (const t of temps) t.destroy(); // safe: the queue has already been submitted with them
+  for (const t of temps) t.destroy(); // accounted buffers: destroyed after any pending compile's deferred dispatch
   if (cur === src.buffer) return src;
   const buffer = cur;
   return { grid, channels: 1, buffer, destroy: () => buffer.destroy() };

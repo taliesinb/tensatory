@@ -180,7 +180,7 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
     const bytes = Math.max(16, n * D * 4);
     if (vecs.size < bytes) { vecs.destroy(); vecs = backend.createBuffer({ size: bytes, usage: RESIDENT_USAGE }); } // safe: earlier dispatches are already submitted
     const params = packLattice(lattice, fill, head, segs.capacity, d.style ?? defaultStyle, d.minLength ?? defaultMin);
-    backend.device.queue.writeBuffer(mx, 0, zero);
+    backend.write(mx, 0, zero);
     return [
       { code: measure, invocations: n, buffers: [{ role: "rw" as const, buffer: vecs }, { role: "r" as const, data: lib.data }, { role: "r" as const, data: params }, { role: "rw" as const, buffer: mx }] },
       { code: emit, invocations: n, buffers: [{ role: "rw" as const, buffer: segs.buffer }, { role: "r" as const, data: lib.data }, { role: "r" as const, buffer: vecs }, { role: "rw" as const, buffer: segs.indirect }, { role: "r" as const, data: params }, { role: "r" as const, buffer: mx }] },

@@ -49,6 +49,25 @@ async function findGpu(): Promise<GPU | undefined> {
 
 export class GpuBackend {
   private readonly pipelines = new Map<string, GPUComputePipeline>();
+  /** pipelines being compiled (createComputePipelineAsync) */
+  private readonly building = new Map<string, { promise: Promise<GPUComputePipeline> }>();
+  /** dispatches waiting behind a compile, in submission order: once one is deferred, every later one queues behind
+   *  it so the GPU sees them in the order they were issued (a seed → smooth → emit chain must not reorder) */
+  private readonly queue: { key: string; run: (p: GPUComputePipeline | undefined) => void }[] = [];
+  /** number of pipelines currently compiling: a frame loop shows a busy indicator while > 0 */
+  get compiling(): number { return this.building.size + (this.queue.length ? 1 : 0); }
+  /** whether a `dispatch` since the last `takeDeferred()` was deferred behind a compile (the frame should not present) */
+  private deferredThisFrame = false;
+  /** called when a compile finishes and its deferred dispatches have been enqueued (the frame loop re-renders) */
+  onPipelineReady: (() => void) | undefined;
+  /**
+   * Compile asynchronously (default). The compile of a pipeline created synchronously happens at its first
+   * submit and stalls the whole frame — hundreds of ms in Chrome, seconds in Safari for a transpiled net — while
+   * `createComputePipelineAsync` compiles off the critical path: a `dispatch` that needs a pipeline still compiling
+   * is DEFERRED (its buffers are created and returned, the pass is enqueued when the compile lands, in order) and the
+   * caller learns from `takeDeferred()` that this frame is incomplete. Tests set this false for determinism.
+   */
+  asyncCompile = true;
   /** bytes of every buffer created through `createBuffer` and not yet destroyed (resident meshes, segments, grids) */
   bytesAllocated = 0;
   /** number of `dispatch` / `runKernel` calls so far: lets a frame loop tell whether a frame did compute work */
@@ -92,9 +111,13 @@ export class GpuBackend {
     this.bytesAllocated += desc.size;
     const destroy = buf.destroy.bind(buf);
     let live = true;
-    buf.destroy = () => { if (live) { live = false; this.bytesAllocated -= desc.size; } destroy(); };
+    // a deferred dispatch (pipeline still compiling) may still target this buffer: destroy after the compiles land
+    buf.destroy = () => { if (live) { live = false; this.bytesAllocated -= desc.size; } if (this.building.size || this.queue.length) void this.whenIdle().then(destroy); else destroy(); };
     return buf;
   }
+
+  /** destroy a buffer not created through `createBuffer`, after any pending compile's deferred dispatches */
+  release(buf: GPUBuffer): void { if (this.building.size || this.queue.length) void this.whenIdle().then(() => buf.destroy()); else buf.destroy(); }
 
   /**
    * Read one u32 of a small buffer (an indirect draw buffer's counter) once the queue has reached it. The mesh /
@@ -102,6 +125,7 @@ export class GpuBackend {
    * record count: `count > capacity` means the set overflowed.
    */
   async readCounter(buffer: GPUBuffer, index: number): Promise<number> {
+    await this.whenIdle(); // a deferred dispatch may still have to write it
     const dev = this.device;
     const read = dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const enc = dev.createCommandEncoder();
@@ -147,17 +171,71 @@ export class GpuBackend {
     return [x, Math.ceil(wg / x)];
   }
 
-  private pipeline(code: string, roles: BufferRole[]): GPUComputePipeline {
-    const key = `${roles.join(",")}\n${code}`;
-    let p = this.pipelines.get(key);
-    if (!p) {
-      this.pipelinesBuilt++;
-      const module = this.device.createShaderModule({ code: GpuBackend.linearize(code) });
-      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutFor(roles)] });
-      p = this.device.createComputePipeline({ layout, compute: { module, entryPoint: "main" } });
+  private pipelineKey(code: string, roles: BufferRole[]): string { return `${roles.join(",")}\n${code}`; }
+
+  /** the ready pipeline, or the compile in flight (async mode) */
+  private pipeline(code: string, roles: BufferRole[]): GPUComputePipeline | { promise: Promise<GPUComputePipeline> } {
+    const key = this.pipelineKey(code, roles);
+    const ready = this.pipelines.get(key);
+    if (ready) return ready;
+    const inFlight = this.building.get(key);
+    if (inFlight) return inFlight;
+    this.pipelinesBuilt++;
+    const module = this.device.createShaderModule({ code: GpuBackend.linearize(code) });
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutFor(roles)] });
+    const desc: GPUComputePipelineDescriptor = { layout, compute: { module, entryPoint: "main" } };
+    if (!this.asyncCompile) {
+      const p = this.device.createComputePipeline(desc);
       this.pipelines.set(key, p);
+      return p;
     }
-    return p;
+    const entry = { promise: this.device.createComputePipelineAsync(desc) };
+    this.building.set(key, entry);
+    entry.promise.then(
+      (p) => { this.pipelines.set(key, p); this.building.delete(key); this.drain(); this.onPipelineReady?.(); },
+      (e: unknown) => {
+        this.building.delete(key);
+        this.failed.add(key);
+        this.drain();
+        this.device.dispatchEvent(new (globalThis as unknown as { CustomEvent: new (t: string, i: object) => Event }).CustomEvent("pipelineerror", { detail: e }));
+        this.onPipelineReady?.();
+      },
+    );
+    return entry;
+  }
+  private readonly failed = new Set<string>();
+
+  /** run queued dispatches from the head while their pipelines are ready (a failed compile drops its dispatches) */
+  private drain(): void {
+    while (this.queue.length) {
+      const head = this.queue[0]!;
+      const p = this.pipelines.get(head.key);
+      if (head.key === "" || p) { this.queue.shift(); head.run(p); } // "" = an ordered write, needs no pipeline
+      else if (this.failed.has(head.key)) this.queue.shift();
+      else return;
+    }
+  }
+
+  /**
+   * `queue.writeBuffer` that keeps its place among dispatches: a reset of a segment set's counter must stay before
+   * the dispatch that fills it, even when that dispatch is deferred behind a compile.
+   */
+  write(buffer: GPUBuffer, offset: number, data: BufferSource): void {
+    if (this.queue.length) {
+      const v = data as ArrayBufferView; // copy: the caller may reuse its array before the write runs
+      const copy = ArrayBuffer.isView(v) ? v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) : (data as ArrayBuffer).slice(0);
+      this.queue.push({ key: "", run: () => this.device.queue.writeBuffer(buffer, offset, copy) });
+    }
+    else this.device.queue.writeBuffer(buffer, offset, data);
+  }
+
+  /** whether a dispatch since the previous call was deferred behind a compile; resets the flag */
+  takeDeferred(): boolean { const d = this.deferredThisFrame; this.deferredThisFrame = false; return d; }
+
+  /** resolves when no pipeline is compiling and every deferred dispatch has been enqueued */
+  async whenIdle(): Promise<void> {
+    while (this.building.size) await Promise.allSettled([...this.building.values()].map((b) => b.promise));
+    this.drain();
   }
 
   /**
@@ -171,7 +249,9 @@ export class GpuBackend {
     this.dispatches++;
     const roles = kernel.buffers.map((b) => b.role);
     dev.pushErrorScope("validation");
-    const pipeline = this.pipeline(kernel.code, roles);
+    const pl = this.pipeline(kernel.code, roles);
+    const pipeline = "promise" in pl ? await pl.promise : pl;
+    if (this.queue.length) await this.whenIdle(); // stay behind deferred dispatches
     const gpuBuffers = kernel.buffers.map((b) => {
       if (b.buffer) return { buf: b.buffer, size: b.buffer.size, own: false };
       const size = Math.max(16, Math.ceil((b.data ? b.data.byteLength : b.size ?? 0) / 4) * 4);
@@ -214,7 +294,8 @@ export class GpuBackend {
     const dev = this.device;
     this.dispatches++;
     const roles = kernel.buffers.map((b) => b.role);
-    const pipeline = this.pipeline(kernel.code, roles);
+    const pl = this.pipeline(kernel.code, roles);
+    // buffers are created (and uploaded) NOW, so the caller holds the right handles whether or not the pass runs now
     const gpuBuffers = kernel.buffers.map((b) => {
       if (b.buffer) return { buf: b.buffer, own: false };
       const size = Math.max(16, Math.ceil((b.data ? b.data.byteLength : b.size ?? 0) / 4) * 4);
@@ -224,15 +305,24 @@ export class GpuBackend {
       return { buf, own: true };
     });
     const bindGroup = dev.createBindGroup({ layout: this.layoutFor(roles), entries: gpuBuffers.map(({ buf }, binding) => ({ binding, resource: { buffer: buf } })) });
-    const enc = dev.createCommandEncoder();
-    const pass = enc.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(...this.groups(kernel.invocations));
-    pass.end();
-    dev.queue.submit([enc.finish()]);
+    const groups = this.groups(kernel.invocations);
+    const run = (pipeline: GPUComputePipeline) => {
+      const enc = dev.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(...groups);
+      pass.end();
+      dev.queue.submit([enc.finish()]);
+      kernel.buffers.forEach((b, i) => { const g = gpuBuffers[i]!; if (!b.keep && g.own) g.buf.destroy(); });
+    };
+    if ("promise" in pl || this.queue.length) {
+      // deferred: behind a compile (or behind an earlier deferred dispatch, to keep the order); the frame must not present
+      this.deferredThisFrame = true;
+      this.queue.push({ key: this.pipelineKey(kernel.code, roles), run: (p) => run(p!) });
+    } else run(pl);
     const kept: GPUBuffer[] = [];
-    kernel.buffers.forEach((b, i) => { const g = gpuBuffers[i]!; if (b.keep) kept.push(g.buf); else if (g.own) g.buf.destroy(); });
+    kernel.buffers.forEach((b, i) => { if (b.keep) kept.push(gpuBuffers[i]!.buf); });
     return kept;
   }
 

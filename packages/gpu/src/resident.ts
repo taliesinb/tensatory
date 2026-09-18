@@ -47,6 +47,7 @@ export function uploadGrid(backend: GpuBackend, grid: DenseGrid, values: ArrayLi
 
 /** read a resident grid back to the CPU */
 export async function readGrid(backend: GpuBackend, g: GpuGrid): Promise<Float32Array> {
+  await backend.whenIdle(); // deferred dispatches (async compiles) land first
   const dev = backend.device;
   const size = g.grid.sampleCount * g.channels * 4;
   const read = dev.createBuffer({ size: Math.max(16, size), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });

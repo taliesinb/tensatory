@@ -592,6 +592,7 @@ export class View3D implements MemoryUser {
     }
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, this.c.costly(sv.data) ? View3D.STREAM_N_COSTLY : View3D.STREAM_N)); if (layer) lines.push(layer); }
     if (gv) { const layer = this.glyphLayer(gv, cbox); if (layer) lines.push(layer); } else this.glyphMaxNorm = NaN;
+    if (c.gpu.takeDeferred()) return; // a kernel is still compiling: keep the previous image (see main.ts renderGpu)
     this.renderer.resize();
     this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
     this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);

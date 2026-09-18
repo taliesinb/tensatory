@@ -256,6 +256,30 @@ browsers (`setOpaqueLoopBounds` exists for the probe). One `vecD` gradient
 function per field instead of D component programs was the other big cut
 (2.4 s → 0.5 s for the projection kernel in Dawn).
 
+**Shader compiles are asynchronous and never stall a frame.** Neither
+browser blocks JS in `createComputePipeline` (0 ms): the compile happens at the
+pipeline's first submit and stalls the *frame* — 100–800 ms in Chrome, seconds
+in Safari for a transpiled net — so no indicator painted from JS could appear
+before it. `GpuBackend` therefore compiles with `createComputePipelineAsync`
+and DEFERS dispatches: a `dispatch` whose pipeline is still compiling creates
+and returns its buffers as usual but queues the pass; once any dispatch is
+queued, every later dispatch and every `write` (the segment-counter resets)
+queue behind it, so the GPU sees them in submission order (a seed → smooth →
+emit chain must not reorder); the queue drains as compiles land, and
+`whenIdle()` gates the readbacks (`readCounter`, `readGrid`, …) and buffer
+destroys (`createBuffer`'s wrapper, `release`). The frame that hit a deferred
+dispatch does not present (`takeDeferred()` → keep the previous image), and
+`onPipelineReady` re-renders: by then everything is cached and the frame is
+ordinary. The viewer shows a spinning gear (top right, `#gear`) while
+`compiling > 0`. Measured toggling the glyph panel on the iris landscape (two
+new kernels): Chrome 11 gear frames, worst frame 17 ms; Safari 43 gear
+frames (~700 ms of compile), worst frame 18 ms — where both used to freeze
+for the whole compile. `asyncCompile = false` restores synchronous creation.
+
+Open: a space switch restores that space's remembered resolution directly
+(256³ for iris: a 16.7 M-evaluation raster, 4 s) instead of ramping when the
+caches are cold — a resolution-controller issue, not a compile one.
+
 **Exact projection of nets is latency-bound.** Measured on the iris loss at
 192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
 351 segments. Not arithmetic: even with a single evaluation per projection

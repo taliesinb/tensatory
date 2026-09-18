@@ -38,13 +38,13 @@ export function allocSegments3(backend: GpuBackend, capacity: number, particles:
   return { buffer, indirect, capacity, particles, destroy: () => { buffer.destroy(); indirect.destroy(); } };
 }
 export function resetSegments3(backend: GpuBackend, s: GpuSegments3): void {
-  backend.device.queue.writeBuffer(s.indirect, 0, new Uint32Array([6, 0, 0, 0]));
+  backend.write(s.indirect, 0, new Uint32Array([6, 0, 0, 0]));
 }
 export function uploadSegments3(backend: GpuBackend, data: Float32Array, particles: boolean): GpuSegments3 {
   const count = data.length / SEG3_FLOATS;
   const s = allocSegments3(backend, Math.max(1, count), particles);
-  if (count) backend.device.queue.writeBuffer(s.buffer, 0, data as unknown as BufferSource);
-  backend.device.queue.writeBuffer(s.indirect, 0, new Uint32Array([6, count, 0, 0]));
+  if (count) backend.write(s.buffer, 0, data as unknown as BufferSource);
+  backend.write(s.indirect, 0, new Uint32Array([6, count, 0, 0]));
   return s;
 }
 
@@ -106,6 +106,7 @@ export function boxEdges(a: ArrayLike<number>, b: ArrayLike<number>): Float32Arr
 
 /** read a Seg3 set back (tests / debugging): the valid records as floats */
 export async function readSegments3(backend: GpuBackend, s: GpuSegments3): Promise<Float32Array> {
+  await backend.whenIdle(); // deferred dispatches (async compiles) land first
   const dev = backend.device;
   const readInd = dev.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const readSeg = dev.createBuffer({ size: s.buffer.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });

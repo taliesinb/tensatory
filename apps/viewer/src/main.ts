@@ -998,6 +998,9 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       gs.lines.push({ segs, kind: tri ? "triangles" : "lines", width: 1.5, alpha, color: [1, 1, 1], ...(gl.colours || gl.triColours ? colour : {}) });
     }
   }
+  // a kernel this frame needs is still compiling (async): its dispatch was deferred, so the scene is incomplete —
+  // keep the previous image and let the gear spin; `onPipelineReady` re-renders when the compile lands
+  if (F.gpu.takeDeferred()) return;
   R.resize();
   R.render(gs);
   renderer.render(scene2d, true); // box, points, labels on the transparent overlay
@@ -1483,8 +1486,12 @@ function frame(now: number): void {
     lastFrameKey = key;
     $("memv").textContent = `${fmtMB(bytes.total)}/${fmtMB(a.capBytes)}${a.pin !== undefined ? ` · pinned ${a.pin}` : a.note ? ` · ${a.note}` : ""}`;
   }
+  // the gear spins while a shader compiles (createComputePipelineAsync; the frame that needed it was not presented)
+  const compiling = (sampler.gpu?.compiling ?? 0) > 0;
+  if (compiling !== gearOn) { gearOn = compiling; $("gear").classList.toggle("on", compiling); }
   requestAnimationFrame(frame);
 }
+let gearOn = false;
 
 /*******************************************************/
 /* boot */
@@ -1492,6 +1499,7 @@ function frame(now: number): void {
 (async () => {
   const params = new URLSearchParams(location.search);
   await sampler.init("auto");
+  if (sampler.gpu) sampler.gpu.onPipelineReady = () => { state.dirty = true; };
   sampler.check = params.get("check") === "1";
   try { Object.assign(modes, JSON.parse(localStorage.getItem("tensatory.modes") ?? "{}")); } catch { /* ignore */ }
   if (!localStorage.getItem("tensatory.modes") && sampler.gpu) { modes.compute = "gpu"; modes.render = "gpu"; } // default: fused when possible
