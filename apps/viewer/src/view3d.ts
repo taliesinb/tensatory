@@ -304,7 +304,7 @@ export class View3D implements MemoryUser {
   private flingVel: [number, number] | undefined;
   private readonly flingTrail: { t: number; dx: number; dy: number }[] = [];
   /** the fastest a released orbit may spin (px/s equivalent); slower releases — a click, a drag that came to rest — do nothing */
-  static readonly FLING_MIN_PX_S = 120;
+  static readonly FLING_MIN_PX_S = 40;
   static readonly FLING_WINDOW_MS = 80;
   /** a release within this angle of horizontal / vertical snaps to a pure yaw / pitch spin (degrees) */
   static readonly FLING_SNAP_DEG = 30;

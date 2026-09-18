@@ -329,7 +329,7 @@ profiling test.
   normals (exact for symbolic fields) pointing towards increasing values;
   `GpuRenderer3D` = orbit camera (an orbit drag released while the pointer
   still moves FLINGS: the camera keeps turning at an eighth of the mean
-  velocity of the last 80 ms of the drag, if above 120 px/s — a click or a
+  velocity of the last 80 ms of the drag, if above 40 px/s — a click or a
   drag that came to rest does not; a release within 30° of horizontal /
   vertical snaps to a pure yaw / pitch spin; any pointerdown stops it;
   `View3D.fling*`), vertex-pulled meshes via drawIndirect,
