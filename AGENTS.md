@@ -176,12 +176,20 @@ profiling test.
   frame with ≤ 2 in flight, budget following the rAF interval, the image
   refreshed every 4th frame — a re-render costs more than a batch). Reals
   only. `apps/viewer/public/bundles/iris.json` (from
-  `tools/iris/train.py`, PyTorch once-off) is the example: a 4-16-3 MLP, its
-  validation set and θ*, 2 / 3 RANDOM directions (`iris_rnd2/3`: gaussian
-  `random` arrays with seeds, `norm: "origin"`, a Controls row each) for the
-  viewer plus the 3 fixed inline orthogonal directions (`iris_rand2/3`, no
-  fields) the PyTorch reference was computed along;
-  `core/test/iris.test.ts` checks loss / accuracy against PyTorch to 1e-9,
+  `tools/iris/train.py`, PyTorch once-off, bit-reproducible) is the example:
+  a 4-16-3 MLP (Adam, weight decay 3e-3), 120 training / 30 validation
+  examples, θ*, net outputs `loss` / `acc` / `obj` (= loss + wd/2‖θ‖², what
+  Adam minimized — θ* is NOT the minimum of the validation loss) /
+  `loss0..2` (per class); validation and training binds, each displaced
+  along 2 / 3 RANDOM directions (`iris_rnd2/3`, `iris_trn_rnd2/3`: gaussian
+  `random` arrays with SHARED seeds, `norm: "origin"`, Controls rows
+  d0..d2) for the viewer's 8 fields per space, plus the 3 fixed inline
+  orthogonal directions (`iris_rand2/3`, `iris_trn_rand2/3`, no fields) the
+  PyTorch reference was computed along. The training-set nets (N = 120)
+  exceed `NET_MAX_FLOATS`, so those fields are CPU-sampled (`costly`);
+  pruning a program to its field's output was tried and exposed a latent
+  emitter bug in the gradient (see notes/nets.md) — not enabled.
+  `core/test/iris.test.ts` checks every output against PyTorch to 1e-9,
   `core/test/autodiff.test.ts` every op's gradient against finite
   differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,
   gradient, second derivative).

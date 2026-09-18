@@ -298,20 +298,55 @@ per-point closures.
 
 ## The iris example
 
-`tools/iris/train.py` (PyTorch, once-off, deterministic; data in
-`tools/iris/iris.data`) trains a 4-16-3 ReLU MLP on 120 iris examples (Adam,
-weight decay) and writes `apps/viewer/public/bundles/iris.json`: the net
-(`iris`, with standardization `mu` / `sigma` as baked arrays), the validation
-set bound (`iris_val`), θ* bound (`iris_star`), and `displace`d along 2 and 3
-orthogonal Gaussian directions each as long as θ* (`iris_rand2`,
-`iris_rand3`), with `loss` / `acc` fields on manifolds `rand2` / `rand3` and
-θ* as a point set. It also writes
-`packages/core/test/fixtures/iris-reference.json`: PyTorch's float64 loss and
-accuracy at θ* and at displaced points; `packages/core/test/iris.test.ts`
-checks Tensatory's evaluation — per point through the field, and all points
-in one batched call — against it to 1e-9, and that grid sampling equals
-per-point evaluation. Weights are the exact float32 values as decimals, so
-both sides compute the same function in double precision.
+`tools/iris/train.py` (PyTorch, once-off, deterministic — a rerun reproduces
+θ* bit for bit; data in `tools/iris/iris.data`) splits the 150 examples
+stratified into 120 training / 30 validation (10 per class, no test set),
+standardizes with the training mean / std, trains a 4-16-3 ReLU MLP with Adam
+(lr 0.01, 400 epochs, **weight decay 3e-3**) and writes
+`apps/viewer/public/bundles/iris.json`. The net `iris` (standardization `mu`
+/ `sigma` as baked arrays) has outputs `loss` (mean cross-entropy), `acc`,
+`obj` = loss + wd/2·‖θ‖² — the objective Adam actually minimized, since
+PyTorch's `weight_decay` adds wd·θ to the gradient — and `loss0..2`, the mean
+loss of each class (`eq(y, c)` masks; `nll` is `[N, 1]` from `takeAlong`, so
+it is reshaped to `[N]` first). Two binds of the data — `iris_val` (30) and
+`iris_trn` (120) — each bound to θ* and displaced two ways: `iris_rnd2/3` and
+`iris_trn_rnd2/3` along RANDOM gaussian directions (`random` arrays with
+seeds `d0/W1`…, `norm: "origin"`, Controls rows `d0..d2` shared by both
+binds, so a reseed moves every field together), and `iris_rand2/3` /
+`iris_trn_rand2/3` along the three fixed inline orthogonal directions the
+PyTorch reference was computed along (no fields; the tests attach their
+own). Fields per space (`rand2` / `rand3`): validation `loss` / `accuracy`,
+`train loss` / `train acc`, `objective`, and `loss: setosa / versicolor /
+virginica` (training set), θ* as a point set.
+
+Why θ* is not the minimum of the *validation* loss picture: it minimizes
+`obj` on the training set — the validation minimum along a random direction
+is generically elsewhere, and the weight-decay term pulls θ* off even the
+training-loss minimum. `objective` is the field θ* is the (Adam-approximate)
+minimum of; the test checks its gradient at θ* is smaller than the loss's and
+that every displaced reference point is higher.
+
+GPU: the validation nets (N = 30) transpile (821 / 1661 floats for loss /
+its gradient); the training-set nets (N = 120: `h` alone is 1920 floats)
+exceed `NET_MAX_FLOATS`, so the 12 training fields are `costly` and sampled
+by core — correct, but slower (the resolution controller holds small grids;
+streamlines on 32 / 16 grids). An emitter that loops over examples
+accumulating `loss` instead of materializing `[N, 16]` would fix this;
+dead-code elimination of a program to the field's output (`loss` needs none
+of `acc` / `loss0..2` / `obj`) was tried and dropped: pruning `pred` / `acc`
+from the *validation* program changes the emitted gradient code enough to
+expose a latent emitter bug (∇loss off by 10³ at some points while the value
+agrees; keeping `acc` as an output restores agreement) — to be investigated
+before pruning is enabled.
+
+`packages/core/test/fixtures/iris-reference.json` holds PyTorch's float64
+validation loss / accuracy and training loss / accuracy / objective /
+per-class loss at θ* and at displaced points along the fixed directions;
+`packages/core/test/iris.test.ts` checks Tensatory's evaluation — per point
+through the field, and all points in one batched call — against it to 1e-9,
+and that grid sampling equals per-point evaluation. Weights are the exact
+float32 values as decimals, so both sides compute the same function in
+double precision.
 
 ## Implementation (`packages/core/src/nets/`)
 

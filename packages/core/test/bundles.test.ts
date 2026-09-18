@@ -29,7 +29,7 @@ describe("example bundles", () => {
         const v = fd.value(fd.box.center);
         expect(v?.length).toBe(fd.box.dimCount);
       }
-    });
+    }, 30_000); // iris: 16 net fields, half of them over the 120-example training set, sampled on the CPU
   }
 
   it("dense.json: exact gradient and FD gradient agree away from edges", () => {

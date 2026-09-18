@@ -11,15 +11,19 @@ import { Bundle, DenseGrid, NdArray, SymbolicScalarFieldData, SymbolicVectorFiel
 const bundle = Bundle.parse(JSON.parse(readFileSync(join(__dirname, "../../../apps/viewer/public/bundles/iris.json"), "utf8")));
 // the viewer's fields use random directions (iris_rnd2 / iris_rnd3, drawn from seeds); the PyTorch reference was
 // computed along the fixed inline directions kept in iris_rand2 / iris_rand3, so give those fields of their own
-const refFields = (net: string, dims: number) => ({
-  loss: { kind: "scalar", codomain: "celoss", domain: `rand${dims}`, data: { type: "net", net, output: "loss", box: Array.from({ length: dims }, () => [-1, 1]) } },
-  acc: { kind: "scalar", codomain: "fraction", domain: `rand${dims}`, data: { type: "net", net, output: "acc", box: Array.from({ length: dims }, () => [-1, 1]) } },
+const refField = (net: string, output: string, dims: number) =>
+  ({ kind: "scalar", codomain: "lin", domain: `rand${dims}`, data: { type: "net", net, output, box: Array.from({ length: dims }, () => [-1, 1]) } });
+const refFields = (dims: number) => ({
+  [`loss${dims}`]: refField(`iris_rand${dims}`, "loss", dims), [`acc${dims}`]: refField(`iris_rand${dims}`, "acc", dims),
+  ...Object.fromEntries(["loss", "acc", "obj", "loss0", "loss1", "loss2"].map((o) => [`train_${o}${dims}`, refField(`iris_trn_rand${dims}`, o, dims)])),
 });
-const reference = new Bundle({ ...bundle.spec, fields: { ...bundle.spec.fields, ...Object.fromEntries(Object.entries(refFields("iris_rand2", 2)).map(([k, v]) => [`${k}2`, v])), ...Object.fromEntries(Object.entries(refFields("iris_rand3", 3)).map(([k, v]) => [`${k}3`, v])) } } as typeof bundle.spec);
+const reference = new Bundle({ ...bundle.spec, fields: { ...bundle.spec.fields, ...refFields(2), ...refFields(3) } } as typeof bundle.spec);
 const ref = JSON.parse(readFileSync(join(__dirname, "fixtures/iris-reference.json"), "utf8")) as {
   points2: number[][]; loss2: number[]; acc2: number[];
   points3: number[][]; loss3: number[]; acc3: number[];
+  train2: TrainRef[]; train3: TrainRef[];
 };
+type TrainRef = { loss: number; acc: number; obj: number; perClass: number[] };
 
 describe("iris bundle vs PyTorch", () => {
   it("builds every net and field", () => {
@@ -66,6 +70,26 @@ describe("iris bundle vs PyTorch", () => {
       expect(loss3.value(p), `loss3 at ${p}`).toBeCloseTo(ref.loss3[i]!, 9);
       expect(acc3.value(p), `acc3 at ${p}`).toBeCloseTo(ref.acc3[i]!, 12);
     });
+  });
+
+  it("training loss / accuracy / objective / per-class loss match PyTorch", () => {
+    for (const dims of [2, 3] as const) {
+      const f = (o: string) => reference.scalarField(`train_${o}${dims}`).data;
+      const points = dims === 2 ? ref.points2 : ref.points3, refs = dims === 2 ? ref.train2 : ref.train3;
+      points.forEach((p, i) => {
+        const r = refs[i]!;
+        expect(f("loss").value(p), `train loss at ${p}`).toBeCloseTo(r.loss, 9);
+        expect(f("acc").value(p), `train acc at ${p}`).toBeCloseTo(r.acc, 12);
+        expect(f("obj").value(p), `objective at ${p}`).toBeCloseTo(r.obj, 9);
+        for (let c = 0; c < 3; c++) expect(f(`loss${c}`).value(p), `class ${c} loss at ${p}`).toBeCloseTo(r.perClass[c]!, 9);
+      });
+    }
+    // θ* is (approximately: Adam at lr 0.01 does not settle exactly) the minimum of the objective it minimized: its
+    // gradient there is smaller than the plain training loss's, and every displaced reference point is higher
+    const obj = reference.scalarField("train_obj2").data, loss = reference.scalarField("train_loss2").data;
+    const g = (fd: typeof obj) => Math.hypot(fd.derivative(0).value([0, 0])!, fd.derivative(1).value([0, 0])!);
+    expect(g(obj)).toBeLessThan(g(loss));
+    for (const r of [...ref.train2.slice(1), ...ref.train3.slice(1)]) expect(r.obj).toBeGreaterThan(ref.train2[0]!.obj);
   });
 
   it("batched evaluation of the displaced net equals the reference (all points in one call)", () => {

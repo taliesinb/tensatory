@@ -17,7 +17,7 @@ import {
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
-import { GpuBackend, buildSampleProgram, gpuSampleOn } from "../src";
+import { GpuBackend, buildSampleProgram, gpuSampleOn, gpuTranspilable } from "../src";
 
 let gpu: GpuBackend | undefined;
 beforeAll(async () => {
@@ -162,6 +162,9 @@ describe("example bundles agree on every field and derived use", () => {
       const gridFor = (d: { samplePoints?: DenseGrid | undefined; box: Box }) => d.samplePoints ?? new DenseGrid(d.box.dimCount === 3 ? [14, 13, 12] : [48, 48], d.box);
       for (const id of b.scalarFieldIds) {
         const f = b.scalarField(id);
+        // a costly field the GPU cannot transpile (iris' training-set nets: 120 examples exceed NET_MAX_FLOATS) is
+        // sampled by core and uploaded — the CPU path itself, nothing to compare, and a minute of autodiff at 120 examples
+        if (f.data.costly && !gpuTranspilable(f.data)) continue;
         const g = gridFor(f.data), D = f.data.dimCount;
         await agreeScalar(f.data, g, `${file}:${id}`, 5e-4);
         const grad = new SymbolicVectorFieldData({ k: "grad", s: { k: "arg", name: "f" } }, D, { scalars: { f: f.data }, vectors: {} });
