@@ -246,7 +246,7 @@ export class Bundle {
 }
 
 /** without explicit manifolds, take the dimension from the first field that makes it evident */
-function inferDims(spec: BundleSpec): number {
+export function inferDims(spec: BundleSpec): number {
   for (const f of Object.values(spec.fields)) {
     const d = f.data;
     if ("box" in d && d.box) return Array.isArray(d.box) ? d.box.length : d.box.a.length;

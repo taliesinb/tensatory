@@ -98,7 +98,11 @@ profiling test.
   (`revision++`, `clearFieldCaches()`). Shapes never change, so the WGSL is
   byte-identical and NO shader recompiles (pipelines are cached by code;
   `gpu/test/nets.test.ts` asserts it); rows commit on release and are inert
-  while an animation plays; live dragging is a follow-up.
+  while an animation plays; live dragging is a follow-up. Box zoom is the
+  same pattern: `-` / `=` (`0` resets) scale the boxes of the current
+  space's SYMBOLIC fields by 1.5 around their centres (core `zoomBoxes`;
+  per-space option `boxZoom: k`), sampled fields keep their grid, the
+  view re-fits.
 * Field data has `kind: "symbolic" | "sampled"`. Sampled data has
   `samplePoints`. Pointwise-derived data is sampled iff any argument is; all
   sampled arguments must have IDENTICAL sample points (error otherwise).

@@ -16,6 +16,8 @@ import {
   adjustSpec,
   arrowGlyphs,
   controlRows,
+  zoomBoxes,
+  zoomable,
   boxBlur,
   contourField,
   integrateFromSeeds,
@@ -159,7 +161,9 @@ interface State {
   baseSpec: BundleSpec | undefined;
   /** Controls-pane adjustments (per bundle option): reseed salts and scale multipliers by row id */
   adjust: Adjustments;
-  /** bumped whenever `bundle` is rebuilt from adjustments (a frame key component: the fields are new objects) */
+  /** box zoom exponent per space (the symbolic fields' boxes scaled by BOX_ZOOM^k around their centres; `-` / `=`) */
+  boxZoom: Record<string, number>;
+  /** bumped whenever `bundle` is rebuilt from adjustments / zooms (a frame key component: the fields are new objects) */
   revision: number;
   bundleFile: string; // for options storage
   /** the selected space (manifold id) of the bundle; fields, point sets and the view belong to it */
@@ -178,7 +182,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1258,7 +1262,7 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
 interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
-interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments }
+interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number> }
 /**
  * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
  * their own 3D defaults (a volume wants more, fainter lines with several particles each; the HTML `data-value`s
@@ -1276,7 +1280,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
     ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
-    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust,
+    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom,
     spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
@@ -1389,11 +1393,44 @@ function setAbout(text: string): void { const el = $("pickAbout"); el.firstEleme
 
 const controls = new ControlsPane($("controlsPanel"));
 
-/** the bundle with the current adjustments applied (the parsed bundle itself when there are none) */
+/** the box zoom step: `=` widens every symbolic field's box of the space by this factor, `-` narrows it */
+const BOX_ZOOM = 1.5;
+
+/** the bundle with the current adjustments and box zooms applied (the parsed bundle itself when there are none) */
 function adjustedBundle(parsed: Bundle): Bundle {
   const adj = Object.fromEntries(Object.entries(state.adjust).filter(([, a]) => a.seed !== undefined || (a.scale !== undefined && a.scale !== 1)));
   state.adjust = adj;
-  return Object.keys(adj).length ? new Bundle(adjustSpec(parsed.spec, adj)) : parsed;
+  state.boxZoom = Object.fromEntries(Object.entries(state.boxZoom).filter(([m, k]) => k !== 0 && Number.isInteger(k) && parsed.manifolds.has(m)));
+  let spec = parsed.spec;
+  if (Object.keys(adj).length) spec = adjustSpec(spec, adj);
+  for (const [m, k] of Object.entries(state.boxZoom)) spec = zoomBoxes(spec, m, Math.pow(BOX_ZOOM, k));
+  return spec === parsed.spec ? parsed : new Bundle(spec);
+}
+
+/** rebuild the bundle from the base spec with the current adjustments / zooms; everything keyed by field id stays */
+function rebuildBundle(): void {
+  if (!state.baseSpec) return;
+  try {
+    state.bundle = adjustedBundle(new Bundle(state.baseSpec));
+    buildErrors = state.bundle.buildAll();
+    state.revision++;
+    clearFieldCaches();
+    updateInfo();
+  } catch (e) { showError(e); }
+  saveOptsSoon();
+  state.dirty = true;
+}
+
+/** `-` / `=`: zoom the symbolic fields' boxes of the current space by 1 / BOX_ZOOM / BOX_ZOOM around their centres */
+function stepBoxZoom(dir: 1 | -1): void {
+  if (!state.baseSpec || !state.space) return;
+  if (!zoomable(state.baseSpec, state.space)) { status("no symbolic fields to zoom in this space (sampled fields keep their grid)"); return; }
+  const k = (state.boxZoom[state.space] ?? 0) + dir;
+  state.boxZoom = { ...state.boxZoom, [state.space]: k };
+  rebuildBundle();
+  // the domain changed on purpose: show all of it (a pan / zoom of the view would hide the new margin or leave it empty)
+  if (spaceDims() === 3) { if (view3d) { view3d.cameraCustom = false; view3d.fit(); } } else fitView();
+  status(k === 0 ? "" : `box ×${Math.pow(BOX_ZOOM, k).toPrecision(3)} (− / = to zoom the fields' domain, 0 to reset)`);
 }
 
 /**
@@ -1410,15 +1447,7 @@ function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void
   if (!state.baseSpec) return;
   const next = { ...state.adjust }; if (a.seed === undefined && (a.scale === undefined || a.scale === 1)) delete next[id]; else next[id] = a;
   state.adjust = next;
-  try {
-    state.bundle = adjustedBundle(new Bundle(state.baseSpec));
-    buildErrors = state.bundle.buildAll();
-    state.revision++;
-    clearFieldCaches();
-    updateInfo();
-  } catch (e) { showError(e); }
-  saveOptsSoon();
-  state.dirty = true;
+  rebuildBundle();
 }
 
 /** whether an animation is playing: the Controls rows are inert then (a rebuild would stutter it) */
@@ -1426,9 +1455,9 @@ const animating = (): boolean => !state.paused && ((ui.isoAnim.checked && !!slot
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
   state.bundleFile = file; state.baseSpec = parsed.spec;
-  state.adjust = readOpts().controls ?? {};
+  const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {};
   let bundle: Bundle;
-  try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; bundle = parsed; } // stale adjustments (the bundle changed): drop them
+  try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; bundle = parsed; } // stale adjustments (the bundle changed): drop them
   state.bundle = bundle; state.revision++;
   clearFieldCaches(); state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
@@ -1542,6 +1571,9 @@ window.addEventListener("keydown", (e) => {
   const t = e.target as HTMLElement | null;
   if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test((t as HTMLInputElement).type)) || t.tagName === "SELECT")) return;
   if (e.key === "r" || e.key === "R") refit();
+  if (e.key === "=" || e.key === "+") stepBoxZoom(1);
+  if (e.key === "-" || e.key === "_") stepBoxZoom(-1);
+  if (e.key === "0" && state.space && state.boxZoom[state.space]) { state.boxZoom = { ...state.boxZoom, [state.space]: 0 }; rebuildBundle(); refit(); status(""); }
   if (e.key === " ") {
     e.preventDefault();
     if (!ui.isoAnim.checked && !ui.anim.checked) {

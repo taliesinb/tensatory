@@ -99,6 +99,21 @@ view box, else the adaptive resolution along the longer side
 ([resolution.md](resolution.md): two tiers, moving ≤ settled, ladder 32 …
 2048, frame / latency / memory feedback; `?res=N` pins it).
 
+### Box zoom (`-` / `=`, `0` resets)
+
+The wheel zooms the VIEW; `=` / `-` zoom the DOMAIN: every symbolic field of
+the current space (`symbolic` / `symbolicv` / `net` / `netv`, inline
+arguments of pointwise fields and pullbacks included) gets its box scaled by
+1.5 / (1/1.5) around its centre (core `zoomBoxes`, `bundle/zoom.ts`), sampled
+fields keep their grid (a space with none of the former says so on the status
+line). It is a spec adjustment like the Controls rows: the exponent is a
+per-space option (`boxZoom: { space: k }`), `rebuildBundle()` applies
+adjustments + zooms to the base spec and clears the field caches, and the
+view / camera re-fits so the new margin is shown. Statistics follow the box
+(symbolic ranges are computed on a grid over it), so colormap ranges widen
+with the domain. A step compiles the kernels that bake the field box
+(streamlines bake `A` / `B`): one or two pipelines per step, not per frame.
+
 ## Isolines and streamlines in the viewer
 
 * Levels: `split` levels evenly spaced in the I_V field's *codomain parameter
