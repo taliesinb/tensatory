@@ -1232,7 +1232,7 @@ function setSel(partial: Sel, lock: boolean): void {
   if (changed) {
     // a new I_V / S_∇ / V_∇ field means fresh contours / integrations / lattices, for a costly field on the CPU; an
     // animation re-rendering every frame on top of that piles frames up until the page stops responding
-    if (geometry && animating()) { state.paused = true; status("animations paused for the new field (space to resume)"); }
+    if (geometry) { if (animating()) status("animations paused for the new field (space to resume)"); state.paused = true; }
     if (lock) guardResolution();
     try { updateInfo(); } catch (e) { showError(e); }
     state.dirty = true;
