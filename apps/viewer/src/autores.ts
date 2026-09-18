@@ -80,6 +80,10 @@ export class AutoRes {
   /** the last decision, for the status row — terse: it shares one line with the memory figure.
    *  `mov` / `set` = the tier, ↑ / ↓ a step, `@n` the resolution held, `→n` the next step's predicted cost */
   note = "";
+  /** the settled tier has decided to HOLD its step (top of the ladder, next step failed / over budget / over the
+   *  memory cap): geometry at this resolution is final until something changes, so long-running refinements of
+   *  it (progressive recolouring) can start without being thrown away by the next rung */
+  stable = false;
 
   private readonly failed = new Map<string, number>(); // `${ctx}|${tier}|${idx}` -> expiry
   private cooldown = 0;
@@ -120,7 +124,7 @@ export class AutoRes {
     this.reset();
   }
 
-  private reset(): void { this.movingTimes = []; this.renderTimes = []; this.cooldown = COOLDOWN; this.confirmed = false; this.afterCompile = false; this.slowSeen = false; }
+  private reset(): void { this.movingTimes = []; this.renderTimes = []; this.cooldown = COOLDOWN; this.confirmed = false; this.afterCompile = false; this.slowSeen = false; this.stable = false; }
 
   private isFailed(ctx: string, tier: Tier, idx: number): boolean {
     const k = `${ctx}|${tier}|${idx}`, t = this.failed.get(k);
@@ -131,6 +135,7 @@ export class AutoRes {
   private fail(ctx: string, tier: Tier, idx: number): void { this.failed.set(`${ctx}|${tier}|${idx}`, performance.now() + FAIL_TTL_MS); }
 
   private set(tier: Tier, idx: number, why: string): void {
+    this.stable = false;
     idx = Math.max(0, Math.min(this.steps.length - 1, idx));
     const dir: 1 | -1 = idx > (tier === "settled" ? this.settled : this.moving) ? 1 : -1;
     if (tier === "settled") {
@@ -179,9 +184,12 @@ export class AutoRes {
         else {
           this.note = `set@${this.steps[idx]} →${this.steps[idx + 1]} ~${predicted.toFixed(0)}ms`;
           // one clean re-measurement before believing a hold: the sample may have carried a mode / space switch
-          if (!this.confirmed) { this.confirmed = true; this.onRemeasure?.(); }
+          if (!this.confirmed) { this.confirmed = true; this.onRemeasure?.(); } else this.stable = true;
         }
-      } else if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1)) this.note = `set@${this.steps[idx]} →${this.steps[idx + 1]} ~${(this.predictBytes(r, idx, idx + 1) / 2 ** 20).toFixed(0)}MB`;
+      } else {
+        if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1)) this.note = `set@${this.steps[idx]} →${this.steps[idx + 1]} ~${(this.predictBytes(r, idx, idx + 1) / 2 ** 20).toFixed(0)}MB`;
+        this.stable = true; // the top, a failed next step, or the memory cap: holding
+      }
       return;
     }
     if (r.compiled || this.cooldown > 0) { this.cooldown = Math.max(0, this.cooldown - 1); return; }

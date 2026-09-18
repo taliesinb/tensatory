@@ -26,11 +26,13 @@ export interface RecordLayout {
   D: number;
 }
 
-export const VERT_LAYOUT: RecordLayout = { floats: 8, points: [{ pos: 0, col: 6 }], countIndex: 0, D: 3 }; // mesh.ts Vert (count = vertexCount)
+export const VERT_LAYOUT: RecordLayout = { floats: 8, points: [{ pos: 0, col: 3 }], countIndex: 0, D: 3 }; // mesh.ts Vert { p: vec3, c, n: vec3, pad } (count = vertexCount)
 export const SEG_LAYOUT: RecordLayout = { floats: 10, points: [{ pos: 0, col: 4 }, { pos: 2, col: 5 }], countIndex: 1, D: 2 }; // segments.ts Seg (count = instanceCount)
 export const SEG3_LAYOUT: RecordLayout = { floats: 12, points: [{ pos: 0, col: 3 }, { pos: 4, col: 7 }], countIndex: 1, D: 3 }; // lines3d.ts Seg3
 
 export interface Recolourer {
+  /** the kernel's WGSL (diagnostics) */
+  readonly code: string;
   /** recolour `phases` consecutive interleave phases starting at `phase`: records phase + i + j·stride for i < phases,
    *  j < perPhase (`perPhase · phases` threads); records beyond the live count are skipped */
   dispatch(buffer: GPUBuffer, indirect: GPUBuffer, phase: number, stride: number, perPhase: number, phases: number): void;
@@ -57,6 +59,7 @@ export function recolourer(backend: GpuBackend, field: ScalarFieldData, layout: 
 ${layout.points.map((pt) => `  recs[o + ${pt.col}u] = ${fn}(${point(pt.pos)}, -1);`).join("\n")}
 }`;
   return {
+    code,
     dispatch(buffer, indirect, phase, stride, perPhase, phases) {
       backend.dispatch({
         code,

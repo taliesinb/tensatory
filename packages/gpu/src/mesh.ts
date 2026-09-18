@@ -2,7 +2,7 @@
 // marching-tetrahedra kernel (or uploaded from a CPU IsoMesh), drawn with
 // drawIndirect. Same shape as segments.ts for lines.
 //
-//   Vert { p: vec3 position | n: vec3 unit normal (towards increasing f) | c: colour value | pad }
+//   Vert { p: vec3 position | c: colour value | n: vec3 unit normal (towards increasing f) | pad }  (32 bytes)
 //
 // One thread per grid cell: eight values → mask → six tetrahedra → the
 // TET_TRIANGLES table (shared with core) → vertices on the tet edges, moved

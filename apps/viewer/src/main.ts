@@ -871,7 +871,7 @@ function view3dOf(): View3D | undefined {
     streamVector: () => streamVector(),
     streamColour: () => slotScalar("sc"),
     recolour: recolourer3d(),
-    settled: () => !isoMoving(),
+    settled: () => !isoMoving() && (autoRes3.pin !== undefined || autoRes3.stable), // the level rests and the resolution ladder has stopped climbing
     streamOpts: () => ({ count: num("lines") ?? 0, maxSteps: num("slen")!, sign: streamSign(), ...streamMode(), alpha: num("sAlpha") ?? 1, tail: num("tail"), split: num("ssplit") ?? 1, clock: state.animClock }),
     plan: streamPlan,
     glyphVector: () => glyphVector(),
@@ -974,7 +974,7 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
           ? F.smoothedIsolines(kernelKeyC, `${kernelKey}|${k}`, values, icc.src, level, line)
           : F.isolines(kernelKeyC, `${kernelKey}|${k}`, f.data, values, icc.src, level, tol, exact);
         // resident (interpolated) colour: exact colours are written in over the frames once the level rests
-        if (ic && isResidentGrid(icc.src) && !isoMoving() && recolour) { const p = F.recolourProgress(`${kernelKey}|${k}`); if (p) recolour.add(ic.data, ic.id, SEG_LAYOUT, segs.buffer, segs.indirect, p.total, p.progress); }
+        if (ic && isResidentGrid(icc.src) && !isoMoving() && (autoRes2.pin !== undefined || autoRes2.stable) && recolour) { const p = F.recolourProgress(`${kernelKey}|${k}`); if (p) recolour.add(ic.data, ic.id, SEG_LAYOUT, segs.buffer, segs.indirect, p.total, p.progress); }
         gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
       });
     } else if (iso) {

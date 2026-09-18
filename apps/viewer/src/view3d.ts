@@ -391,7 +391,8 @@ export class View3D implements MemoryUser {
       // resident (interpolated) colour: once the level rests, exact colours are written in over the frames
       // sized from the CAPACITY, not the count: the count is the previous level's until its readback lands, and a
       // lattice sized from a smaller count never visits the records beyond it (threads past the live count exit)
-      if (ic && isResidentGrid(icc.src) && this.c.settled()) this.c.recolour.add(ic.data, ic.id, VERT_LAYOUT, cs.set.buffer, cs.set.indirect, 3 * cs.set.capacity, (cs.recolour ??= freshProgress()));
+      // (and not before the count readback landed: an undersized set is regrown into a new buffer)
+      if (ic && isResidentGrid(icc.src) && this.c.settled() && !cs.pending) this.c.recolour.add(ic.data, ic.id, VERT_LAYOUT, cs.set.buffer, cs.set.indirect, 3 * cs.set.capacity, (cs.recolour ??= freshProgress()));
       triangles += cs.count; capacity += cs.set.capacity;
       return cs.set;
     });

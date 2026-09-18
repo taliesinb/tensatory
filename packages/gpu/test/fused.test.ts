@@ -14,7 +14,7 @@ import {
   marchingSquaresSegments,
   streamlineSeeds,
 } from "@tensatory/core";
-import { GpuBackend, SEG_FLOATS, SEG_LAYOUT, allocSegments, freshProgress, fusedIsolines, fusedStreamlines, readGrid, readSegments, recolourStep, recolourer, resetSegments, sampleResident, uploadGrid } from "../src";
+import { GpuBackend, SEG_FLOATS, SEG_LAYOUT, VERT_LAYOUT, allocMesh, allocSegments, freshProgress, fusedIsolines, fusedIsosurface, fusedStreamlines, readGrid, readMesh, readSegments, recolourStep, recolourer, resetSegments, sampleResident, uploadGrid } from "../src";
 
 let gpu: GpuBackend | undefined;
 beforeAll(async () => { gpu = await GpuBackend.create(); });
@@ -162,6 +162,37 @@ describe("progressive recolouring", () => {
     }
     expect(changed).toBeGreaterThan(n / 4); // the coarse grid really was interpolated
     segs.destroy(); res.destroy(); cres.destroy();
+  });
+});
+
+describe("progressive recolouring of a mesh", () => {
+  it("writes exact colours into Vert.c and leaves positions and normals alone", async () => {
+    if (!gpu) return;
+    const x3 = { op: "coord", index: 0 } as const, y3 = { op: "coord", index: 1 } as const, z3 = { op: "coord", index: 2 } as const;
+    const sphere = buildScalarFieldData({ type: "symbolic", box: [[-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5]], expr: { op: "add", vals: [{ op: "square", val: x3 }, { op: "square", val: y3 }, { op: "square", val: z3 }] } }, 3);
+    const tint = buildScalarFieldData({ type: "symbolic", box: [[-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5]], expr: { op: "add", vals: [{ op: "sin", val: { op: "mul", vals: [4, x3] } }, { op: "cos", val: { op: "mul", vals: [3, z3] } }] } }, 3);
+    const grid = new DenseGrid([20, 20, 20], sphere.box);
+    const values = await sampleResident(gpu, sphere, grid);
+    const coarse = await sampleResident(gpu, tint, new DenseGrid([5, 5, 5], tint.box)); // very coarse: clearly interpolated
+    const kernel = fusedIsosurface(gpu, values, { exact: false, colour: coarse });
+    const mesh = allocMesh(gpu, kernel.capacity);
+    await kernel.run(mesh, 1.0);
+    const before = await readMesh(gpu, mesh);
+    const r = recolourer(gpu, tint, VERT_LAYOUT);
+    const jobs = [{ r, buffer: mesh.buffer, indirect: mesh.indirect, total: 3 * mesh.capacity, progress: freshProgress() }];
+    while (recolourStep(jobs, 5000)) { /* to completion */ }
+    const after = await readMesh(gpu, mesh);
+    const n = after.values!.length;
+    expect(n).toBe(before.values!.length);
+    let changed = 0;
+    for (let v = 0; v < n; v++) {
+      const p = [after.positions[3 * v]!, after.positions[3 * v + 1]!, after.positions[3 * v + 2]!];
+      expect(after.values![v]).toBeCloseTo(tint.fn(p, -1), 4); // exact colour
+      if (Math.abs(before.values![v]! - after.values![v]!) > 1e-3) changed++;
+      for (let d = 0; d < 3; d++) { expect(after.positions[3 * v + d]).toBe(before.positions[3 * v + d]); expect(after.normals[3 * v + d]).toBe(before.normals[3 * v + d]); } // untouched
+    }
+    expect(changed).toBeGreaterThan(n / 2); // the coarse interpolation really was off
+    mesh.destroy(); values.destroy(); coarse.destroy();
   });
 });
 

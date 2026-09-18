@@ -315,8 +315,17 @@ batches — that made the first version look GPU-bound. Per-batch GPU timing
 was tried and is useless: `onSubmittedWorkDone` latency is quantized to frame
 boundaries. iris rand3 at 192³ (1.9 M triangles, colour = accuracy): exact in
 ~1.5 s, median frame 17 ms, worst ~75 ms (was 10 s at a fixed 32 k). Progress
-lives on the set and resets with its stamp. `window.__tensatory.recolour()`
-exposes `stats`, `currentBudget` and a `fixed` budget pin for measuring.
+lives on the set and resets with its stamp. Recolouring waits until the
+resolution controller HOLDS its step (`AutoRes.stable`) and the set's count
+readback has landed — every rung of the ladder and every regrow is a new set,
+so starting earlier meant a refinement restarting several times. The lattice
+is sized from the set's capacity, never from a count (which is the previous
+level's until read back). `window.__tensatory.recolour()` exposes `stats`,
+`currentBudget` and a `fixed` budget pin for measuring. A layout bug worth
+remembering: `Vert` is `{ p, c, n, pad }` — colour at float 3 — and the first
+recolourer wrote at 6, i.e. into the normal's z: view-dependent dark
+triangles that never sharpened. The mesh recolour test compares colours,
+positions and normals against exact values.
 
 **Exact projection of nets is latency-bound.** Measured on the iris loss at
 192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
