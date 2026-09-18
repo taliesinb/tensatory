@@ -1453,8 +1453,12 @@ $("flipx").onclick = () => { renderer.view.flipX = !renderer.view.flipX; orienta
 $("flipy").onclick = () => { renderer.view.flipY = !renderer.view.flipY; orientationChanged(); };
 $("cw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 1) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
 $("ccw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 3) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
+// a picked <select> (bundle, space) keeps keyboard focus, and space would then reopen its menu instead of toggling
+// play: once a choice is made, focus goes back to the page. Text inputs keep their keys (the guard below).
+for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.addEventListener("change", () => sel.blur());
 window.addEventListener("keydown", (e) => {
-  if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) return;
+  const t = e.target as HTMLElement | null;
+  if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test((t as HTMLInputElement).type)) || t.tagName === "SELECT")) return;
   if (e.key === "r" || e.key === "R") refit();
   if (e.key === " ") {
     e.preventDefault();
