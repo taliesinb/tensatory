@@ -294,8 +294,8 @@ profiling test.
   Settled recomputes are timed by GPU completion; a rung's first recompute
   is a cache FILL (values grid, or a costly field sampled on the CPU) whose
   cost scales with the cells, and neither tier steps to a rung whose
-  predicted fill exceeds 400 ms (`AutoRes.fill`; a CPU-sampled net field
-  holds at 16³ in 3D — GPU streaming of the example axis is the follow-up).
+  predicted fill exceeds 400 ms (`AutoRes.fill`; a frame that compiled
+  shaders is not a fill sample — Safari's compile is seconds).
   Fused kernels count every record even when a set is full (real capacity in
   params), the viewer reads the counts back (`GpuBackend.readCounter`) and
   sizes sets from the measured complexity per family, regrowing on overflow;
