@@ -51,7 +51,7 @@ export class Recolour {
    */
   step(frameMs: number): boolean {
     const jobs = this.jobs.filter((j) => !j.progress.done);
-    if (!jobs.length) { this.budget = RECOLOUR_BUDGET_MIN * 2; this.dispatchedLastFrame = false; return this.outstanding > 0; }
+    if (!jobs.length) { this.budget = RECOLOUR_BUDGET_MIN * 2; this.dispatchedLastFrame = false; this.trace(`no jobs (registered ${this.jobs.length}, all done)`); return this.outstanding > 0; }
     if (!this.fixed) {
       // a long frame means the GPU is behind (whether or not this frame dispatched): shrink; grow only when frames
       // are short AND the pipeline is not full (a full pipeline with short frames is a GPU still catching up)
@@ -61,12 +61,13 @@ export class Recolour {
     this.dispatchedLastFrame = false;
     // a compile in flight (the recolour kernel's own, say) would DEFER the dispatch: nothing submitted this frame
     // and the whole pile landing at once when the compile finishes
-    if (this.gpu.compiling > 0 || this.outstanding >= IN_FLIGHT) return true;
+    if (this.gpu.compiling > 0 || this.outstanding >= IN_FLIGHT) { this.trace(this.gpu.compiling > 0 ? `wait: compiling ${this.gpu.compiling}` : `wait: ${this.outstanding} in flight`); return true; }
     if (this.fixed) this.budget = this.fixed;
     const now = performance.now();
     if (now - this.stats.lastAt > 500) { this.stats.firstAt = now; if (!this.fixed) this.budget = RECOLOUR_BUDGET_MIN * 2; } // a new run ramps from the bottom
     recolourStep(jobs, this.budget);
     this.stats.batches++; this.stats.records += this.budget; this.stats.lastAt = now;
+    this.trace(`batch ${Math.round(this.budget / 1024)}k over ${jobs.length} jobs: ${jobs.map((j) => `${j.progress.next}/${j.progress.frames}`).join(" ")} (frame ${frameMs.toFixed(0)} ms)`);
     this.outstanding++; this.dispatchedLastFrame = true;
     // a promise that never settles (a lost device, a browser quirk) must not wedge the pipeline: count it done after a while
     let settled = false;
@@ -76,10 +77,16 @@ export class Recolour {
     return true;
   }
 
+  /** diagnostics: the last decisions (one line per frame the loop consulted this), timestamped */
+  readonly log: string[] = [];
+  trace(msg: string): void { const last = this.log[this.log.length - 1]; const line = `${(performance.now() / 1000).toFixed(2)} ${msg}`; if (last && last.slice(last.indexOf(" ") + 1) === msg && !msg.startsWith("batch")) return; this.log.push(line); if (this.log.length > 400) this.log.shift(); }
   /** diagnostics: batches dispatched, records (incl. empty slots), first / last dispatch time of the current run */
   readonly stats = { batches: 0, records: 0, firstAt: 0, lastAt: 0 };
   /** diagnostics: pin the budget (0 = adaptive) */
   fixed = 0;
+  /** recolour work is on the GPU (a batch dispatched or still in flight): frame times carry it, so the resolution
+   *  controller must not judge those frames — it would step the grid down for "slow draws" and restart everything */
+  get busy(): boolean { return this.outstanding > 0 || this.dispatchedLastFrame; }
   /** sets registered by the last render that are not exact yet */
   get pending(): number { return this.jobs.filter((j) => !j.progress.done).length; }
   /** the current per-batch record budget (diagnostics) */

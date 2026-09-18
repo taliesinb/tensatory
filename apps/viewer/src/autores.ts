@@ -163,6 +163,9 @@ export class AutoRes {
     const idx = r.tier === "moving" ? this.moving : this.settled;
     const top = this.steps.length - 1;
     if (r.overCap) { this.fail(r.ctx, r.tier, idx); this.set(r.tier, idx - 1, "mem cap"); return; }
+    // the settled tier cannot climb from here (top of the ladder, or the next step failed): holding, whatever this
+    // frame did — a paused frame at the moving tier's grid never recomputes, so no sample would ever say so
+    if (r.tier === "settled" && (idx >= top || this.isFailed(r.ctx, "settled", idx + 1))) this.stable = true;
     // the 75th percentile: up to a quarter of the window may hiccup (frame times are vsync-quantized: 17 / 33 / 50 ms)
     const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(s.length * 0.75))]!; };
 

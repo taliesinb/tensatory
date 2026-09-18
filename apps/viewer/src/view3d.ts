@@ -392,7 +392,10 @@ export class View3D implements MemoryUser {
       // sized from the CAPACITY, not the count: the count is the previous level's until its readback lands, and a
       // lattice sized from a smaller count never visits the records beyond it (threads past the live count exit)
       // (and not before the count readback landed: an undersized set is regrown into a new buffer)
-      if (ic && isResidentGrid(icc.src) && this.c.settled() && !cs.pending) this.c.recolour.add(ic.data, ic.id, VERT_LAYOUT, cs.set.buffer, cs.set.indirect, 3 * cs.set.capacity, (cs.recolour ??= freshProgress()));
+      if (ic && isResidentGrid(icc.src)) {
+        if (this.c.settled() && !cs.pending) this.c.recolour.add(ic.data, ic.id, VERT_LAYOUT, cs.set.buffer, cs.set.indirect, 3 * cs.set.capacity, (cs.recolour ??= freshProgress()));
+        else this.c.recolour.trace(`set ${k} not registered: ${!this.c.settled() ? "not settled" : "count pending"}`);
+      }
       triangles += cs.count; capacity += cs.set.capacity;
       return cs.set;
     });

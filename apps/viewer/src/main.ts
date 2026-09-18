@@ -883,7 +883,7 @@ function view3dOf(): View3D | undefined {
     streamVector: () => streamVector(),
     streamColour: () => slotScalar("sc"),
     recolour: recolourer3d(),
-    settled: () => !isoMoving() && (autoRes3.pin !== undefined || autoRes3.stable), // the level rests and the resolution ladder has stopped climbing
+    settled: () => { const ok = !isoMoving() && (autoRes3.pin !== undefined || autoRes3.stable); if (!ok) recolour?.trace(`not settled: ${isoMoving() ? "level moving" : `ladder not holding (${autoRes3.note})`}`); return ok; }, // the level rests and the resolution ladder has stopped climbing
     streamOpts: () => ({ count: num("lines") ?? 0, maxSteps: num("slen")!, sign: streamSign(), ...streamMode(), alpha: num("sAlpha") ?? 1, tail: num("tail"), split: num("ssplit") ?? 1, clock: state.animClock }),
     plan: streamPlan,
     glyphVector: () => glyphVector(),
@@ -1576,13 +1576,23 @@ const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
 const frameLog: { ms: number; dispatches: number; pipelines: number; recomputed: boolean }[] = [];
-(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour };
+(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour, autores: () => autoRes() };
 
 function frame(now: number): void {
   const frameMs = now - lastT; // the interval of the frame that just ended
   const dt = state.paused ? 0 : Math.min(0.1, frameMs / 1000);
   lastT = now;
-  if (pendingFrame) { const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined; autoRes().report({ ...r, jsMs, ms: Math.max(now - t0, jsMs) }); }
+  // frames carrying recolour batches are not the controller's business (their time is the recolouring, not the draw)
+  if (pendingFrame) {
+    const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined;
+    if (!recolour?.busy) {
+      const ar = autoRes(), wasStable = ar.stable;
+      ar.report({ ...r, jsMs, ms: Math.max(now - t0, jsMs) });
+      // the ladder just decided to HOLD: the last render was refused registration for recolouring (not stable yet)
+      // and, paused, nothing else would render again — so render once more now
+      if (ar.stable && !wasStable) state.dirty = true;
+    }
+  }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
@@ -1590,8 +1600,8 @@ function frame(now: number): void {
     state.dirty = true;
   }
   if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
-  if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
   controls.setEnabled(!animating());
+  if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
   if (state.dirty) {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();

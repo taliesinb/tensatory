@@ -321,7 +321,15 @@ readback has landed — every rung of the ladder and every regrow is a new set,
 so starting earlier meant a refinement restarting several times. The lattice
 is sized from the set's capacity, never from a count (which is the previous
 level's until read back). `window.__tensatory.recolour()` exposes `stats`,
-`currentBudget` and a `fixed` budget pin for measuring. A layout bug worth
+`currentBudget`, a `fixed` budget pin and a per-frame decision `log` (why a
+set was or was not registered / dispatched) — read it when a refinement
+seems stuck. Two such stalls, both "no render ever asked again": the ladder
+decided to hold one frame AFTER the render that was refused (holding now
+marks the frame dirty), and a paused frame at the moving tier's grid never
+recomputes so no sample would ever say "hold" (`stable` is set whenever the
+settled tier cannot climb). Frames carrying recolour batches are excluded
+from the controller's judgement (`Recolour.busy`): it once read them as slow
+draws and stepped the grid down, rebuilding the mesh mid-refinement. A layout bug worth
 remembering: `Vert` is `{ p, c, n, pad }` — colour at float 3 — and the first
 recolourer wrote at 6, i.e. into the normal's z: view-dependent dark
 triangles that never sharpened. The mesh recolour test compares colours,
