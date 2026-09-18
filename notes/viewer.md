@@ -50,6 +50,10 @@ pipelines and either draw with Canvas 2D or upload their results. See
   Isolines and streamlines are OFF by default (the first frame of a costly
   field is then just the raster; the ticks are saved per bundle); a 3D space
   visited for the first time turns the isosurfaces on, since it has no raster.
+  Locking a new I_V / S_∇ / V_∇ field while an animation plays pauses the
+  animations first (`GEOMETRY_SLOTS` in `setSel`; space resumes): the new
+  field's contours / integrations / lattices are recomputed — on the CPU for a
+  costly field — and a re-render every frame on top would pile frames up.
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 

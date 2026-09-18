@@ -1218,14 +1218,21 @@ const metrics = new MetricsTable({
   setSel,
   onLayout: () => fitLeftColumn(),
 });
+/** slots whose change recomputes geometry (isolines / isosurfaces, streamlines, glyphs): switching them pauses the animations */
+const GEOMETRY_SLOTS: readonly Slot[] = ["iv", "sg", "vg"];
+
 function setSel(partial: Sel, lock: boolean): void {
-  let changed = false;
+  let changed = false, geometry = false;
   for (const [k, id] of Object.entries(partial)) {
     if (lock) { state.lockedSel[k] = id; saveOptsSoon(); }
     if (state.sel[k] === id) continue;
+    if (lock && (GEOMETRY_SLOTS as readonly string[]).includes(k)) geometry = true;
     state.sel[k] = id; changed = true;
   }
   if (changed) {
+    // a new I_V / S_∇ / V_∇ field means fresh contours / integrations / lattices, for a costly field on the CPU; an
+    // animation re-rendering every frame on top of that piles frames up until the page stops responding
+    if (geometry && animating()) { state.paused = true; status("animations paused for the new field (space to resume)"); }
     if (lock) guardResolution();
     try { updateInfo(); } catch (e) { showError(e); }
     state.dirty = true;
