@@ -205,7 +205,8 @@ profiling test.
 * Viewer: one super-stack of panels top-left (`bundle`, `system` — closed by
   default: compute / render, device, `mem cap`, live memory —, `controls`
   when the bundle has rows, `2D space`,
-  `colorfield`, `isolines`, `streamlines`, `vector field`), the `mappings`
+  `colorfield`, `isolines`, `streamlines`, `vector field` — isolines and
+  streamlines OFF by default, isosurfaces on at a 3D space's first visit), the `mappings`
   matrix bottom-left, cursor pane + legend bottom-right. The matrix assigns
   fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND
   vector field, as a TREE: names are paths (`train/loss/setosa`), drawn

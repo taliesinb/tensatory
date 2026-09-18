@@ -47,6 +47,9 @@ pipelines and either draw with Canvas 2D or upload their results. See
   strat / JL / cover; lines, length, opacity, tail, split, ▶), `vector field`
   (off by default: spacing in px, glyph: arrow / head / solid triangle, opacity,
   the `longest` readout; see [glyphs.md](glyphs.md)).
+  Isolines and streamlines are OFF by default (the first frame of a costly
+  field is then just the raster; the ticks are saved per bundle); a 3D space
+  visited for the first time turns the isosurfaces on, since it has no raster.
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 

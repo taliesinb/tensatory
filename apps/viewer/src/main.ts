@@ -1380,7 +1380,10 @@ function setSpace(id: string, fromUser: boolean): void {
   if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
   if (m.numDims === 3) { const v = view3dOf(); if (v) { v.clear(); v.cameraCustom = false; } }
   autoRes().restore({ moving: 0, settled: 0 }); // ramp from the bottom unless this space remembers better
-  loadOpts();
+  const hadSaved = loadOpts();
+  // isolines and streamlines default OFF (a costly field's first frame is then just the raster); a 3D space has no
+  // raster, so on its first visit turn the isosurfaces on rather than show an empty box
+  if (m.numDims === 3 && !hadSaved && !ui.showIso.checked && !ui.showStream.checked && !ui.showVec.checked) { ui.showIso.checked = true; syncTicks(); }
   if (m.numDims === 2 && !viewCustom) fitView();
   applyModes();
   $("streamBox").style.display = usable.scalars.length + usable.vectors.length ? "" : "none";
