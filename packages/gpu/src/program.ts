@@ -87,11 +87,27 @@ export class ProgramBuilder {
    */
   private bufferReader(data: ArrayLike<number>, grid: DenseGrid, channels: number, ch: number): string {
     const off = this.upload(data);
-    const buf = "data";
-    const nm = this.name("rd");
     const onDispatch = grid === this.grid;
-    const direct = onDispatch || grid.equals(this.grid, 1e-12);
-    const G = onDispatch ? this.dg : bakedGrid(grid);
+    return this.reader("data", off, onDispatch ? this.dg : bakedGrid(grid), onDispatch || grid.equals(this.grid, 1e-12), channels, ch);
+  }
+
+  /**
+   * `fn name(p, pos) -> f32`: multilinear interpolation of a RESIDENT grid (a GpuGrid the kernel binds as `buf`).
+   * The grid header goes into `data` (so a resolution change changes data, never code); `direct` when the grid is
+   * the dispatch grid (then a sample at `pos` is a plain read). This is how a costly (net-backed) colour field is
+   * read at every isoline / isosurface / streamline vertex: one GPU sampling on the grid, then lookups.
+   */
+  residentReader(g: { grid: DenseGrid; channels: number }, buf: string, ch = 0): string {
+    const header = new Float32Array(GRID_FLOATS);
+    packGrid(g.grid, header, 0);
+    const off = this.upload(header);
+    const G = gridWgsl(`rg${off}_`, "data", off);
+    this.fns.push(G.code);
+    return this.reader(buf, 0, G.ref, g.grid.equals(this.grid, 1e-12), g.channels, ch);
+  }
+
+  private reader(buf: string, off: number, G: GridRef, direct: boolean, channels: number, ch: number): string {
+    const nm = this.name("rd");
     const D = this.D;
     const P = (d: number) => (D === 1 ? "p" : `p[${d}]`);
     const lines: string[] = [];

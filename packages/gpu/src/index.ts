@@ -36,3 +36,5 @@ export { fusedGlyphs, packLattice } from "./glyphs";
 export type { FusedGlyphs, GlyphDispatch } from "./glyphs";
 export { emitNetField, gpuTranspilable, netFieldFloats, setOpaqueLoopBounds, NET_MAX_FLOATS } from "./nets";
 export type { NetFunction, NetEmitContext } from "./nets";
+export { colourCode, isResidentGrid } from "./colour";
+export type { ColourSource } from "./colour";

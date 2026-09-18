@@ -4,6 +4,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   DenseGrid,
+  DenseScalarFieldData,
   DenseVectorFieldData,
   SymbolicVectorFieldData,
   buildScalarFieldData,
@@ -97,6 +98,35 @@ describe("fused isolines", () => {
       expect(out[i * SEG_FLOATS + 4]).toBeCloseTo(waves.fn([ax, ay], -1), 4);
     }
     segs.destroy(); res.destroy();
+  });
+
+  it("colour sources: a resident grid interpolates the colour field (costly fields), \"level\" is the level", async () => {
+    if (!gpu) return;
+    const g = new DenseGrid([25, 19], bowl.box);
+    const vals = bowl.sampleOn(g);
+    const dense = buildScalarFieldData({ type: "dense", box: bowl.box.intervals, samples: { type: "inline", shape: [25, 19], data: Array.from(vals) } }, 2);
+    const res = uploadGrid(gpu, g, vals, 1);
+    // the colour field sampled on a FINER grid than the isoline grid, so the interpolation is exercised
+    const cg = new DenseGrid([97, 73], waves.box);
+    const cres = await sampleResident(gpu, waves, cg);
+    const run = async (colour: Parameters<typeof fusedIsolines>[3]) => {
+      const kernel = fusedIsolines(gpu!, dense, res, colour);
+      const segs = allocSegments(gpu!, kernel.capacity, false);
+      await kernel.run(segs, 1.1, 1e-3);
+      const out = await readSegments(gpu!, segs);
+      segs.destroy();
+      return out;
+    };
+    const exact = await run(waves), resident = await run(cres), level = await run("level");
+    expect(resident.length).toBe(exact.length);
+    const cpuColour = new DenseScalarFieldData(cg, waves.sampleOn(cg)); // core's bilinear interpolation of the same samples
+    for (let i = 0; i < exact.length / SEG_FLOATS; i++) {
+      const o = i * SEG_FLOATS, ax = resident[o]!, ay = resident[o + 1]!;
+      expect(resident[o + 4]).toBeCloseTo(cpuColour.fn([ax, ay], -1), 4); // = core's interpolation
+      expect(Math.abs(resident[o + 4]! - waves.fn([ax, ay], -1))).toBeLessThan(0.05); // ≈ the field (bilinear on 97×73 of a 3-period wave); segments append in no fixed order, so compare at the segment's own point
+      expect(level[o + 4]).toBeCloseTo(1.1, 6); expect(level[o + 5]).toBeCloseTo(1.1, 6);
+    }
+    res.destroy(); cres.destroy();
   });
 });
 

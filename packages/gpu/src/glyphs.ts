@@ -16,7 +16,8 @@
 // colour) serves every spacing and view: a pan or zoom re-dispatches, compiles
 // nothing and uploads nothing but the few floats of the lattice.
 
-import { CHEVRON_SPREAD, DenseGrid, GLYPH_FILL, GLYPH_HEAD, GLYPH_STYLES, HEAD_SPREAD, TRIANGLE_HALF_WIDTH, type GlyphOptions, type GlyphStyle, type Lattice, type ScalarFieldData, type VectorFieldData } from "@tensatory/core";
+import { CHEVRON_SPREAD, DenseGrid, GLYPH_FILL, GLYPH_HEAD, GLYPH_STYLES, HEAD_SPREAD, TRIANGLE_HALF_WIDTH, type GlyphOptions, type GlyphStyle, type Lattice, type VectorFieldData } from "@tensatory/core";
+import { colourCode, type ColourSource } from "./colour";
 import { RESIDENT_USAGE, type GpuBackend } from "./device";
 import { SEG3_APPEND_WGSL, SEG3_WGSL, type GpuSegments3 } from "./lines3d";
 import { ProgramBuilder } from "./program";
@@ -76,13 +77,13 @@ export interface FusedGlyphs {
  * dispatch parameter. The vectors buffer (D f32 per point, grown as lattices need) and the maximum are resident and
  * owned by the returned object.
  */
-export function fusedGlyphs(backend: GpuBackend, field: VectorFieldData, colour?: ScalarFieldData, opts: GlyphOptions = {}): FusedGlyphs {
+export function fusedGlyphs(backend: GpuBackend, field: VectorFieldData, colour?: ColourSource, opts: GlyphOptions = {}): FusedGlyphs {
   const D = field.dimCount;
   if (D !== 2 && D !== 3) throw new Error(`fusedGlyphs: ${D}D fields are not supported`);
   const T = vecType(D);
   const b = new ProgramBuilder(new DenseGrid(new Array<number>(D).fill(2), field.box));
   const vf = b.vector(field);
-  const col = colour ? b.scalar(colour) : undefined;
+  const cc = colourCode(b, colour, D, "0.0", 6);
   const lib = b.library();
   const fill = opts.fill ?? GLYPH_FILL, head = opts.head ?? GLYPH_HEAD, defaultStyle = opts.style ?? "arrow", defaultMin = opts.minLength ?? 0;
   let vecs = backend.createBuffer({ size: 16, usage: RESIDENT_USAGE });
@@ -136,7 +137,7 @@ ${seg.append.replace("CAP", "bitcast<u32>(params[5])")}
 ${latticeWgsl(D)}
 ${normal}
 ${seg.make}
-fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+${cc.code}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = i32(id.x);
   if (i >= latticeCount()) { return; }
@@ -183,7 +184,7 @@ fn colour_(p: ${T}) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
     backend.write(mx, 0, zero);
     return [
       { code: measure, invocations: n, buffers: [{ role: "rw" as const, buffer: vecs }, { role: "r" as const, data: lib.data }, { role: "r" as const, data: params }, { role: "rw" as const, buffer: mx }] },
-      { code: emit, invocations: n, buffers: [{ role: "rw" as const, buffer: segs.buffer }, { role: "r" as const, data: lib.data }, { role: "r" as const, buffer: vecs }, { role: "rw" as const, buffer: segs.indirect }, { role: "r" as const, data: params }, { role: "r" as const, buffer: mx }] },
+      { code: emit, invocations: n, buffers: [{ role: "rw" as const, buffer: segs.buffer }, { role: "r" as const, data: lib.data }, { role: "r" as const, buffer: vecs }, { role: "rw" as const, buffer: segs.indirect }, { role: "r" as const, data: params }, { role: "r" as const, buffer: mx }, ...cc.buffers] },
     ];
   };
   const zero = new Uint32Array(4);

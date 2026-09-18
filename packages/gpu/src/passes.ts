@@ -2,6 +2,7 @@
 // and Taubin-smoothed marching-squares isolines on the edge graph.
 
 import { DenseGrid, type ScalarFieldData } from "@tensatory/core";
+import { colourCode, type ColourSource } from "./colour";
 import { RESIDENT_USAGE, type GpuBackend } from "./device";
 import { levelParams, marchingSquaresWgsl } from "./isolines";
 import { ProgramBuilder } from "./program";
@@ -240,14 +241,14 @@ export interface SmoothedIsolines {
  * runs on the edge graph without ever joining polylines. Vertices with fewer
  * than two neighbours (open ends at the box) stay fixed, like core.
  */
-export function smoothedIsolines(backend: GpuBackend, values: GpuGrid, colour?: ScalarFieldData | "level"): SmoothedIsolines {
+export function smoothedIsolines(backend: GpuBackend, values: GpuGrid, colour?: ColourSource): SmoothedIsolines {
   const grid = values.grid;
   const [nx, ny] = grid.size as [number, number];
   const cells = (nx - 1) * (ny - 1);
   const hEdges = (nx - 1) * ny, vEdges = nx * (ny - 1), edges = hEdges + vEdges;
   const capacity = cells * 2;
   const b = new ProgramBuilder(grid);
-  const col = colour && colour !== "level" ? b.scalar(colour) : undefined;
+  const cc = colourCode(b, colour, 2, "params[1]", 6);
   const lib = b.library();
   // persistent scratch: edge positions (ping-pong), edge used flags, cell segments as edge ids
   const posA = backend.createBuffer({ size: Math.max(16, edges * 8), usage: RESIDENT_USAGE });
@@ -339,7 +340,7 @@ fn appendSeg(s: Seg) {
   let i = atomicAdd(&ind.instanceCount, 1u);
   if (i < bitcast<u32>(params[0])) { segs[i] = s; }
 }
-fn colour_(p: vec2<f32>) -> f32 { return ${colour === "level" ? "params[1]" : col ? `${col}(p, -1)` : "0.0"}; }
+${cc.code}
 fn emit(ea: i32, eb: i32) {
   let a = pos[ea]; let b = pos[eb];
   var s: Seg; s.a = a; s.b = b; s.ca = colour_(a); s.cb = colour_(b); s.arc = 0.0; s.len = 0.0; s.phase = 0.0; s.pad = 0.0;
@@ -364,7 +365,7 @@ fn emit(ea: i32, eb: i32) {
         }
       }
       const cap = gridParams([0, level], grid); new Uint32Array(cap.buffer)[0] = Math.min(0xffffffff, segs.capacity); // params[1] = level (colour "level")
-      backend.dispatch({ code: emitCode, invocations: cells, buffers: [{ role: "rw", buffer: segs.buffer }, { role: "r", data: lib.data }, { role: "r", buffer: cur }, { role: "rw", buffer: segs.indirect }, { role: "r", buffer: cellSegs }, { role: "r", data: cap }] });
+      backend.dispatch({ code: emitCode, invocations: cells, buffers: [{ role: "rw", buffer: segs.buffer }, { role: "r", data: lib.data }, { role: "r", buffer: cur }, { role: "rw", buffer: segs.indirect }, { role: "r", buffer: cellSegs }, { role: "r", data: cap }, ...cc.buffers] });
     },
     destroy() { posA.destroy(); posB.destroy(); cellSegs.destroy(); },
   };

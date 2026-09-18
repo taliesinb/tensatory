@@ -26,6 +26,7 @@ import {
   type GpuGrid,
   type GpuSegments,
   type SmoothedIsolines,
+  type ColourSource,
 } from "@tensatory/gpu";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 
@@ -87,6 +88,8 @@ export class FusedGeometry implements MemoryUser {
   grid(key: string, field: ScalarFieldData | VectorFieldData, grid: DenseGrid): GpuGrid {
     return this.grids.getOr(key, () => sampleResidentSync(this.gpu, field, grid));
   }
+  /** an already-resident grid, or undefined (no sampling) */
+  gridIfResident(key: string): GpuGrid | undefined { return this.grids.get(key); }
 
   /** CPU values as a resident grid (CPU compute + GPU render) */
   uploadGrid(key: string, grid: DenseGrid, values: ArrayLike<number>, channels: number): GpuGrid {
@@ -135,7 +138,7 @@ export class FusedGeometry implements MemoryUser {
   }
 
   /** marching-squares isolines of a resident grid with Taubin smoothing on the edge graph (non-exact path with `line` > 0) */
-  smoothedIsolines(kernelKey: string, setKey: string, values: GpuGrid, colour: ScalarFieldData | "level" | undefined, level: number, iterations: number): GpuSegments {
+  smoothedIsolines(kernelKey: string, setKey: string, values: GpuGrid, colour: ColourSource, level: number, iterations: number): GpuSegments {
     const kernel = this.smoothKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => smoothedIsolines(this.gpu, values, colour)); // the kernel reads THIS grid's buffer
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|smooth`;
     const cs = this.isoSet(setKey, family, values, kernel.capacity);
@@ -149,7 +152,7 @@ export class FusedGeometry implements MemoryUser {
    * Segments of the isoline of `field` at `level`. `kernelKey` identifies (field, grid, colour field);
    * `setKey` identifies the slot (kernel + level index) whose segment set is reused across level changes.
    */
-  isolines(kernelKey: string, setKey: string, field: ScalarFieldData, values: GpuGrid, colour: ScalarFieldData | "level" | undefined, level: number, tol: number, exact?: boolean): GpuSegments {
+  isolines(kernelKey: string, setKey: string, field: ScalarFieldData, values: GpuGrid, colour: ColourSource, level: number, tol: number, exact?: boolean): GpuSegments {
     const kernel = this.isoKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => fusedIsolines(this.gpu, field, values, colour, { exact }));
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|${exact ? "exact" : "ms"}`; // the kernel key without its grid part
     const cs = this.isoSet(setKey, family, values, kernel.capacity);
@@ -160,7 +163,7 @@ export class FusedGeometry implements MemoryUser {
   }
 
   /** segments of the streamlines through resident `vectors` from `seeds` (key covers everything that affects them) */
-  streamlines(key: string, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour: ScalarFieldData | undefined): GpuSegments {
+  streamlines(key: string, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour: ColourSource): GpuSegments {
     return this.streamKernels.getOr(key, () => {
       const kernel = fusedStreamlines(this.gpu, vectors, seeds, opts, colour);
       const segs = allocSegments(this.gpu, kernel.capacity, true);
@@ -175,7 +178,7 @@ export class FusedGeometry implements MemoryUser {
    * cutoff) change; the set is regrown when the lattice outgrows it. `onMax` receives the normalizing norm once the
    * readback lands.
    */
-  glyphs(kernelKey: string, field: VectorFieldData, lattice: Lattice, latticeKey: string, d: GlyphDispatch, colour: ScalarFieldData | undefined, onMax?: (max: number) => void): GpuSegments {
+  glyphs(kernelKey: string, field: VectorFieldData, lattice: Lattice, latticeKey: string, d: GlyphDispatch, colour: ColourSource, onMax?: (max: number) => void): GpuSegments {
     latticeKey = `${latticeKey}|${d.style ?? ""}|${(d.minLength ?? 0).toPrecision(4)}`;
     const kernel = this.glyphKernels.getOr(kernelKey, () => fusedGlyphs(this.gpu, field, colour));
     const need = kernel.capacityFor(lattice);

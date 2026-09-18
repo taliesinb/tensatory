@@ -11,6 +11,7 @@
 
 import { DenseGrid, type ScalarFieldData, type StreamlineSeeds } from "@tensatory/core";
 import type { GpuBackend } from "./device";
+import { colourCode, type ColourSource } from "./colour";
 import { levelParams, marchingSquaresWgsl, projectionWgsl } from "./isolines";
 import { ProgramBuilder } from "./program";
 import type { GpuGrid } from "./resident";
@@ -51,7 +52,7 @@ export interface FusedIsolines {
  * fields are projected exactly, sampled fields keep the marching-squares
  * segments.
  */
-export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData | "level", opts: FusedIsolineOptions = {}): FusedIsolines {
+export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ColourSource, opts: FusedIsolineOptions = {}): FusedIsolines {
   const grid = values.grid;
   const slice = opts.slice;
   const exact = opts.exact ?? (slice ? slice.field.kind === "symbolic" : field?.kind === "symbolic");
@@ -68,7 +69,7 @@ export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | unde
     extra.push(`fn sl_f(q: vec2<f32>, pos: i32) -> f32 { return ${f3}(${lift("q")}, -1); }`);
     extra.push(`fn sl_vg(q: vec2<f32>, pos: i32) -> vec3<f32> { let v = ${vg3}(${lift("q")}, -1); return vec3<f32>(v.x, v[${keep[0] + 1}], v[${keep[1] + 1}]); }`);
   } else if (exact) { fn = b.scalar(field!); vg = b.valueGradient(field!); }
-  const col = colour && colour !== "level" ? b.scalar(colour) : undefined; // "level": the colour is the level itself, no field evaluated
+  const cc = colourCode(b, colour, 2, "params[0]", 5); // see colour.ts: field / resident grid / level
   const lib = b.library();
   lib.code += `\n${extra.join("\n")}`;
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
@@ -91,7 +92,7 @@ fn appendSeg(s: Seg) {
 ${ISO_GRID.code}
 ${marchingSquaresWgsl(ISO_GRID.ref)}
 ${exact ? projectionWgsl(fn, vg, slice ? sliceBox(slice) : field!.box) : ""}
-fn colour_(p: vec2<f32>) -> f32 { return ${colour === "level" ? "params[0]" : col ? `${col}(p, -1)` : "0.0"}; }
+${cc.code}
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
   let d = b - a; let l2 = dot(d, d);
   if (l2 == 0.0) { return distance(m, a); }
@@ -154,6 +155,7 @@ ${exact ? `
       { role: "r" as const, buffer: values.buffer },
       { role: "rw" as const, buffer: segs.indirect },
       { role: "r" as const, data: (() => { const f = levelParams(level, grid, [tol, depth]); new Uint32Array(f.buffer)[3] = Math.min(0xffffffff, segs.capacity); return f; })() },
+      ...cc.buffers,
     ],
   });
   return {
@@ -190,7 +192,7 @@ export interface FusedStreamlineOptions {
  * re-integrates exactly that many steps each way, and its scratch and segment
  * capacity are sized from the budgets.
  */
-export function fusedStreamlines(backend: GpuBackend, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour?: ScalarFieldData): FusedStreamlines {
+export function fusedStreamlines(backend: GpuBackend, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour?: ColourSource): FusedStreamlines {
   const grid = vectors.grid;
   const box = opts.box ?? grid.box;
   const sgn = opts.sign ?? 1, h = opts.step;
@@ -199,7 +201,7 @@ export function fusedStreamlines(backend: GpuBackend, vectors: GpuGrid, seeds: S
   // the vector grid is read through a DenseVectorFieldData reader emitted by the builder; bind its data to the resident buffer
   // (the builder would upload a copy: instead we emit the reader against binding 2 by giving it a placeholder and rebinding)
   const b = new ProgramBuilder(new DenseGrid([2, 2], grid.box));
-  const col = colour ? b.scalar(colour) : undefined;
+  const cc = colourCode(b, colour, 2, "0.0", 6);
   const lib = b.library();
   const [nx, ny] = grid.size as [number, number];
   const sx = grid.strides[0]!, sy = grid.strides[1]!;
@@ -240,7 +242,7 @@ fn dir(q: vec2<f32>) -> vec3<f32> {
   return vec3<f32>(v * (SGN / sqrt(l)), 1.0);
 }
 ${integrateWgsl("scratch")}
-fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+${cc.code}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = i32(id.x);
   if (i >= ${lines}) { return; }
@@ -276,6 +278,7 @@ fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
       { role: "rw" as const, buffer: segs.indirect },
       { role: "r" as const, data: packed.data.length ? packed.data : new Float32Array(SEED_FLOATS) },
       { role: "rw" as const, size: Math.max(8, packed.points * 2 * 4) },
+      ...cc.buffers,
     ],
   });
   return {

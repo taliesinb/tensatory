@@ -39,6 +39,7 @@ import {
   uploadSegments,
   uploadSegments3,
   type Camera3D,
+  type ColourSource,
   type FusedGlyphs,
   type FusedIsolines,
   type FusedIsosurface,
@@ -330,14 +331,33 @@ export class View3D implements MemoryUser {
    *  gradient, and 2D isolines of nets are exact. */
   private isExact(iv: Use3): boolean { return this.c.exact() && iv.data.kind === "symbolic" && !iv.data.costly && !(this.c.blur()! > 0); }
 
+  /**
+   * What a fused kernel colours its vertices with (gpu/colour.ts): the LEVEL when the colour field is the iso field;
+   * a resident grid on `grid` (sampled once on the GPU, trilinear at every vertex) when the field is costly — a
+   * net-backed colour evaluated per vertex was millions of net evaluations per level; else the field's program.
+   */
+  private colourSource(c: Use3 | undefined, grid: DenseGrid, isoField?: Use3): { src: ColourSource; key: string } {
+    if (!c) return { src: undefined, key: "" };
+    if (isoField && c.id === isoField.id) return { src: "level", key: "level" };
+    if (c.data.costly) {
+      // already resident on this grid (it is the I_V field's blur source, say)? else a capped grid: the colour is
+      // interpolated anyway, and a net at 256³ is 16.7 M evaluations (4 s) for a tint
+      let g = this.grids.get(gridKey(c, grid));
+      if (!g) { const cg = new DenseGrid(grid.size.map((n) => Math.min(n, View3D.COLOUR_GRID_MAX)), grid.box); g = this.grids.getOr(gridKey(c, cg), () => sampleResidentSync(this.c.gpu, c.data, cg)); }
+      return { src: g, key: `${c.id}#${uidOf(g)}` };
+    }
+    return { src: c.data, key: c.id };
+  }
+  /** most samples per axis of a costly colour field's resident grid (64³ = 262 k evaluations, ~70 ms for iris) */
+  static readonly COLOUR_GRID_MAX = 64;
+
   private meshesGpu(iv: Use3, ic: Use3 | undefined, grid: DenseGrid, levels: number[]): GpuMesh[] {
     const { values, key: gk } = this.volumeGpu(iv, grid);
     const exact = this.isExact(iv);
+    const icc = this.colourSource(ic, grid, iv);
     const family = `${iv.id}|${this.c.blur() ?? ""}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`;
-    const kk = `${gk}#${uidOf(values)}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`; // the kernel reads THIS grid's buffer
-    // colouring the surfaces by their own field: the colour IS the level (else a colour-field evaluation per vertex —
-    // for a net-backed field, millions of net evaluations per level)
-    const kernel = this.kernels.getOr(kk, () => fusedIsosurface(this.c.gpu, values, { field: exact ? iv.data : undefined, exact, colour: ic?.id === iv.id ? "level" : ic?.data }));
+    const kk = `${gk}#${uidOf(values)}|${icc.key}|${exact ? "exact" : "lin"}`; // the kernel reads THIS grid's buffer (and the colour grid's)
+    const kernel = this.kernels.getOr(kk, () => fusedIsosurface(this.c.gpu, values, { field: exact ? iv.data : undefined, exact, colour: icc.src }));
     const n = Math.max(...grid.size);
     // triangle budget from the measured complexity of this field (surfaces touch O(n²) of the n³ cells); before
     // any measurement a modest guess — an overflow is detected by the count readback and the set regrown
@@ -492,7 +512,8 @@ export class View3D implements MemoryUser {
     const cell = Math.min(...vgrid.spacing) || 1e-3, step = 0.5 * cell;
     const sc = c.streamColour();
     const iopts = { maxSteps: o.maxSteps, step, sign: o.sign, box: vbox, bidirectional: o.bidirectional };
-    const key = [v.id, gridKey(v, vgrid), o.mode, o.bidirectional, o.count, o.maxSteps, o.sign, step.toExponential(4), sc?.id ?? ""].join("|");
+    const scc = this.colourSource(sc, vgrid);
+    const key = [v.id, gridKey(v, vgrid), o.mode, o.bidirectional, o.count, o.maxSteps, o.sign, step.toExponential(4), scc.key].join("|");
     let segs = this.streamSets.get(key);
     if (!segs) {
       const gpu = c.compute() === "gpu";
@@ -505,7 +526,7 @@ export class View3D implements MemoryUser {
       }
       if (gpu) {
         const vectors = this.vgrids.getOr(`vec:${gridKey(v, vgrid)}`, () => sampleResidentSync(c.gpu, v.data, vgrid));
-        const kernel = this.streamKernels.getOr(key, () => fusedStreamlines3(c.gpu, vectors, seeds!, iopts, sc?.data));
+        const kernel = this.streamKernels.getOr(key, () => fusedStreamlines3(c.gpu, vectors, seeds!, iopts, scc.src));
         segs = allocSegments3(c.gpu, kernel.capacity, true);
         kernel.dispatch(segs);
       } else {
@@ -540,10 +561,11 @@ export class View3D implements MemoryUser {
     const vc = c.glyphColour(), style = c.glyphStyle(), minLength = style === "triangle" ? 0 : c.glyphMinPx() * worldPerPx;
     const latOnly = `${lat.spacing.toExponential(6)}|${lat.cosets.map((g) => `${g.size.join("x")}@${g.box.a.map((x) => x.toPrecision(9)).join(",")}`).join(";")}`;
     const latKey = `${latOnly}|${style}|${minLength.toPrecision(4)}`;
-    const kk = `${v.id}|${vc?.id ?? ""}`;
+    const vcc = c.compute() === "gpu" ? this.colourSource(vc, this.grid(cbox, View3D.STREAM_N)) : { src: vc?.data, key: vc?.id ?? "" };
+    const kk = `${v.id}|${vcc.key}`;
     let segs: GpuSegments3;
     if (c.compute() === "gpu") {
-      const kernel = this.glyphKernels.getOr(kk, () => fusedGlyphs(c.gpu, v.data, vc?.data));
+      const kernel = this.glyphKernels.getOr(kk, () => fusedGlyphs(c.gpu, v.data, vcc.src));
       const need = kernel.capacityFor(lat);
       let e = this.glyphSets.get(kk);
       if (e && (e.segs.capacity < need || e.segs.capacity > need * 4)) { this.glyphSets.delete(kk); e = undefined; }

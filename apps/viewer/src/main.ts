@@ -46,8 +46,8 @@ import { GpuGeometry } from "./gpuGeometry";
 import { FusedGeometry } from "./gpuFused";
 import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
-import { Cache, type MemoryUser } from "./cache";
-import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap } from "@tensatory/gpu";
+import { Cache, uidOf, type MemoryUser } from "./cache";
+import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -909,6 +909,27 @@ function valueMap(u: ScalarUse): ValueMap {
 }
 function gridKey(u: { id: string }, grid: DenseGrid): string { return `${u.id}|${grid.size.join("x")}|${grid.box.intervals.flat().join(",")}`; }
 
+/**
+ * What a fused kernel colours its vertices with (gpu/colour.ts): the LEVEL when the colour field is the iso field
+ * itself; a resident grid of the field on the dispatch grid — sampled once on the GPU, interpolated at every
+ * vertex — when the field is costly (net-backed: an evaluation per vertex was millions of net evaluations); else the
+ * field's own program, exact. `key` identifies the source for kernel caches (a resident buffer is bound at build).
+ */
+function colourSource(c: ScalarUse | undefined, grid: DenseGrid, isoField?: ScalarUse): { src: ColourSource; key: string } {
+  if (!c) return { src: undefined, key: "" };
+  if (isoField && c.id === isoField.id) return { src: "level", key: "level" };
+  if (c.data.costly && fused && modes.compute === "gpu") {
+    // the display grid when the field is already resident on it (it is the C field, say), else a capped grid:
+    // colour varies smoothly and is interpolated, and a net at 2048² would be 4 M evaluations for a tint
+    let g = fused.gridIfResident(gridKey(c, grid));
+    if (!g) { const cg = new DenseGrid(grid.size.map((n) => Math.min(n, COLOUR_GRID_MAX_2D)), grid.box); g = fused.grid(gridKey(c, cg), c.data, cg); }
+    return { src: g, key: `${c.id}#${uidOf(g)}` };
+  }
+  return { src: c.data, key: c.id };
+}
+/** most samples per axis of a costly colour field's resident grid (2D; 3D: View3D.COLOUR_GRID_MAX) */
+const COLOUR_GRID_MAX_2D = 256;
+
 function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | undefined, st: StreamSet | undefined, gl: GlyphSet | undefined): void {
   const F = fused!, R = gpuRenderer!;
   const gs: GpuScene = { view: renderer.gpuView, clip: box, background: [0x0b / 255, 0x0d / 255, 0x12 / 255], lines: [] };
@@ -938,14 +959,13 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       // NOT the colormap selection: it only filters the levels (isoLevelParams) and colours the raster; a kernel is a
       // shader compile (seconds for a net in Safari), and every set re-dispatches on its own level stamp anyway
       const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}`;
-      // colouring the isolines by their own field: the colour IS the level — no field evaluated per vertex (for a
-      // net-backed field that was a full net evaluation per vertex)
-      const icData = ic?.id === f.id ? "level" : ic?.data;
+      const icc = colourSource(ic, grid, f);
+      const kernelKeyC = `${kernelKey}|${icc.key}`;
       isoLevelParams().forEach((t, k) => {
         const level = f.codomain.fromParam(t, lo, hi);
         const segs = !exact && line > 0
-          ? F.smoothedIsolines(kernelKey, `${kernelKey}|${k}`, values, icData, level, line)
-          : F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, icData, level, tol, exact);
+          ? F.smoothedIsolines(kernelKeyC, `${kernelKey}|${k}`, values, icc.src, level, line)
+          : F.isolines(kernelKeyC, `${kernelKey}|${k}`, f.data, values, icc.src, level, tol, exact);
         gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
       });
     } else if (iso) {
@@ -979,7 +999,8 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
         if (field) seeds = streamPlan(key, field, { count, mode, ...iopts }).seeds;
       }
       if (seeds) {
-        const segs = F.streamlines(`${key}|${sc?.id ?? ""}`, vectors, seeds, iopts, sc?.data);
+        const scc = colourSource(sc, grid);
+        const segs = F.streamlines(`${key}|${scc.key}`, vectors, seeds, iopts, scc.src);
         gs.lines.push({ segs, width: 1.5, alpha: num("sAlpha") ?? 1, color: [1, 1, 1], particles: particlesIn(cell), ...colour });
       }
     } else if (st) {
@@ -998,7 +1019,8 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       const lat = glyphLattice(gv, visibleWorld(), glyphSpacingPx() * renderer.worldPerPixel);
       if (lat) {
         const style = glyphStyle();
-        const segs = F.glyphs(`${gv.id}|${vc?.id ?? ""}`, gv.data, lat, latticeKey(lat), { style, minLength: GLYPH_MIN_PX * renderer.worldPerPixel }, vc?.data, (m) => { glyphMaxShown = m; glyphLabels(); });
+        const vcc = colourSource(vc, grid);
+        const segs = F.glyphs(`${gv.id}|${vcc.key}`, gv.data, lat, latticeKey(lat), { style, minLength: GLYPH_MIN_PX * renderer.worldPerPixel }, vcc.src, (m) => { glyphMaxShown = m; glyphLabels(); });
         gs.lines.push({ segs, kind: style === "triangle" ? "triangles" : "lines", width: 1.5, alpha, color: [1, 1, 1], ...colour });
       }
     } else if (gl) {

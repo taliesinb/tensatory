@@ -5,7 +5,8 @@
 // at both ends. Seeds and budgets come from core's planners (stratified, JL,
 // coverage), exactly as in 2D.
 
-import { DenseGrid, type ScalarFieldData, type StreamlineSeeds } from "@tensatory/core";
+import { DenseGrid, type StreamlineSeeds } from "@tensatory/core";
+import { colourCode, type ColourSource } from "./colour";
 import type { GpuBackend } from "./device";
 import type { FusedStreamlineOptions } from "./fused";
 import { SEG3_APPEND_WGSL, SEG3_WGSL, type GpuSegments3 } from "./lines3d";
@@ -38,7 +39,7 @@ export interface FusedStreamlines3 {
   destroy(): void;
 }
 
-export function fusedStreamlines3(backend: GpuBackend, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour?: ScalarFieldData): FusedStreamlines3 {
+export function fusedStreamlines3(backend: GpuBackend, vectors: GpuGrid, seeds: StreamlineSeeds, opts: FusedStreamlineOptions, colour?: ColourSource): FusedStreamlines3 {
   const grid = vectors.grid;
   if (grid.dimCount !== 3 || vectors.channels !== 3) throw new Error("fusedStreamlines3 needs a resident 3D vector grid");
   const box = opts.box ?? grid.box;
@@ -46,7 +47,7 @@ export function fusedStreamlines3(backend: GpuBackend, vectors: GpuGrid, seeds: 
   const packed = packSeeds3(seeds, opts.maxSteps, opts.bidirectional);
   const lines = packed.lines;
   const b = new ProgramBuilder(new DenseGrid([2, 2, 2], grid.box));
-  const col = colour ? b.scalar(colour) : undefined;
+  const cc = colourCode(b, colour, 3, "0.0", 6);
   const lib = b.library();
   const [nx, ny, nz] = grid.size as [number, number, number];
   const [sx, sy, sz] = grid.strides as [number, number, number];
@@ -101,7 +102,7 @@ fn integrate(seed: vec3<f32>, s: f32, base: i32, stepDir: i32, steps: i32) -> i3
   }
   return n;
 }
-fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+${cc.code}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = i32(id.x);
   if (i >= ${lines}) { return; }
@@ -137,6 +138,7 @@ fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
       { role: "rw" as const, buffer: segs.indirect },
       { role: "r" as const, data: packed.data.length ? packed.data : new Float32Array(SEED3_FLOATS) },
       { role: "rw" as const, size: Math.max(16, packed.points * 3 * 4) },
+      ...cc.buffers,
     ],
   });
   return {

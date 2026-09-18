@@ -280,13 +280,20 @@ Open: a space switch restores that space's remembered resolution directly
 (256³ for iris: a 16.7 M-evaluation raster, 4 s) instead of ramping when the
 caches are cold — a resolution-controller issue, not a compile one.
 
-**Colour by the iso field itself is the level.** The fused isoline /
-isosurface / smoothed-isoline kernels evaluated the colour field at every
-vertex; with I_C = I_V on a net-backed field that was a net evaluation per
-vertex (~10 M for 3.45 M triangles, per level — a Safari perma-freeze, plus a
-second net-bearing compile). Passing `colour: "level"` (the viewer does when
-`ic.id === iv.id`, on the CPU paths too) makes `colour_` return the level.
-Colouring by a *different* costly field still evaluates it per vertex.
+**Vertex colour has three sources** (`gpu/src/colour.ts`, `ColourSource`,
+used by the isoline, smoothed-isoline, isosurface, streamline (2D / 3D) and
+glyph kernels): the colour FIELD evaluated at every vertex (exact; cheap
+fields); a RESIDENT GRID interpolated multilinearly (`ProgramBuilder.
+residentReader`: the grid bound as an extra buffer, its header in `data` so a
+resolution change compiles nothing); or `"level"`, the dispatch level itself.
+The viewer picks (`colourSource` in main.ts / view3d.ts): the level when the
+colour field is the iso field; a resident grid when the field is `costly`
+(net-backed) — the display grid if the field is already resident there, else
+a capped grid (256² / 64³: colour is a smooth tint, and iris at 256³ is
+16.7 M evaluations ≈ 4 s); the field otherwise. Before: a colour evaluation
+per vertex — with I_C = loss on 3.45 M triangles ~10 M net evaluations per
+level, a Safari perma-freeze. Now colouring loss surfaces by accuracy costs
+one 64³ sampling (~70 ms) and lookups.
 
 **Exact projection of nets is latency-bound.** Measured on the iris loss at
 192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
