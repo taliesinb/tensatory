@@ -1682,7 +1682,14 @@ function frame(now: number): void {
     const bytes = memoryNow();
     if (pendingFrame?.awaitingGpu && pendingFrame.gpuMs === undefined) { /* a settled recompute is still being timed: this frame is not a sample */ }
     else {
-      const pf: NonNullable<typeof pendingFrame> = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: (gpu?.pipelinesBuilt ?? 0) !== p0, bytes, overCap, ctx: resCtx() };
+      // "compiled": pipelines were built during this render — or recently: compiles are asynchronous, so the build
+      // completes on one frame and the stall (Safari finishes the Metal compile at first submit, and presenting waits
+      // for the queue) lands on the frames after it; none of those is a sample of the rung's own cost
+      const built = gpu?.pipelinesBuilt ?? 0;
+      if (built !== p0 || built !== lastBuilt || (gpu?.compiling ?? 0) > 0) compileTaint = COMPILE_TAINT_FRAMES;
+      lastBuilt = built;
+      const pf: NonNullable<typeof pendingFrame> = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: compileTaint > 0, bytes, overCap, ctx: resCtx() };
+      if (compileTaint > 0) compileTaint--;
       if (gpu && usedTier === "settled" && pf.recomputed) { pf.awaitingGpu = true; void gpu.device.queue.onSubmittedWorkDone().then(() => { pf.gpuMs = performance.now() - t0; }); }
       pendingFrame = pf;
     }
@@ -1698,7 +1705,9 @@ function frame(now: number): void {
   if (recolour?.pending) { const more = recolour.step(frameMs); if (more && ++recolourTick % RECOLOUR_REFRESH === 0) state.dirty = true; if (!more) state.dirty = true; }
   requestAnimationFrame(frame);
 }
-let gearOn = false, recolourTick = 0, statusYields = 0;
+let gearOn = false, recolourTick = 0, statusYields = 0, lastBuilt = 0, compileTaint = 0;
+/** rendered frames after a pipeline build (or while one is in flight) that the resolution controller treats as compiled */
+const COMPILE_TAINT_FRAMES = 3;
 const RECOLOUR_REFRESH = 4;
 
 /*******************************************************/

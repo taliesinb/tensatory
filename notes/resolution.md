@@ -197,3 +197,20 @@ consequence is that a CPU-sampled net field holds at 16³ in 3D; the fix for
 THAT is evaluating those nets on the GPU (stream the example axis instead
 of holding it in function-scope arrays) or sampling off the main thread.
 
+## Cadence
+
+The rAF cadence is not always 60 Hz: Safari runs an occluded or unfocused
+window at 30 Hz (the automation window here), some displays are 30 Hz. Frame
+times are quantized to the cadence, so at 30 Hz a frame exactly on time is
+33–35 ms — "just over" the fixed 33.4 ms budget — and the moving tier walked
+the gyroid down to 16³ with every rung reading "34 ms", and every such frame
+was filed as a cache fill. The controller now estimates the cadence as the
+25th percentile of the window (capped at 30 Hz: uniformly slow frames are a
+slow GPU, not a slow display) and judges relative to it: the moving budget
+is at least 1.5 cadences (too slow = dropping frames), a median on the
+cadence probes up like a vsync-bound 60 Hz window, and a fill is a stall of
+more than 3 cadences. Frames after a pipeline build (3 frames, or while one
+is in flight) count as compiled: builds complete asynchronously, and Safari
+finishes the Metal compile at first submit, so the stall lands on the frames
+AFTER the build — a 14 s "fill" at 16³ was one such compile.
+

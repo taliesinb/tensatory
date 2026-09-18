@@ -50,6 +50,14 @@ const SETTLED_BUDGET_MS = 200;
 const FILL_BUDGET_MS = 400;
 /** a frame time at or under this is vsync-bound (60 Hz): no information about headroom */
 const VSYNC_MS = 17.5;
+/**
+ * The rAF cadence is not always 60 Hz: Safari runs an occluded or unfocused window at 30 Hz, and some displays
+ * are 30 Hz. Frame times are quantized to the cadence, so at 30 Hz a frame that is exactly on time measures 33–35
+ * ms — "just over" a 33.4 ms budget — and a fixed budget walked the ladder to the bottom with every rung reading
+ * "34 ms". The cadence is estimated as the fastest frames of the window (the 25th percentile), and the moving
+ * budget is at least MISSED_FRAMES cadences: too slow means DROPPING frames, not landing on the vsync.
+ */
+const MISSED_FRAMES = 1.5, MAX_CADENCE_MS = 34;
 /** frame-time window (median) for down decisions and probe validation */
 const WINDOW = 8;
 /** samples discarded after a resolution change (allocations, first dispatches) */
@@ -105,6 +113,8 @@ export class AutoRes {
    * its way to 64³ one 25 s freeze at a time.
    */
   private fill: { ms: number; n: number; ctx: string } | undefined;
+  /** the rAF cadence last estimated from a full frame window (ms; 60 Hz until measured) */
+  private cadence = VSYNC_MS;
   /** the previous settled sample compiled: the driver may finish the compile in the NEXT frame, so that one is discarded too */
   private afterCompile = false;
   /** a slow settled sample is confirmed by a second one before it fails a step (main-thread stalls — a bundle
@@ -178,7 +188,8 @@ export class AutoRes {
     if (r.overCap) { this.fail(r.ctx, r.tier, idx); this.set(r.tier, idx - 1, "mem cap"); return; }
     // (not a frame that compiled shaders — in Safari that is seconds of compile, no fill; and a cheaper later sample
     // at the same rung was a cache hit, not a cheaper fill)
-    if (r.recomputed && !r.compiled && r.ms > FRAME_BUDGET_MS && (!this.fill || this.fill.ctx !== r.ctx || r.ms / this.steps[idx]! ** this.dims >= this.fill.ms / this.fill.n ** this.dims * 0.5)) this.fill = { ms: r.ms, n: this.steps[idx]!, ctx: r.ctx };
+    // a fill is a stall of several frames, whatever the cadence: at 30 Hz an ordinary frame is 34 ms
+    if (r.recomputed && !r.compiled && r.ms > 3 * this.cadence && (!this.fill || this.fill.ctx !== r.ctx || r.ms / this.steps[idx]! ** this.dims >= this.fill.ms / this.fill.n ** this.dims * 0.5)) this.fill = { ms: r.ms, n: this.steps[idx]!, ctx: r.ctx };
     // CPU work is deterministic, not a hiccup: a recompute that spent more than the fill budget on the main thread
     // (a costly field sampled at this rung) fails the rung at once, whatever tier asked for it
     if (r.recomputed && !r.compiled && (r.jsMs ?? 0) > FILL_BUDGET_MS && idx > 0) {
@@ -229,10 +240,13 @@ export class AutoRes {
     }
     if (r.compiled || this.cooldown > 0) { this.cooldown = Math.max(0, this.cooldown - 1); return; }
 
+    // (capped at 30 Hz: uniformly slow frames are a slow GPU, not a slow display)
+    const cadenceOf = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); return (this.cadence = Math.min(s[Math.floor(s.length * 0.25)]!, MAX_CADENCE_MS)); };
+    const budgetFor = (xs: number[]) => Math.max(FRAME_BUDGET_MS, MISSED_FRAMES * cadenceOf(xs));
     if (!r.recomputed) {
       // render-only frame: resident geometry drawn again (orbit, particles); slow means too many triangles / segments
       this.renderTimes.push(r.ms); if (this.renderTimes.length > WINDOW) this.renderTimes.shift();
-      if (this.renderTimes.length === WINDOW && median(this.renderTimes) > FRAME_BUDGET_MS && idx > 0) {
+      if (this.renderTimes.length === WINDOW && median(this.renderTimes) > budgetFor(this.renderTimes) && idx > 0) {
         this.fail(r.ctx, r.tier, idx); this.set(r.tier, idx - 1, `draw ${median(this.renderTimes).toFixed(0)}ms`);
       }
       return;
@@ -243,20 +257,20 @@ export class AutoRes {
     this.movingTimes.push(r.ms); if (this.movingTimes.length > WINDOW) this.movingTimes.shift();
     if (this.movingTimes.length < WINDOW) return;
     this.movingMeasured = true;
-    const med = median(this.movingTimes);
-    if (med > FRAME_BUDGET_MS) {
+    const med = median(this.movingTimes), cadence = cadenceOf(this.movingTimes);
+    if (med > budgetFor(this.movingTimes)) {
       if (idx > 0) { this.fail(r.ctx, "moving", idx); this.set("moving", idx - 1, `${med.toFixed(0)}ms`); }
-     
       return;
     }
-   
     if (idx >= top || this.isFailed(r.ctx, "moving", idx + 1) || !this.memoryAllows(r, idx, idx + 1)) return;
     if (!this.fillAllows(idx + 1)) { this.note = `mov@${this.steps[idx]} →${this.steps[idx + 1]} fill ~${(this.predictFill(idx + 1) / 1000).toFixed(1)}s`; return; }
     // a frame budget met at n means one recomputation at the next step is fine too: while the animation runs the
     // settled tier gets no samples of its own, so a moving step up carries it along
     const up = (why: string) => { if (this.settled <= idx) this.settled = idx + 1; this.set("moving", idx + 1, why); };
-    if (med <= VSYNC_MS) { up("probe"); return; }
+    // frames at the cadence (60 Hz vsync, or a 30 Hz window whose median sits on its own cadence) say nothing
+    // about headroom: probe one step up
+    if (med <= VSYNC_MS || med <= cadence * 1.1) { up("probe"); return; }
     const predicted = med * (this.steps[idx + 1]! / this.steps[idx]!) ** this.dims;
-    if (predicted <= FRAME_TARGET_MS) up(`~${predicted.toFixed(0)}ms`);
+    if (predicted <= Math.max(FRAME_TARGET_MS, budgetFor(this.movingTimes) * 0.8)) up(`~${predicted.toFixed(0)}ms`);
   }
 }
