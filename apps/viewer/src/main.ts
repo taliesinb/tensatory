@@ -182,7 +182,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: false, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1363,6 +1363,9 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
+  // a fresh space (or bundle) starts PAUSED whatever the saved ▶ ticks say: its first frames build everything from
+  // scratch (for a costly field on the CPU), an animation on top piles them up; space resumes
+  state.paused = true;
   rangeCache.clear(); useCache.clear(); gradCache.clear(); STREAM_CACHE.clear(); PLAN_CACHE.clear(); SAMPLED_VECTORS.clear(); isoCache = undefined; glyphCache = undefined; viewBoxKey = "";
   usable = {
     scalars: bundle.scalarFieldIds.filter((id) => !buildErrors.has(id) && bundle.scalarField(id).domain === m),
@@ -1616,6 +1619,8 @@ window.addEventListener("keydown", (e) => {
 
 // control changes
 for (const id of CHECKS) { ui[id].addEventListener("change", () => { state.dirty = true; saveOptsSoon(); }); }
+// turning a ▶ on is a request to see it move: it lifts the pause (loads and space switches start paused)
+for (const cb of [ui.isoAnim, ui.anim]) cb.addEventListener("change", () => { if (cb.checked && state.paused) { state.paused = false; status(""); } });
 for (const id of VALUES) { ui[id].addEventListener("input", () => { state.dirty = true; }); ui[id].addEventListener("change", saveOptsSoon); }
 for (const id of ["isoValue", "split"] as const) ui[id].addEventListener("input", () => { isoLastChange = performance.now(); });
 for (const id of ["showScalar", "showIso", "showStream", "showVec"] as const) ui[id].addEventListener("change", () => { buildMetrics(); updateInfo(); });

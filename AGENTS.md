@@ -228,7 +228,8 @@ profiling test.
   ▶/◀ on a panel strip is purely the playback direction of that animation
   (particles forward / backward along the drawn lines); shift-click a ▶ to
   reverse it, plain click only toggles play, space starts both animations
-  when none is playing else pauses. Colormaps
+  when none is playing else pauses; loads, space / bundle switches and a
+  new I_V / S_∇ / V_∇ field start paused (turning a ▶ on resumes). Colormaps
   are per field: one legend bar per coloured field listing its slots (click
   the name to cycle), black bars for shape-only fields (I_V, S_∇ source), red
   θ* detent, white isoline notches and cursor pip. Every bar is a colormap

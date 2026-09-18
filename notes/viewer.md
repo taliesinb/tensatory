@@ -54,6 +54,8 @@ pipelines and either draw with Canvas 2D or upload their results. See
   animations first (`GEOMETRY_SLOTS` in `setSel`; space resumes): the new
   field's contours / integrations / lattices are recomputed — on the CPU for a
   costly field — and a re-render every frame on top would pile frames up.
+  For the same reason a load or a space / bundle switch starts PAUSED whatever
+  the saved ▶ ticks say; space resumes, and turning a ▶ on lifts the pause.
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 
