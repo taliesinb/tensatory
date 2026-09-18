@@ -148,7 +148,7 @@ describe("progressive recolouring", () => {
     const jobs = [{ r, buffer: segs.buffer, indirect: segs.indirect, total: segs.capacity, progress: freshProgress() }];
     let frames = 0;
     while (recolourStep(jobs, Math.ceil(segs.capacity / 7))) frames++;
-    expect(frames + 1).toBe(jobs[0]!.progress.frames);
+    expect(frames + 1).toBeLessThanOrEqual(jobs[0]!.progress.frames); // several phases per step when the share allows
     const after = await readSegments(gpu, segs);
     let changed = 0;
     for (let i = 0; i < n; i++) {

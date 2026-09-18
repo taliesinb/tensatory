@@ -48,7 +48,7 @@ import { View3D, type CropRange, type Use3 } from "./view3d";
 import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
-import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
+import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -173,7 +173,8 @@ const sampler = new Sampler(() => { state.dirty = true; });
 let geometry: GpuGeometry | undefined; // GPU compute with canvas rendering: asynchronous, read back
 let fused: FusedGeometry | undefined; // GPU rendering: resident grids and segment sets
 let recolour: Recolour | undefined; // progressive exact recolouring of resident-coloured sets (both arms)
-const recolourer3d = (): Recolour => (recolour ??= new Recolour(sampler.gpu!));
+const recolourer3d = (): Recolour => (recolour ??= newRecolour(sampler.gpu!));
+const newRecolour = (gpu: GpuBackend): Recolour => new Recolour(gpu); // the frame loop polls `pending` every rAF
 let gpuRenderer: GpuRenderer | undefined;
 type Compute = "cpu" | "gpu"; type Render = "canvas" | "gpu";
 const modes: { compute: Compute; render: Render } = { compute: "cpu", render: "canvas" };
@@ -186,7 +187,7 @@ function applyModes(): void {
   geometry = gpu && modes.compute === "gpu" && modes.render === "canvas" ? (geometry ?? new GpuGeometry(gpu, () => { state.dirty = true; })) : undefined;
   if (gpu && modes.render === "gpu") {
     fused ??= new FusedGeometry(gpu, () => { state.dirty = true; });
-    recolour ??= new Recolour(gpu);
+    recolour ??= newRecolour(gpu);
     gpuRenderer ??= new GpuRenderer(gpu, $<HTMLCanvasElement>("gpu"));
   } else { fused?.clear(); fused = undefined; }
   document.body.classList.toggle("gpu-render", modes.render === "gpu" || spaceDims() === 3);
@@ -1518,10 +1519,11 @@ const frameKey = () => [spaceDims(), autoRes().resolution(tier()), ui.isoValue.v
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
 const frameLog: { ms: number; dispatches: number; pipelines: number; recomputed: boolean }[] = [];
-(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu };
+(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour };
 
 function frame(now: number): void {
-  const dt = state.paused ? 0 : Math.min(0.1, (now - lastT) / 1000);
+  const frameMs = now - lastT; // the interval of the frame that just ended
+  const dt = state.paused ? 0 : Math.min(0.1, frameMs / 1000);
   lastT = now;
   if (pendingFrame) { const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined; autoRes().report({ ...r, jsMs, ms: Math.max(now - t0, jsMs) }); }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
@@ -1535,9 +1537,7 @@ function frame(now: number): void {
   if (state.dirty) {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();
-    try { render(); } catch (e) { showError(e); state.dirty = false; }
-    // progressive exact recolouring: a batch per frame over the sets the render registered; more frames while any is left
-    if (recolour?.pending && recolour.step()) state.dirty = true;
+    try { recolour?.beginFrame(); render(); } catch (e) { showError(e); state.dirty = false; }
     const a = autoRes();
     const overCap = governMemory(a.capBytes);
     const bytes = memoryNow();
@@ -1549,9 +1549,13 @@ function frame(now: number): void {
   // the gear spins while a shader compiles (createComputePipelineAsync; the frame that needed it was not presented)
   const compiling = (sampler.gpu?.compiling ?? 0) > 0;
   if (compiling !== gearOn) { gearOn = compiling; $("gear").classList.toggle("on", compiling); }
+  // progressive exact recolouring: a batch EVERY frame over the sets the last render registered, the image
+  // refreshed every RECOLOUR_REFRESH frames (a re-render of the scene costs far more GPU than a batch)
+  if (recolour?.pending) { const more = recolour.step(frameMs); if (more && ++recolourTick % RECOLOUR_REFRESH === 0) state.dirty = true; if (!more) state.dirty = true; }
   requestAnimationFrame(frame);
 }
-let gearOn = false;
+let gearOn = false, recolourTick = 0;
+const RECOLOUR_REFRESH = 4;
 
 /*******************************************************/
 /* boot */
