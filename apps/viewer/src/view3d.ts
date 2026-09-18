@@ -540,7 +540,7 @@ export class View3D implements MemoryUser {
     }
     const colour = sc ? c.colour(sc) : undefined;
     return (this.lastStreamLayer = {
-      segs, width: 1.5, color: [1, 1, 1],
+      segs, width: 1.5, color: [1, 1, 1], alpha: o.alpha,
       particles: o.tail === null ? undefined : { tail: o.tail * cell, split: o.split, travel: o.clock * 10 * cell },
       ...(colour ? { map: colour.map, lut: colour.lut } : {}),
     });

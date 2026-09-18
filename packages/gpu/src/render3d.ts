@@ -35,6 +35,9 @@ export interface GpuLineLayer3D {
   /** css px */
   width: number;
   color: [number, number, number];
+  /** opacity (default 1). Below 1 the lines join the weighted-blended OIT pass of the translucent meshes (no
+   *  sorting), and a particle tail fades in OPACITY from `alpha` at the head to 0 instead of tapering in width. */
+  alpha?: number;
   map?: ValueMap;
   lut?: Lut;
   particles?: { tail: number; split: number; travel: number };
@@ -243,8 +246,9 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   let c = select(ca, cb, atB);
   let arc = select(s.arc, s.arc + distance(s.a, s.b), atB);
   var w = 0.5 * u.style.x * u.viewport.z; // half width in device px
-  // particles: the width tapers with the brightness ramp, to nothing at the tail
-  if (u.particles.w > 0.5 && s.len > 0.0) { w = w * max(particleBright(arc, s.len, s.phase, u.particles), 0.0); }
+  // particles (opaque lines): the width tapers with the brightness ramp, to nothing at the tail; translucent lines
+  // keep their width and fade in opacity instead (fs)
+  if (u.particles.w > 0.5 && s.len > 0.0 && u.style.y < 0.5) { w = w * max(particleBright(arc, s.len, s.phase, u.particles), 0.0); }
   let off = n * side * w;
   o.pos = vec4<f32>(c.xy + off / (0.5 * vp) * c.w, c.zw);
   o.world = select(s.a, s.b, atB);
@@ -253,7 +257,8 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   o.len = s.len; o.phase = s.phase;
   return o;
 }
-@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+// colour and particle brightness of a fragment (shared by the opaque and the translucent entry points)
+fn lineColour(in: VOut) -> vec4<f32> {
   if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
   var bright = 1.0;
   if (u.particles.w > 0.5 && in.len > 0.0) {
@@ -267,7 +272,23 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
     if (c.a < 0.5) { discard; }
     rgb = c.rgb;
   }
-  return vec4<f32>(rgb * bright, 1.0);
+  return vec4<f32>(rgb, bright);
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+  let c = lineColour(in);
+  return vec4<f32>(c.rgb * c.a, 1.0); // the tail fades to black
+}
+// translucent: weighted-blended OIT like the meshes (accum, reveal); the tail fades in opacity, full colour
+struct FOut { @location(0) accum: vec4<f32>, @location(1) reveal: f32 }
+@fragment fn fsTrans(in: VOut) -> FOut {
+  let c = lineColour(in);
+  let a = u.style.w * c.a;
+  let z = in.pos.z;
+  let w = clamp(a * 10.0 * (1.0 - z * 0.99) * (1.0 - z * 0.99), 1e-2, 3e3);
+  var o: FOut;
+  o.accum = vec4<f32>(c.rgb * a, a) * w;
+  o.reveal = a;
+  return o;
 }`;
 
 // Cones from Seg3 "triangle" records (glyphs): a, b = the base's ends, (arc, len, phase) = the apex; the record's
@@ -413,6 +434,7 @@ export class GpuRenderer3D {
   private readonly ctx: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
   private readonly opaque: GPURenderPipeline;
+  private readonly linesTrans: GPURenderPipeline;
   private readonly transparent: GPURenderPipeline;
   private readonly composite: GPURenderPipeline;
   private readonly lines: GPURenderPipeline;
@@ -460,6 +482,20 @@ export class GpuRenderer3D {
       fragment: { module: lineMod, entryPoint: "fs", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    // translucent lines: the meshes' OIT targets and blend state, depth-tested against the opaque image, no write
+    this.linesTrans = dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: lineMod, entryPoint: "vs" },
+      fragment: {
+        module: lineMod, entryPoint: "fsTrans",
+        targets: [
+          { format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } },
+          { format: "r16float", blend: { color: { srcFactor: "zero", dstFactor: "one-minus-src" }, alpha: { srcFactor: "zero", dstFactor: "one-minus-src" } } },
+        ],
+      },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less" },
     });
     const coneMod = dev.createShaderModule({ code: CONES3 });
     this.cones = dev.createRenderPipeline({
@@ -537,11 +573,12 @@ export class GpuRenderer3D {
     });
   }
 
-  private bindLines(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[], w: number, h: number): GPUBindGroup {
+  private bindLines(L: GpuLineLayer3D, viewProj: Mat4, eye: number[], crop: number[], cropLo: number[], w: number, h: number, pipeline = this.lines): GPUBindGroup {
     const f = new Float32Array(64);
     f.set(viewProj, 0);
     f.set([eye[0]!, eye[1]!, eye[2]!, 0], 16);
-    f.set([L.width, 1, L.lut && L.map ? 1 : 0, 0], 20);
+    const alpha = L.alpha ?? 1;
+    f.set([L.width, alpha < 0.999 ? 1 : 0, L.lut && L.map ? 1 : 0, alpha], 20); // style: width, translucent, useLut, alpha
     f.set([L.color[0], L.color[1], L.color[2], 1], 24);
     f.set([L.map?.lo ?? 0, L.map?.hi ?? 1, L.map?.log ? 1 : 0, L.map?.flip ? 1 : 0], 28);
     f.set([crop[0]!, crop[1]!, crop[2]!, L.uncropped ? 0 : 1], 32);
@@ -552,7 +589,7 @@ export class GpuRenderer3D {
     f.set([w, h, dpr, 0], 44);
     f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 48);
     return this.backend.device.createBindGroup({
-      layout: this.lines.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniform(f) } },
         { binding: 1, resource: { buffer: L.segs.buffer } },
@@ -595,6 +632,7 @@ export class GpuRenderer3D {
     const crop = scene.cropMax ?? [Infinity, Infinity, Infinity], cropLo = scene.cropMin ?? [-Infinity, -Infinity, -Infinity];
     const [r, g, b] = scene.background;
     const opaque = scene.meshes.filter((m) => m.alpha >= 0.999), trans = scene.meshes.filter((m) => m.alpha < 0.999);
+    const linesOpaque = (scene.lines ?? []).filter((L) => (L.alpha ?? 1) >= 0.999 || L.kind === "triangles"), linesTrans = (scene.lines ?? []).filter((L) => (L.alpha ?? 1) < 0.999 && L.kind !== "triangles");
     const enc = dev.createCommandEncoder();
     const colour = this.ctx.getCurrentTexture().createView();
     const depth = T.depth.createView();
@@ -603,14 +641,14 @@ export class GpuRenderer3D {
       colorAttachments: [{ view: colour, clearValue: { r, g, b, a: 1 }, loadOp: "clear", storeOp: "store" }],
       depthStencilAttachment: { view: depth, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
     });
-    for (const L of scene.lines ?? []) {
+    for (const L of linesOpaque) {
       if (L.kind === "triangles") { p1.setPipeline(this.cones); p1.setBindGroup(0, this.bindCones(L, viewProj, eye, crop, cropLo, w, h)); }
       else { p1.setPipeline(this.lines); p1.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h)); }
       p1.drawIndirect(L.segs.indirect, 0);
     }
     for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop, cropLo)); p1.drawIndirect(L.mesh.indirect, 0); }
     p1.end();
-    if (trans.length) {
+    if (trans.length || linesTrans.length) {
       const p2 = enc.beginRenderPass({
         colorAttachments: [
           { view: T.accum.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
@@ -619,6 +657,7 @@ export class GpuRenderer3D {
         depthStencilAttachment: { view: depth, depthLoadOp: "load", depthStoreOp: "store" },
       });
       for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye, crop, cropLo)); p2.drawIndirect(L.mesh.indirect, 0); }
+      for (const L of linesTrans) { p2.setPipeline(this.linesTrans); p2.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h, this.linesTrans)); p2.drawIndirect(L.segs.indirect, 0); }
       p2.end();
       const p3 = enc.beginRenderPass({ colorAttachments: [{ view: colour, loadOp: "load", storeOp: "store" }] });
       p3.setPipeline(this.composite);
