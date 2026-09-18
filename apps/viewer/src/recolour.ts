@@ -65,7 +65,11 @@ export class Recolour {
     recolourStep(jobs, this.budget);
     this.stats.batches++; this.stats.records += this.budget; this.stats.lastAt = now;
     this.outstanding++; this.dispatchedLastFrame = true;
-    void this.gpu.device.queue.onSubmittedWorkDone().then(() => { this.outstanding--; });
+    // a promise that never settles (a lost device, a browser quirk) must not wedge the pipeline: count it done after a while
+    let settled = false;
+    const release = () => { if (!settled) { settled = true; this.outstanding--; } };
+    void this.gpu.device.queue.onSubmittedWorkDone().then(release, release);
+    setTimeout(release, 2000);
     return true;
   }
 

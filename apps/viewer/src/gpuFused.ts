@@ -167,7 +167,7 @@ export class FusedGeometry implements MemoryUser {
   /** recolouring progress of an isoline set (by its set key) or a streamline set (by its key): total = count if known, else capacity */
   recolourProgress(key: string): { total: number; progress: RecolourProgress } | undefined {
     const cs = this.isoSets.get(key);
-    if (cs) return { total: cs.count || cs.segs.capacity, progress: (cs.recolour ??= freshProgress()) };
+    if (cs) return { total: cs.segs.capacity, progress: (cs.recolour ??= freshProgress()) }; // capacity: the count may be a previous level's
     const st = this.streamKernels.get(key);
     if (st) return { total: st.segs.capacity, progress: (st.recolour ??= freshProgress()) };
     return undefined;
