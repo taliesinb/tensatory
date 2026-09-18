@@ -24,7 +24,7 @@ import { computeStats, type ScalarStats } from "../fields/stats";
 import type { ScalarFn, VectorFn } from "../symbolic/compile";
 import { gradProgram } from "./autodiff";
 import type { Val } from "./ops";
-import { evaluate, type Program, type ProgramResolver } from "./program";
+import { evaluate, pruneProgram, type Program, type ProgramResolver } from "./program";
 import type { Shape } from "./shapes";
 
 /** points per batched evaluation when sampling a grid */
@@ -93,7 +93,9 @@ export function fieldProgram(base: Program, inputs: Record<string, ArrayExpr> | 
 /** the field's program extended by a node selecting one component of `output` ([D] → []) */
 function componentProgram(f: NetField, index: number): NetField {
   const src = f.program.outputs[f.output]!;
-  const name = `__c${index}`;
+  // a fresh name: a component of a gradient of a component (second derivatives) would otherwise define `__c1` twice
+  let name = `__c${index}`;
+  for (let k = 1; name in f.program.shapes || f.program.nodes.some((n) => n.name === name); k++) name = `__c${index}_${k}`;
   const expr: ArrayExpr = { op: "reshape", val: { op: "slice", val: src, axis: 0, start: index, stop: index + 1 }, shape: [] };
   const program: Program = { ...f.program, nodes: [...f.program.nodes, { name, expr }], outputs: { ...f.program.outputs, [name]: name }, shapes: { ...f.program.shapes, [name]: [] } };
   return { program, output: name, nets: f.nets };
@@ -110,10 +112,21 @@ function gradientProgram(f: NetField): NetField {
 /** the output name of the forward value inside a gradient program (see `gradientProgram`) */
 export const GRADIENT_VALUE_OUTPUT = "__value";
 
+/** the program cut down to the field's output, for the CPU evaluator (a net may compute several metrics) */
+const pruned = new WeakMap<Program, Map<string, Program>>();
+function prunedProgram(f: NetField): Program {
+  let m = pruned.get(f.program);
+  if (!m) pruned.set(f.program, (m = new Map()));
+  let p = m.get(f.output);
+  if (!p) m.set(f.output, (p = pruneProgram(f.program, [f.output])));
+  return p;
+}
+
 /** evaluate the chosen output at points [G, D]; returns [G, ...outShape] */
 export function evalPoints(f: NetField, coords: NdArray): NdArray {
   const G = coords.shape[0]!;
-  const out = evaluate(f.program, { [pointInput(f.program)]: coords }, { nets: f.nets })[f.output]!;
+  const prog = prunedProgram(f);
+  const out = evaluate(prog, { [pointInput(prog)]: coords }, { nets: f.nets })[f.output]!;
   const rank = f.program.shapes[f.program.outputs[f.output]!]!.length;
   const batch = out.shape.slice(0, out.ndim - rank);
   if (batch.length === 0) {

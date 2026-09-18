@@ -269,12 +269,13 @@ def main() -> None:
                 for fid, net, out, name, cd, desc in [
                     ("loss", "iris_rnd", "loss", "loss", "celoss", "validation cross-entropy"),
                     ("acc", "iris_rnd", "acc", "accuracy", "fraction", "validation accuracy"),
-                    ("trainLoss", "iris_trn_rnd", "loss", "train loss", "celoss", "training cross-entropy"),
-                    ("trainAcc", "iris_trn_rnd", "acc", "train acc", "fraction", "training accuracy"),
-                    ("objective", "iris_trn_rnd", "obj", "objective", "celoss", "the objective Adam minimized — training cross-entropy + wd/2 ‖θ‖² (weight decay 3e-3), so θ* is its minimum —"),
-                    ("lossSetosa", "iris_trn_rnd", "loss0", "loss: setosa", "celoss", "training cross-entropy of the setosa examples"),
-                    ("lossVersicolor", "iris_trn_rnd", "loss1", "loss: versicolor", "celoss", "training cross-entropy of the versicolor examples"),
-                    ("lossVirginica", "iris_trn_rnd", "loss2", "loss: virginica", "celoss", "training cross-entropy of the virginica examples"),
+                    # names are paths: the mappings table shows "train" as a collapsible heading with these beneath
+                    ("trainLoss", "iris_trn_rnd", "loss", "train/loss", "celoss", "training cross-entropy"),
+                    ("trainAcc", "iris_trn_rnd", "acc", "train/accuracy", "fraction", "training accuracy"),
+                    ("objective", "iris_trn_rnd", "obj", "train/objective", "celoss", "the objective Adam minimized — training cross-entropy + wd/2 ‖θ‖² (weight decay 3e-3), so θ* is its minimum —"),
+                    ("lossSetosa", "iris_trn_rnd", "loss0", "train/loss/setosa", "celoss", "training cross-entropy of the setosa examples"),
+                    ("lossVersicolor", "iris_trn_rnd", "loss1", "train/loss/versicolor", "celoss", "training cross-entropy of the versicolor examples"),
+                    ("lossVirginica", "iris_trn_rnd", "loss2", "train/loss/virginica", "celoss", "training cross-entropy of the virginica examples"),
                 ]
             },
         },

@@ -187,8 +187,9 @@ profiling test.
   orthogonal directions (`iris_rand2/3`, `iris_trn_rand2/3`, no fields) the
   PyTorch reference was computed along. The training-set nets (N = 120)
   exceed `NET_MAX_FLOATS`, so those fields are CPU-sampled (`costly`);
-  pruning a program to its field's output was tried and exposed a latent
-  emitter bug in the gradient (see notes/nets.md) — not enabled.
+  the CPU evaluator prunes a field's program to its output (`pruneProgram`,
+  `evalPoints`); the GPU emitter gets the FULL program — pruning its input
+  exposed a latent emitter bug in the gradient (see notes/nets.md).
   `core/test/iris.test.ts` checks every output against PyTorch to 1e-9,
   `core/test/autodiff.test.ts` every op's gradient against finite
   differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,
@@ -207,7 +208,11 @@ profiling test.
   `colorfield`, `isolines`, `streamlines`, `vector field`), the `mappings`
   matrix bottom-left, cursor pane + legend bottom-right. The matrix assigns
   fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND
-  vector field; a vector slot
+  vector field, as a TREE: names are paths (`train/loss/setosa`), drawn
+  flattened with a subtle indent, subtrees collapsed until clicked, a
+  locked-selected field always shown with its ancestors but without its
+  unselected siblings, pure headings without cells (`notes/viewer.md`);
+  selecting a costly field restarts the resolution ladder; a vector slot
   given a scalar uses its gradient (∇ glyph), a scalar slot given a vector uses
   its norm (|·| glyph; log-scaled codomain, since gradient norms span orders
   of magnitude and vanish at critical points). Column headers toggle their

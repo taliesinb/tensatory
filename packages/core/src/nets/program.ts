@@ -190,6 +190,29 @@ export function renameExpr(e: ArrayExpr, map: ReadonlyMap<string, string>): Arra
   return out as unknown as ArrayExpr;
 }
 
+/**
+ * Dead-code elimination: the program restricted to what `outputs` depend on (nodes and constants; inputs are kept
+ * — they are the signature). A net field reads ONE output of a net that may compute several (loss, accuracy, the
+ * per-class losses…). Used by the CPU evaluator of net fields; the GPU emitter still receives the full program —
+ * pruning `pred` / `acc` from the iris program changed its emitted GRADIENT enough to expose a latent emitter bug
+ * (∇ off by 10³ at some points while the value agreed), to be understood before the emitter gets pruned input.
+ */
+export function pruneProgram(prog: Program, outputs: readonly string[]): Program {
+  const keep = new Set<string>();
+  const byName = new Map(prog.nodes.map((n) => [n.name, n.expr] as const));
+  const visit = (n: string) => {
+    if (keep.has(n)) return;
+    keep.add(n);
+    const e = byName.get(n);
+    if (e) for (const dep of exprNames(e)) visit(dep);
+  };
+  for (const o of outputs) { const n = prog.outputs[o]; if (n === undefined) throw new SpecError(`net has no output "${o}"`); visit(n); }
+  const nodes = prog.nodes.filter((n) => keep.has(n.name));
+  const consts = Object.fromEntries(Object.entries(prog.consts).filter(([n]) => keep.has(n)));
+  const outs = Object.fromEntries(outputs.map((o) => [o, prog.outputs[o]!]));
+  return { inputs: prog.inputs, consts, nodes, outputs: outs, shapes: prog.shapes };
+}
+
 /*******************************************************/
 /* evaluate */
 

@@ -1216,6 +1216,7 @@ const metrics = new MetricsTable({
   sel: () => state.sel,
   lockedSel: () => state.lockedSel,
   setSel,
+  onLayout: () => fitLeftColumn(),
 });
 function setSel(partial: Sel, lock: boolean): void {
   let changed = false;
@@ -1225,10 +1226,23 @@ function setSel(partial: Sel, lock: boolean): void {
     state.sel[k] = id; changed = true;
   }
   if (changed) {
+    if (lock) guardResolution();
     try { updateInfo(); } catch (e) { showError(e); }
     state.dirty = true;
   }
   metrics.refresh();
+}
+
+/**
+ * A CPU-sampled (costly) field entering the selection must not be sampled at the resolution a transpiled field had
+ * climbed to: 2048² × 120 examples on the main thread is minutes, and the controller only judges a frame AFTER it
+ * ran. Restart the ladder from the bottom; it ramps back up as far as the budget allows.
+ */
+function guardResolution(): void {
+  const { scalars, vectors } = selectedUses();
+  if (![...scalars.map((u) => u.data), ...vectors.map((u) => u.data)].some(costly)) return;
+  const a = autoRes();
+  if (a.pin === undefined && (a.state().settled > 0 || a.state().moving > 0)) a.restore({ moving: 0, settled: 0 });
 }
 function matrixRows(): MetricsRow[] {
   const b = state.bundle!;
@@ -1312,6 +1326,7 @@ function loadOpts(): boolean {
     if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: o.ui?.sdir !== undefined && so.dir.stream === -1 ? -1 : 1 };
     if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...so.camera }; view3d.cameraCustom = true; }
     if (so?.res) autoRes().restore(so.res); // the last good resolutions of this space
+    guardResolution(); // ... unless a costly field is selected: those start from the bottom
     syncPlayGlyphs();
   } finally { loadingOpts = false; }
   return !!so;

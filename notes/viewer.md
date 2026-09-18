@@ -88,6 +88,22 @@ to C would paint lines the raster's own colour and hide them), S_∇ = V_∇ = t
 field's `exactGradient` if any, else the field (→ its gradient). Column
 headers toggle their panel; disabled columns stay visible, dimmed.
 
+Field names are paths (`train/loss/setosa`): the table draws the name tree
+flattened with a 9 px indent per level and the last segment as label (full
+path in the tooltip). Subtrees are collapsed until their marker is clicked
+(▸ / ▾; a heading toggles from anywhere in its name, a field that is also a
+parent — `train/loss` — from its marker only, its name selects as usual).
+A locked-selected field is never hidden: under a collapsed ancestor the
+path to it is shown (▹ markers) and its unselected siblings are not, so the
+table stays compact while showing what is on screen. Pure headings
+(`train`) have no matrix cells; wheel / arrow stepping skips them. The
+expansion state lives in the table for the session; `refresh()` redraws
+when a selection moved into or out of a collapsed subtree. Selecting a
+CPU-sampled (`costly`) field restarts the resolution ladder from the bottom
+(`guardResolution`): the remembered settled resolution of a transpiled field
+(up to 2048²) would otherwise be sampled on the main thread first — minutes
+for the 120-example iris nets — before the controller could react.
+
 ## View box and grid
 
 The view box is the union of the boxes of all selected uses (fields in one

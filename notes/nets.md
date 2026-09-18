@@ -331,13 +331,18 @@ its gradient); the training-set nets (N = 120: `h` alone is 1920 floats)
 exceed `NET_MAX_FLOATS`, so the 12 training fields are `costly` and sampled
 by core — correct, but slower (the resolution controller holds small grids;
 streamlines on 32 / 16 grids). An emitter that loops over examples
-accumulating `loss` instead of materializing `[N, 16]` would fix this;
-dead-code elimination of a program to the field's output (`loss` needs none
-of `acc` / `loss0..2` / `obj`) was tried and dropped: pruning `pred` / `acc`
-from the *validation* program changes the emitted gradient code enough to
-expose a latent emitter bug (∇loss off by 10³ at some points while the value
-agrees; keeping `acc` as an output restores agreement) — to be investigated
-before pruning is enabled.
+accumulating `loss` instead of materializing `[N, 16]` would fix this.
+Dead-code elimination to the field's output (`pruneProgram`: `loss` needs
+none of `acc` / `loss0..2` / `obj`) is applied for the CPU evaluator
+(`evalPoints`, memoized per program — the 12³ gradient grid went from 1.9 s
+back to 0.35 s) but NOT for the GPU emitter: pruning `pred` / `acc` from
+the validation program changes the emitted gradient code enough to expose a
+latent emitter bug (∇loss off by 10³ at some points while the value agrees;
+keeping `acc` as an output restores agreement) — to be investigated before
+the emitter gets pruned input. Related and fixed: `componentProgram` named
+its node `__c<i>` without checking, so a component of a gradient of a
+component (second derivatives) defined `__c1` twice; evaluators resolved it
+by last-definition-wins, pruning by name did not.
 
 `packages/core/test/fixtures/iris-reference.json` holds PyTorch's float64
 validation loss / accuracy and training loss / accuracy / objective /

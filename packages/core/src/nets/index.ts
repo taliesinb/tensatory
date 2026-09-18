@@ -9,7 +9,7 @@ export {
 } from "./spec";
 export { inferNet, inferExpr, inferNetField, broadcastShapes, fmtShape, noNetResolver } from "./shapes";
 export type { NetSignature, NetResolver, ArrayEnv, Dim, Shape } from "./shapes";
-export { compileNet, evaluate } from "./program";
+export { compileNet, evaluate, pruneProgram } from "./program";
 export { exprNames } from "./shapes";
 export type { Program, ProgramResolver, EvalContext } from "./program";
 export { NetScalarFieldData, NetVectorFieldData, fieldProgram, pointInput, GRADIENT_VALUE_OUTPUT } from "./fieldData";
