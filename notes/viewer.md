@@ -91,10 +91,10 @@ headers toggle their panel; disabled columns stay visible, dimmed.
 Field names are paths (`train/loss/setosa`): the table draws the name tree
 flattened with a 9 px indent per level and the last segment as label (full
 path in the tooltip). Subtrees are collapsed until their marker is clicked
-(▸ / ▾; a heading toggles from anywhere in its name, a field that is also a
+(`+` / `−`; a heading toggles from anywhere in its name, a field that is also a
 parent — `train/loss` — from its marker only, its name selects as usual).
 A locked-selected field is never hidden: under a collapsed ancestor the
-path to it is shown (▹ markers) and its unselected siblings are not, so the
+path to it is shown (dimmer `+`) and its unselected siblings are not, so the
 table stays compact while showing what is on screen. Pure headings
 (`train`) have no matrix cells; wheel / arrow stepping skips them. The
 expansion state lives in the table for the session; `refresh()` redraws

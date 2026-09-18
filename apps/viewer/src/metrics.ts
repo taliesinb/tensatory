@@ -220,9 +220,10 @@ export class MetricsTable {
       const heading = node.id === undefined;
       if (node.children.length) {
         const open = !forced && this.expanded.has(node.path);
-        // disclosure marker; a collapsed heading whose selected descendants are shown beneath it gets a hollow one
-        const shownBelow = !open && lines[r + 1]?.forced === true && lines[r + 1]!.node.depth > node.depth;
-        el("text", { x: x - g.indent + 1, y: y + g.rowH - 4, fill: shownBelow ? "#7d8aa8" : "#5c6a88", "font-size": 9, "pointer-events": "none" }, open ? "▾" : shownBelow ? "▹" : "▸");
+        // "+" = click to expand, "−" (U+2212, full width) = click to collapse; a collapsed subtree that still shows
+        // its selected descendants beneath is dimmer
+        const dim = !open && lines[r + 1]?.forced === true && lines[r + 1]!.node.depth > node.depth;
+        el("text", { x: x - g.indent + 4, y: y + g.rowH - 4, fill: dim ? "#6a7690" : "#8a96b0", "font-size": 11, "text-anchor": "middle", "pointer-events": "none" }, open ? "\u2212" : "+");
       }
       const maxChars = Math.max(6, Math.floor((g.nameW - x - 2) / 6.4));
       const name = node.label.length > maxChars ? `${node.label.slice(0, maxChars - 1)}…` : node.label;
