@@ -12,8 +12,10 @@ prototypes). The glyph outlines are baked into the SVG, so no font is needed.
   (subscript 0.7×, gap −0.16 em under the T's arm, drop 0.30 em, size 66 in a
   100 box); as the icon shrinks the subscript rises and the formula grows
   (16 px: drop 0.08, size 76, no border), interpolated in log₂ px between
-  anchors. `index.html` lists the 16 / 32 / 48 / 64 PNGs by size so browsers
-  pick the matching bake; the SVG is the `any` fallback.
+  anchors. `index.html` lists the 16 / 32 / 48 / 64 PNGs by size, but tabs
+  do not use them: Safari (macOS) shows the apple-touch-icon (180) scaled
+  down and Chrome shows the SVG — so those two are baked at tab geometry
+  (drop 0.20 / 0.14) and only the 512 / 1024 tiles are fully typeset.
 * `prototypes.cjs` — regenerates `apps/ui-proto/icons.html`, the page the
   variants were chosen from (`rings.svg` is the previous isoline-rings icon,
   used as a backdrop in some variants).

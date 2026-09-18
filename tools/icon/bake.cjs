@@ -26,15 +26,18 @@ ${border ? '<rect x="0.75" y="0.75" width="98.5" height="98.5" rx="21.5" fill="n
 // Optical sizing, like kerning: the smaller the icon, the higher the subscript sits (a smaller bounding box, more
 // ink per pixel) and the more of the tile the formula fills. Interpolated in log2(px) between anchors; at ≥ 180 px
 // the typeset proportions of variant S.
+// NOTE the browsers' choices: Safari (macOS) shows the apple-touch-icon (180) in tabs, scaled to ~20 px; Chrome
+// shows the SVG. So those two are baked at tab-sized geometry too, and only the 512 / 1024 tiles are fully typeset.
 const ANCHORS = [
   // px,  size, gap,   drop, subScale, border
   [16, 76, -0.18, 0.08, 0.74, false],
-  [32, 74, -0.16, 0.16, 0.72, true],
-  [64, 70, -0.16, 0.23, 0.71, true],
-  [180, 66, -0.16, 0.30, 0.70, true],
+  [32, 74, -0.16, 0.14, 0.72, true],
+  [64, 71, -0.16, 0.18, 0.71, true],
+  [192, 69, -0.16, 0.20, 0.71, true],
+  [512, 66, -0.16, 0.30, 0.70, true],
 ];
 function paramsFor(px) {
-  const t = Math.log2(Math.min(180, Math.max(16, px)));
+  const t = Math.log2(Math.min(512, Math.max(16, px)));
   let i = 0; while (i < ANCHORS.length - 2 && t > Math.log2(ANCHORS[i + 1][0])) i++;
   const [a, b] = [ANCHORS[i], ANCHORS[i + 1]];
   const u = (t - Math.log2(a[0])) / (Math.log2(b[0]) - Math.log2(a[0]));
@@ -42,7 +45,7 @@ function paramsFor(px) {
   return { size: mix(1), gap: mix(2), drop: mix(3), subScale: mix(4), border: px >= 24 };
 }
 const out = __dirname + "/../../apps/viewer/public/icons/";
-fs.writeFileSync(out + "icon.svg", svgFor(paramsFor(180)));
+fs.writeFileSync(out + "icon.svg", svgFor(paramsFor(32))); // the SVG is what Chrome shows in the tab
 const { execSync } = require("child_process");
 for (const px of [16, 32, 48, 64, 180, 192, 512, 1024]) {
   const svg = svgFor(paramsFor(px));
