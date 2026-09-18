@@ -306,6 +306,11 @@ export class View3D implements MemoryUser {
   /** the fastest a released orbit may spin (px/s equivalent); slower releases — a click, a drag that came to rest — do nothing */
   static readonly FLING_MIN_PX_S = 120;
   static readonly FLING_WINDOW_MS = 80;
+  /** a release within this angle of horizontal / vertical snaps to a pure yaw / pitch spin (degrees) */
+  static readonly FLING_SNAP_DEG = 30;
+  /** the spin turns at this fraction of the release velocity: a slow fling is hard on a trackpad, and a spin at the
+   *  full flick rate is too fast to look at */
+  static readonly FLING_GAIN = 0.25;
 
   /** a drag begins: any spin stops */
   flingCancel(): void { this.flingVel = undefined; this.flingTrail.length = 0; }
@@ -321,15 +326,23 @@ export class View3D implements MemoryUser {
     if (recent.length < 2) { this.flingVel = undefined; return false; }
     const span = Math.max(1, t - recent[0]!.t);
     const dx = recent.reduce((a, m) => a + m.dx, 0), dy = recent.reduce((a, m) => a + m.dy, 0);
-    const vx = (dx / span) * 1000, vy = (dy / span) * 1000;
-    if (Math.hypot(vx, vy) < View3D.FLING_MIN_PX_S) { this.flingVel = undefined; return false; }
-    this.flingVel = [vx, vy];
+    let vx = (dx / span) * 1000, vy = (dy / span) * 1000;
+    const speed = Math.hypot(vx, vy);
+    if (speed < View3D.FLING_MIN_PX_S) { this.flingVel = undefined; return false; }
+    // axis quantization: a spin nearly about one axis becomes exactly that — a pure yaw (the camera circles the
+    // vertical) or a pure pitch — instead of a slow drift in the other; an oblique release keeps its direction
+    const deg = (Math.atan2(Math.abs(vy), Math.abs(vx)) * 180) / Math.PI;
+    if (deg < View3D.FLING_SNAP_DEG) { vx = Math.sign(vx) * speed; vy = 0; }
+    else if (deg > 90 - View3D.FLING_SNAP_DEG) { vy = Math.sign(vy) * speed; vx = 0; }
+    this.flingVel = [vx * View3D.FLING_GAIN, vy * View3D.FLING_GAIN];
     return true;
   }
-  /** advance the spin by `dt` seconds; returns whether the camera moved */
+  /** advance the spin by `dt` seconds; returns whether the camera moved. A pitch spin stops at the pole. */
   flingTick(dt: number): boolean {
     if (!this.flingVel) return false;
+    const pitch = this.camera.pitch;
     this.orbit(this.flingVel[0] * dt, this.flingVel[1] * dt);
+    if (this.flingVel[1] !== 0 && this.camera.pitch === pitch && Math.abs(pitch) >= 1.5) { if (this.flingVel[0] === 0) { this.flingVel = undefined; return true; } this.flingVel = [this.flingVel[0], 0]; }
     return true;
   }
   get flinging(): boolean { return this.flingVel !== undefined; }

@@ -328,9 +328,11 @@ profiling test.
   fused GPU kernel in `gpu/src/mesh.ts`) into a triangle soup with gradient
   normals (exact for symbolic fields) pointing towards increasing values;
   `GpuRenderer3D` = orbit camera (an orbit drag released while the pointer
-  still moves FLINGS: the camera keeps turning at the mean velocity of the
-  last 80 ms of the drag, if above 120 px/s — a click or a drag that came
-  to rest does not; any pointerdown stops it; `View3D.fling*`), vertex-pulled meshes via drawIndirect,
+  still moves FLINGS: the camera keeps turning at a quarter of the mean
+  velocity of the last 80 ms of the drag, if above 120 px/s — a click or a
+  drag that came to rest does not; a release within 30° of horizontal /
+  vertical snaps to a pure yaw / pitch spin; any pointerdown stops it;
+  `View3D.fling*`), vertex-pulled meshes via drawIndirect,
   two-sided headlight, weighted-blended OIT for translucent levels, depth-
   tested thick lines (box, trajectories, face outlines, streamlines); points /
   labels on the Canvas 2D overlay. Exact vertices via ∇f projection (flag ∇),
