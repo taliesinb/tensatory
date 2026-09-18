@@ -50,6 +50,8 @@ export class Recolour {
    * batch). Returns whether more frames are needed (sets pending or batches in flight).
    */
   step(frameMs: number): boolean {
+    // the list persists between renders: a set regrown or evicted since is gone (its buffer destroyed)
+    this.jobs = this.jobs.filter((j) => !this.gpu.isDestroyed(j.buffer));
     const jobs = this.jobs.filter((j) => !j.progress.done);
     if (!jobs.length) { this.budget = RECOLOUR_BUDGET_MIN * 2; this.dispatchedLastFrame = false; this.trace(`no jobs (registered ${this.jobs.length}, all done)`); return this.outstanding > 0; }
     if (!this.fixed) {

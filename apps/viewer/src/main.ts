@@ -1568,7 +1568,7 @@ ui.lines.addEventListener("change", () => { buildMetrics(); updateInfo(); });
 
 let lastT = performance.now();
 /** the rendered frame awaiting its frame time (the interval to the next rAF includes the GPU stall) */
-let pendingFrame: (Omit<FrameReport, "ms"> & { t0: number; jsMs: number }) | undefined;
+let pendingFrame: (Omit<FrameReport, "ms"> & { t0: number; jsMs: number; gpuMs?: number; awaitingGpu?: boolean }) | undefined;
 let lastFrameKey = "", lastTier: Tier = "settled";
 /** what a frame recomputes when it changes: grid, levels, slots, options (CPU compute has no dispatch counter to watch) */
 const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
@@ -1576,18 +1576,25 @@ const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
 const frameLog: { ms: number; dispatches: number; pipelines: number; recomputed: boolean }[] = [];
-(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour, autores: () => autoRes() };
+(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour, autores: () => autoRes(), state: () => state, yields: () => statusYields };
 
 function frame(now: number): void {
   const frameMs = now - lastT; // the interval of the frame that just ended
   const dt = state.paused ? 0 : Math.min(0.1, frameMs / 1000);
   lastT = now;
-  // frames carrying recolour batches are not the controller's business (their time is the recolouring, not the draw)
-  if (pendingFrame) {
-    const { t0, jsMs, ...r } = pendingFrame; pendingFrame = undefined;
-    if (!recolour?.busy) {
+  // a RENDER-ONLY frame carrying recolour batches is not the controller's business (its time is the recolouring,
+  // not the draw — it once stepped the grid down for "slow draws"); a recomputed frame is always reported: a
+  // multi-second remesh must step the settled tier down whatever else was in flight (its first slow sample only
+  // triggers a remeasure, by which time the batches have drained — a step resets `stable` and stops them)
+  // a settled-tier RECOMPUTE is timed by GPU completion (`onSubmittedWorkDone`), not by the rAF interval: submits
+  // are asynchronous and the browser lets a backlog build for a frame or two before it blocks presenting, so a
+  // 4 s remesh used to be measured as the 10 ms until the next rAF and the stall landed on a later, ignored frame
+  if (pendingFrame?.awaitingGpu && pendingFrame.gpuMs === undefined) { /* still on the GPU: report when it lands */ }
+  else if (pendingFrame) {
+    const { t0, jsMs, gpuMs, awaitingGpu: _a, ...r } = pendingFrame; pendingFrame = undefined;
+    if (!recolour?.busy || r.recomputed) {
       const ar = autoRes(), wasStable = ar.stable;
-      ar.report({ ...r, jsMs, ms: Math.max(now - t0, jsMs) });
+      ar.report({ ...r, jsMs, ms: Math.max(gpuMs ?? now - t0, jsMs) });
       // the ladder just decided to HOLD: the last render was refused registration for recolouring (not stable yet)
       // and, paused, nothing else would render again — so render once more now
       if (ar.stable && !wasStable) state.dirty = true;
@@ -1602,7 +1609,7 @@ function frame(now: number): void {
   if (isoCache?.result.rough && !isoMoving() && !geometry?.busy) state.dirty = true; // settled: replace rough lines with exact ones
   controls.setEnabled(!animating());
   if (tier() !== lastTier) { lastTier = tier(); state.dirty = true; } // the levels settled (or started moving): switch resolution tier
-  if (state.dirty && statusAwaitingPaint()) { requestAnimationFrame(frame); return; } // let "animations paused" paint before the heavy frame it triggers
+  if (state.dirty && statusAwaitingPaint()) { statusYields++; requestAnimationFrame(frame); return; } // let "animations paused" paint before the heavy frame it triggers
   if (state.dirty) {
     Cache.frame++;
     const gpu = sampler.gpu, d0 = gpu?.dispatches ?? 0, p0 = gpu?.pipelinesBuilt ?? 0, t0 = performance.now(), usedTier = tier(), key = frameKey();
@@ -1610,8 +1617,13 @@ function frame(now: number): void {
     const a = autoRes();
     const overCap = governMemory(a.capBytes);
     const bytes = memoryNow();
-    pendingFrame = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: (gpu?.pipelinesBuilt ?? 0) !== p0, bytes, overCap, ctx: resCtx() };
-    frameLog.push({ ms: performance.now() - t0, dispatches: (gpu?.dispatches ?? 0) - d0, pipelines: (gpu?.pipelinesBuilt ?? 0) - p0, recomputed: pendingFrame.recomputed }); if (frameLog.length > 60) frameLog.shift();
+    if (pendingFrame?.awaitingGpu && pendingFrame.gpuMs === undefined) { /* a settled recompute is still being timed: this frame is not a sample */ }
+    else {
+      const pf: NonNullable<typeof pendingFrame> = { t0, jsMs: performance.now() - t0, tier: usedTier, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0, compiled: (gpu?.pipelinesBuilt ?? 0) !== p0, bytes, overCap, ctx: resCtx() };
+      if (gpu && usedTier === "settled" && pf.recomputed) { pf.awaitingGpu = true; void gpu.device.queue.onSubmittedWorkDone().then(() => { pf.gpuMs = performance.now() - t0; }); }
+      pendingFrame = pf;
+    }
+    frameLog.push({ ms: performance.now() - t0, dispatches: (gpu?.dispatches ?? 0) - d0, pipelines: (gpu?.pipelinesBuilt ?? 0) - p0, recomputed: key !== lastFrameKey || (gpu?.dispatches ?? 0) !== d0 }); if (frameLog.length > 60) frameLog.shift();
     lastFrameKey = key;
     $("memv").textContent = `${fmtMB(bytes.total)}/${fmtMB(a.capBytes)}${a.pin !== undefined ? ` · pinned ${a.pin}` : a.note ? ` · ${a.note}` : ""}`;
   }
@@ -1623,7 +1635,7 @@ function frame(now: number): void {
   if (recolour?.pending) { const more = recolour.step(frameMs); if (more && ++recolourTick % RECOLOUR_REFRESH === 0) state.dirty = true; if (!more) state.dirty = true; }
   requestAnimationFrame(frame);
 }
-let gearOn = false, recolourTick = 0;
+let gearOn = false, recolourTick = 0, statusYields = 0;
 const RECOLOUR_REFRESH = 4;
 
 /*******************************************************/

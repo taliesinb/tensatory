@@ -119,11 +119,10 @@ export class FusedGeometry implements MemoryUser {
       const scaled = prev ? prev.records * (n / prev.n) * 0.5 ** ((now - prev.t) / 60_000) : 0; // isolines: segments ∝ n
       this.complexity.set(family, { records: Math.max(count, scaled), n, t: now });
       if (cs.stamp !== stamp) return;
-      const changed = cs.count !== count;
       cs.count = count;
       if (count > cs.segs.capacity) { cs.overflow = true; cs.stamp = ""; }
-      if (changed) this.invalidate(); // the resolution row shows the count; an overflow reallocates
-    }).catch(() => { cs.pending = false; });
+      this.invalidate(); // the resolution row shows the count, an overflow reallocates, a recolour refused while pending gets its chance
+    }).catch(() => { cs.pending = false; this.invalidate(); });
   }
 
   /** the segment set for `setKey`, sized from the family's measured complexity (a modest guess before any) */

@@ -250,11 +250,12 @@ export class View3D implements MemoryUser {
       const scaled = prev ? prev.records * (n / prev.n) ** 2 * 0.5 ** ((now - prev.t) / 60_000) : 0; // surfaces: records ∝ n²
       this.complexity.set(family, { records: Math.max(count, scaled), n, t: now });
       if (cs.stamp !== stamp) return; // moved on: the count still informed the family
-      const changed = cs.count !== count;
       cs.count = count;
       if (count > cs.set.capacity) { cs.overflow = true; cs.stamp = ""; }
-      if (changed) this.c.invalidate(); // the resolution row shows the count; an overflow reallocates
-    }).catch(() => { cs.pending = false; });
+      // the resolution row shows the count, an overflow reallocates — and a render refused registration for
+      // recolouring while the count was pending must get another chance (paused, nothing else re-renders)
+      this.c.invalidate();
+    }).catch(() => { cs.pending = false; this.c.invalidate(); });
   }
   /** capacity for a new set of `family` at resolution `n`: the measured complexity with a margin, else `fallback` */
   private capacityFor(family: string, n: number, fallback: number, exponent: number, max: number, recordBytes: number): number {

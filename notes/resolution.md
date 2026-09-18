@@ -150,3 +150,27 @@ The grid streamlines are measured in (step = ½ cell, `length` in steps,
 (`View3D.STREAM_N`); 32 / 16 for `costly` fields (net-backed, CPU-evaluated;
 see [nets.md](nets.md)) — or the vector field's own grid: tying it to the
 adaptive resolution would change the lines' lengths with the tier.
+
+## Measuring a settled recompute (GPU completion)
+
+Frame times come from rAF intervals, which works for the moving tier (a
+sustained rate) but not for the settled tier's single recompute sample:
+WebGPU submits are asynchronous and the browser lets a backlog build for a
+frame or two before it blocks presenting, so a 5 s remesh was measured as the
+10 ms until the next rAF and the stall landed on a later, render-only frame
+the controller ignores — 256³ nets were "accepted" and every pause froze for
+seconds. A settled-tier recompute is now timed by `onSubmittedWorkDone`
+(`pendingFrame.awaitingGpu` in main.ts; frames rendered meanwhile are not
+samples). Consequences: the first sample at a rung is often the net's
+one-time CACHE FILL of that values grid (0.6 / 2.2 / 5.9 s at 128 / 192 /
+256³ for iris), which is exactly what the remeasure-first policy is for — the
+remeasure hits the cache and measures the remesh alone (~40–70 ms at 256³ in
+Chrome); a confirmed failure descends to the rung the sample PREDICTS meets
+the budget (cost ∝ n^dims) instead of one rung per multi-second recompute.
+Render-only frames carrying progressive-recolour batches are not reported
+(`Recolour.busy`: they once read as slow draws); recomputed frames always are.
+The settled tier is `stable` (holding) at the top of the ladder or below a
+failed step even without a recomputed sample — a paused frame at the moving
+tier's grid never recomputes — and a hold decision re-renders once (the
+render before it may have been refused for recolouring).
+

@@ -175,9 +175,18 @@ export class AutoRes {
       if ((r.compiled || this.afterCompile) && !cpuSlow) { this.afterCompile = r.compiled; this.onRemeasure?.(); return; }
       this.afterCompile = false;
       if (r.ms > SETTLED_BUDGET_MS * 1.5) {
-        // (a remeasure would hit the caches, so CPU-slow samples are believed at once)
+        // (a remeasure would hit the caches, so CPU-slow samples are believed at once. GPU-slow ones are remeasured
+        // even when grossly slow: a net's first sampling of a 256³ values grid is 5 s of CACHE FILL, the remesh
+        // alone fits the budget — and the remeasure hits that cache, so it costs the remesh, not another 5 s)
         if (!this.slowSeen && !cpuSlow) { this.slowSeen = true; this.note = `set@${this.steps[idx]} ${r.ms.toFixed(0)}ms, remeasuring`; this.onRemeasure?.(); return; }
-        if (idx > 0) { this.fail(r.ctx, "settled", idx); this.set("settled", idx - 1, `${r.ms.toFixed(0)}ms`); }
+        if (idx > 0) {
+          // land where the sample predicts the budget is met (cost ∝ cells ∝ n^dims): a 5 s recompute at 256³ goes
+          // straight to 96³ instead of paying 256 → 192 → 128 → 96, each rung a multi-second recompute
+          let to = idx - 1;
+          while (to > 0 && r.ms * (this.steps[to]! / this.steps[idx]!) ** this.dims > SETTLED_BUDGET_MS) to--;
+          this.fail(r.ctx, "settled", idx);
+          this.set("settled", to, `${r.ms.toFixed(0)}ms`);
+        }
         return;
       }
       this.slowSeen = false;

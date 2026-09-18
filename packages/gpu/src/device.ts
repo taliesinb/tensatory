@@ -112,9 +112,13 @@ export class GpuBackend {
     const destroy = buf.destroy.bind(buf);
     let live = true;
     // a deferred dispatch (pipeline still compiling) may still target this buffer: destroy after the compiles land
-    buf.destroy = () => { if (live) { live = false; this.bytesAllocated -= desc.size; } if (this.building.size || this.queue.length) void this.whenIdle().then(destroy); else destroy(); };
+    buf.destroy = () => { if (live) { live = false; this.bytesAllocated -= desc.size; this.destroyed.add(buf); } if (this.building.size || this.queue.length) void this.whenIdle().then(destroy); else destroy(); };
     return buf;
   }
+  private readonly destroyed = new WeakSet<GPUBuffer>();
+  /** whether `destroy()` was called on a buffer from `createBuffer` (WebGPU itself cannot be asked; a destroyed
+   *  buffer in a submit is a validation error) — for work scheduled across frames against buffers that may be gone */
+  isDestroyed(buf: GPUBuffer): boolean { return this.destroyed.has(buf); }
 
   /** destroy a buffer not created through `createBuffer`, after any pending compile's deferred dispatches */
   release(buf: GPUBuffer): void { if (this.building.size || this.queue.length) void this.whenIdle().then(() => buf.destroy()); else buf.destroy(); }
