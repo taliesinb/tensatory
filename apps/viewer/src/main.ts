@@ -1548,11 +1548,11 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
 
 {
   let drag: { x: number; y: number; pan: boolean } | null = null;
-  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.shiftKey || e.button === 2 }; canvas.setPointerCapture(e.pointerId); view3d?.flingCancel(); state.dirty = true; });
   canvas.addEventListener("pointermove", (e) => {
     if (drag && spaceDims() === 3) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag = { ...drag, x: e.clientX, y: e.clientY };
-      if (view3d) { if (drag.pan) view3d.pan(dx, dy); else view3d.orbit(dx, dy); state.dirty = true; }
+      if (view3d) { if (drag.pan) view3d.pan(dx, dy); else { view3d.orbit(dx, dy); view3d.flingTrack(dx, dy, e.timeStamp); } state.dirty = true; }
       return;
     }
     if (drag) { renderer.pan(e.clientX - drag.x, e.clientY - drag.y); drag = { ...drag, x: e.clientX, y: e.clientY }; viewCustom = true; viewLastChange = performance.now(); state.dirty = true; return; }
@@ -1561,7 +1561,12 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
     const [x, y] = renderer.toWorld(e.clientX - r.left, e.clientY - r.top);
     showCursor(x, y);
   });
-  canvas.addEventListener("pointerup", () => { drag = null; saveOptsSoon(); });
+  canvas.addEventListener("pointerup", (e) => {
+    // an orbit released while the pointer is still moving keeps spinning (a click or a drag that came to rest does not)
+    if (drag && !drag.pan && spaceDims() === 3 && view3d?.flingRelease(e.timeStamp)) state.dirty = true;
+    drag = null; saveOptsSoon();
+  });
+  canvas.addEventListener("pointercancel", () => { drag = null; });
   canvas.addEventListener("pointerleave", hideCursor);
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("wheel", (e) => {
@@ -1639,7 +1644,7 @@ const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */
 const frameLog: { ms: number; dispatches: number; pipelines: number; recomputed: boolean }[] = [];
-(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour, autores: () => autoRes(), state: () => state, yields: () => statusYields };
+(window as unknown as { __tensatory: unknown }).__tensatory = { frames: frameLog, gpu: () => sampler.gpu, recolour: () => recolour, autores: () => autoRes(), state: () => state, yields: () => statusYields, view3d: () => view3d };
 
 function frame(now: number): void {
   const frameMs = now - lastT; // the interval of the frame that just ended
@@ -1664,6 +1669,7 @@ function frame(now: number): void {
     }
   }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
+  if (spaceDims() === 3 && view3d?.flingTick(Math.min(0.1, frameMs / 1000))) state.dirty = true; // a flung orbit keeps turning (space does not pause it: it is not an animation of the data)
   if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
     ui.isoValue.value = String((((+ui.isoValue.value! + (state.dir.iso * dt) / cycle) % 1) + 1) % 1);

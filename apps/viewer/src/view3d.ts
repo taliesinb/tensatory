@@ -296,6 +296,43 @@ export class View3D implements MemoryUser {
     this.camera.pitch = Math.max(-1.5, Math.min(1.5, this.camera.pitch + dy * 0.008));
     this.cameraCustom = true;
   }
+
+  /*******************************************************/
+  /* fling: an orbit drag released while the pointer is still moving keeps rotating at that rate */
+
+  /** pointer velocity of the drag, css px/s, from the last FLING_WINDOW_MS of motion; undefined = no fling */
+  private flingVel: [number, number] | undefined;
+  private readonly flingTrail: { t: number; dx: number; dy: number }[] = [];
+  /** the fastest a released orbit may spin (px/s equivalent); slower releases — a click, a drag that came to rest — do nothing */
+  static readonly FLING_MIN_PX_S = 120;
+  static readonly FLING_WINDOW_MS = 80;
+
+  /** a drag begins: any spin stops */
+  flingCancel(): void { this.flingVel = undefined; this.flingTrail.length = 0; }
+  /** an orbit drag moved by (dx, dy) at time `t` (ms) */
+  flingTrack(dx: number, dy: number, t: number): void {
+    this.flingTrail.push({ t, dx, dy });
+    while (this.flingTrail.length && this.flingTrail[0]!.t < t - View3D.FLING_WINDOW_MS * 2) this.flingTrail.shift();
+  }
+  /** the drag ended at time `t`: average the motion of the last FLING_WINDOW_MS; below the minimum speed, nothing */
+  flingRelease(t: number): boolean {
+    const recent = this.flingTrail.filter((m) => m.t >= t - View3D.FLING_WINDOW_MS);
+    this.flingTrail.length = 0;
+    if (recent.length < 2) { this.flingVel = undefined; return false; }
+    const span = Math.max(1, t - recent[0]!.t);
+    const dx = recent.reduce((a, m) => a + m.dx, 0), dy = recent.reduce((a, m) => a + m.dy, 0);
+    const vx = (dx / span) * 1000, vy = (dy / span) * 1000;
+    if (Math.hypot(vx, vy) < View3D.FLING_MIN_PX_S) { this.flingVel = undefined; return false; }
+    this.flingVel = [vx, vy];
+    return true;
+  }
+  /** advance the spin by `dt` seconds; returns whether the camera moved */
+  flingTick(dt: number): boolean {
+    if (!this.flingVel) return false;
+    this.orbit(this.flingVel[0] * dt, this.flingVel[1] * dt);
+    return true;
+  }
+  get flinging(): boolean { return this.flingVel !== undefined; }
   /** pan the target in the view plane */
   pan(dx: number, dy: number): void {
     const s = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.regionHeight();
