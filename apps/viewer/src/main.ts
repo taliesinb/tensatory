@@ -1235,7 +1235,14 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
 interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
-interface Opts { ui?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
+interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts> }
+/**
+ * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
+ * their own 3D defaults (a volume wants more, fainter lines with several particles each; the HTML `data-value`s
+ * are the 2D defaults).
+ */
+const PER_DIM_VALUES = ["sAlpha", "lines", "ssplit", "tail", "slen"] as const;
+const DEFAULTS_3D: Record<(typeof PER_DIM_VALUES)[number], string | null> = { sAlpha: "0.5", lines: "2000", ssplit: "4", tail: "5", slen: "100" };
 function readOpts(): Opts {
   const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return {};
   try { const o = JSON.parse(raw) as Opts & { sel?: unknown }; return "sel" in o ? {} : o; } catch { return {}; } // "sel" at the root: pre-space format, ignored
@@ -1244,7 +1251,8 @@ function saveOpts(): void {
   const key = optsKey(); if (!key || loadingOpts) return;
   const prev = readOpts();
   const o: Opts = {
-    ui: Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.map((id) => [id, ui[id].value])]),
+    ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
+    ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
     maps: state.maps, intervals: state.intervals, space: state.space,
     spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
@@ -1258,9 +1266,15 @@ function loadOpts(): boolean {
   const so = o.spaces?.[state.space];
   loadingOpts = true;
   try {
+    const dim3 = spaceDims() === 3;
     for (const [id, v] of Object.entries(o.ui ?? {})) {
       if ((CHECKS as readonly string[]).includes(id)) ui[id as CheckId].checked = Boolean(v);
-      else if ((VALUES as readonly string[]).includes(id)) ui[id as ValueId].value = v as string | null;
+      else if ((VALUES as readonly string[]).includes(id) && !(dim3 && (PER_DIM_VALUES as readonly string[]).includes(id))) ui[id as ValueId].value = v as string | null;
+    }
+    // the per-dimension controls: this arm's saved values, else its defaults (3D: DEFAULTS_3D; 2D: the HTML data-value)
+    for (const id of PER_DIM_VALUES) {
+      const saved = dim3 ? o.ui3 : o.ui;
+      ui[id].value = (saved && id in saved ? saved[id] : dim3 ? DEFAULTS_3D[id] : ($(id).dataset.value ?? null)) as string | null;
     }
     syncTicks(); syncIsoRate(); readCrop();
     if (o.maps) state.maps = { ...o.maps };

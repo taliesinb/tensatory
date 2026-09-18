@@ -195,7 +195,10 @@ profiling test.
   Prototypes of new widgets go in `apps/ui-proto` (static single-file pages,
   never imported by production code). Per-bundle options in localStorage
   (`tensatory.opts.<file>`), only user-panned/zoomed views are persisted;
-  any control id / slot key can be overridden from the URL.
+  any control id / slot key can be overridden from the URL. The streamline
+  controls opacity / lines / split / tail / length are saved per arm (`ui`
+  2D, `ui3` 3D) with their own 3D defaults (`DEFAULTS_3D`: 0.5 / 2k / 4 /
+  5 / 100).
 * Vector field glyphs (`notes/glyphs.md`; `core/src/flow/glyphs.ts`,
   `gpu/src/glyphs.ts`): the V_∇ field as static arrows on the densest
   lattice — hexagonal in 2D, face-centred cubic in 3D — represented as
