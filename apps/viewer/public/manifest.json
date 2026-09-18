@@ -1,7 +1,7 @@
 {
   "name": "Tensatory",
   "short_name": "Tensatory",
-  "description": "Scalar / vector field viewer for Tensatory data bundles",
+  "description": "Scalar / vector field viewer for Tensatory data bundles (icon: T_{μν})",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
