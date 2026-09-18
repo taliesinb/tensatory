@@ -178,3 +178,22 @@ The top-right flash (`#resFlash`) shows ↑ / ↓ for a ladder step and a
 stopwatch for a remeasure, as inline SVG strokes matching the compile gear — text glyphs came
 out of different fallback fonts per browser (Safari drew `⟳` small and thin).
 
+## Cache fills bound both tiers
+
+A rung's FIRST recompute fills caches — a net's values grid on the GPU, or
+for a costly (CPU-evaluated) field the whole grid sampled on the main thread
+(train-set iris: ~0.1 ms per point, 0.4 s at 16³, 25 s at 64³) — and the
+fill scales with the cells. `AutoRes.fill` remembers the last slow recompute
+(time, rung, context; a cheaper later sample at the same rung is a cache hit
+and does not replace it) and `predictFill(to)` scales it; NEITHER tier steps
+to a rung whose predicted fill exceeds `FILL_BUDGET_MS` (400 ms; the note
+reads `mov@16 →24 fill ~1.4s`). Before this the moving tier's frame-time
+window saw only the cached frames after each fill and probed a costly 3D
+field 16 → 24 → … → 64, one multi-second freeze per rung, until a 25 s one
+read as a permafreeze. A recompute that spent more than the fill budget in
+JS also fails its rung at once and descends to the rung the sample predicts
+fits (`cpu 3100ms`): CPU work is deterministic, never a hiccup. The honest
+consequence is that a CPU-sampled net field holds at 16³ in 3D; the fix for
+THAT is evaluating those nets on the GPU (stream the example axis instead
+of holding it in function-scope arrays) or sampling off the main thread.
+

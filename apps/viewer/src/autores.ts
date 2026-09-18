@@ -46,6 +46,8 @@ export interface AutoResState { moving: number; settled: number; measured?: bool
 const FRAME_BUDGET_MS = 33.4, FRAME_TARGET_MS = 26;
 /** one recomputation while idle may take this long */
 const SETTLED_BUDGET_MS = 200;
+/** the longest one-time cache fill (a rung's first recompute) either tier may knowingly step into */
+const FILL_BUDGET_MS = 400;
 /** a frame time at or under this is vsync-bound (60 Hz): no information about headroom */
 const VSYNC_MS = 17.5;
 /** frame-time window (median) for down decisions and probe validation */
@@ -94,6 +96,15 @@ export class AutoRes {
   private movingMeasured = false;
   /** a settled hold was confirmed by a second, clean sample (the first after a context change may carry setup work) */
   private confirmed = false;
+  /**
+   * The last slow RECOMPUTE seen in this context: its time and rung. A recompute at a rung the caches do not hold
+   * fills them — a net's values grid on the GPU, or for a costly (CPU-evaluated) field the whole grid sampled on
+   * the main thread (0.1 ms per point × 120 examples: 0.4 s at 16³, 25 s at 64³) — and the fill scales with the
+   * cells, so it predicts the fill at any other rung. NEITHER tier may step to a rung whose predicted fill exceeds
+   * FILL_BUDGET_MS: the frame-time window of the moving tier sees only the cached frames after a fill, and probed
+   * its way to 64³ one 25 s freeze at a time.
+   */
+  private fill: { ms: number; n: number; ctx: string } | undefined;
   /** the previous settled sample compiled: the driver may finish the compile in the NEXT frame, so that one is discarded too */
   private afterCompile = false;
   /** a slow settled sample is confirmed by a second one before it fails a step (main-thread stalls — a bundle
@@ -155,6 +166,8 @@ export class AutoRes {
     return r.bytes.volume * ratio ** this.dims + r.bytes.surface * ratio ** (this.dims - 1);
   }
   private memoryAllows(r: FrameReport, from: number, to: number): boolean { return this.predictBytes(r, from, to) <= this.capBytes * MEM_HEADROOM; }
+  private predictFill(to: number): number { return this.fill ? this.fill.ms * (this.steps[to]! / this.fill.n) ** this.dims : 0; }
+  private fillAllows(to: number): boolean { return this.predictFill(to) <= FILL_BUDGET_MS; }
 
   /** feed one rendered frame; may change a tier (see `onChange`) */
   report(r: FrameReport): void {
@@ -163,6 +176,14 @@ export class AutoRes {
     const idx = r.tier === "moving" ? this.moving : this.settled;
     const top = this.steps.length - 1;
     if (r.overCap) { this.fail(r.ctx, r.tier, idx); this.set(r.tier, idx - 1, "mem cap"); return; }
+    if (r.recomputed && r.ms > FRAME_BUDGET_MS && (!this.fill || this.fill.ctx !== r.ctx || r.ms / this.steps[idx]! ** this.dims >= this.fill.ms / this.fill.n ** this.dims * 0.5)) this.fill = { ms: r.ms, n: this.steps[idx]!, ctx: r.ctx }; // (a cheaper later sample at the same rung was a cache hit, not a cheaper fill)
+    // CPU work is deterministic, not a hiccup: a recompute that spent more than the fill budget on the main thread
+    // (a costly field sampled at this rung) fails the rung at once, whatever tier asked for it
+    if (r.recomputed && (r.jsMs ?? 0) > FILL_BUDGET_MS && idx > 0) {
+      let to = idx - 1;
+      while (to > 0 && r.jsMs! * (this.steps[to]! / this.steps[idx]!) ** this.dims > FILL_BUDGET_MS) to--;
+      this.fail(r.ctx, r.tier, idx); this.set(r.tier, to, `cpu ${r.jsMs!.toFixed(0)}ms`); return;
+    }
     // the settled tier cannot climb from here (top of the ladder, or the next step failed): holding, whatever this
     // frame did — a paused frame at the moving tier's grid never recomputes, so no sample would ever say so
     if (r.tier === "settled" && (idx >= top || this.isFailed(r.ctx, "settled", idx + 1))) this.stable = true;
@@ -190,7 +211,7 @@ export class AutoRes {
         return;
       }
       this.slowSeen = false;
-      if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1) && this.memoryAllows(r, idx, idx + 1)) {
+      if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1) && this.memoryAllows(r, idx, idx + 1) && this.fillAllows(idx + 1)) {
         const predicted = Math.max(r.ms, VSYNC_MS) * (this.steps[idx + 1]! / this.steps[idx]!) ** this.dims;
         if (predicted <= SETTLED_BUDGET_MS) { this.set("settled", idx + 1, `~${predicted.toFixed(0)}ms`); }
         else {
@@ -199,8 +220,8 @@ export class AutoRes {
           if (!this.confirmed) { this.confirmed = true; this.onRemeasure?.(); } else this.stable = true;
         }
       } else {
-        if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1)) this.note = `set@${this.steps[idx]} →${this.steps[idx + 1]} ~${(this.predictBytes(r, idx, idx + 1) / 2 ** 20).toFixed(0)}MB`;
-        this.stable = true; // the top, a failed next step, or the memory cap: holding
+        if (idx < top && !this.isFailed(r.ctx, "settled", idx + 1)) this.note = !this.fillAllows(idx + 1) ? `set@${this.steps[idx]} →${this.steps[idx + 1]} fill ~${(this.predictFill(idx + 1) / 1000).toFixed(1)}s` : `set@${this.steps[idx]} →${this.steps[idx + 1]} ~${(this.predictBytes(r, idx, idx + 1) / 2 ** 20).toFixed(0)}MB`;
+        this.stable = true; // the top, a failed next step, the memory cap or a prohibitive fill: holding
       }
       return;
     }
@@ -228,6 +249,7 @@ export class AutoRes {
     }
    
     if (idx >= top || this.isFailed(r.ctx, "moving", idx + 1) || !this.memoryAllows(r, idx, idx + 1)) return;
+    if (!this.fillAllows(idx + 1)) { this.note = `mov@${this.steps[idx]} →${this.steps[idx + 1]} fill ~${(this.predictFill(idx + 1) / 1000).toFixed(1)}s`; return; }
     // a frame budget met at n means one recomputation at the next step is fine too: while the animation runs the
     // settled tier gets no samples of its own, so a moving step up carries it along
     const up = (why: string) => { if (this.settled <= idx) this.settled = idx + 1; this.set("moving", idx + 1, why); };
