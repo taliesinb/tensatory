@@ -171,8 +171,8 @@ export interface FusedIsosurfaceOptions {
   field?: ScalarFieldData;
   /** project vertices onto the level set along the exact gradient (default: field is symbolic) */
   exact?: boolean;
-  /** colour field evaluated at every vertex */
-  colour?: ScalarFieldData;
+  /** colour field evaluated at every vertex — or "level": the colour IS the level (colour field = value field) */
+  colour?: ScalarFieldData | "level";
 }
 
 export interface FusedIsosurface {
@@ -208,7 +208,7 @@ export function fusedIsosurface(backend: GpuBackend, values: GpuGrid, opts: Fuse
   if (exact && !symbolic) throw new Error("fusedIsosurface: exact projection needs a symbolic field");
   const fn = symbolic && exact ? b.scalar(symbolic) : "", grad = symbolic ? b.gradient(symbolic) : "", vg = symbolic && exact ? b.valueGradient(symbolic) : ""; // normals need the gradient even without projection
   const colour = opts.colour;
-  const col = colour ? b.scalar(colour) : undefined;
+  const col = colour && colour !== "level" ? b.scalar(colour) : undefined;
   const maxDist = Math.hypot(hx, hy, hz);
   const lib = b.library();
   const cells = (nx - 1) * (ny - 1) * (nz - 1);
@@ -242,7 +242,7 @@ fn gridGrad_(i: i32, j: i32, k: i32) -> vec3<f32> {
     select((val_(i, j, k1) - val_(i, j, k0)) / (f32(k1 - k0) * H.z), 0.0, k1 == k0));
 }
 ${exact ? projection3Wgsl(fn, vg, symbolic!.box) : ""}
-fn colour_(p: vec3<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+fn colour_(p: vec3<f32>) -> f32 { return ${colour === "level" ? "params[0]" : col ? `${col}(p, -1)` : "0.0"}; }
 fn vertex_(c: vec3<i32>, v: array<f32, 8>, e: i32, level: f32) -> Vert {
   let A = vec3<f32>(params[8], params[9], params[10]);
   let H = vec3<f32>(params[11], params[12], params[13]);

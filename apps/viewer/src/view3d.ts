@@ -334,7 +334,9 @@ export class View3D implements MemoryUser {
     const exact = this.isExact(iv);
     const family = `${iv.id}|${this.c.blur() ?? ""}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`;
     const kk = `${gk}#${uidOf(values)}|${ic?.id ?? ""}|${exact ? "exact" : "lin"}`; // the kernel reads THIS grid's buffer
-    const kernel = this.kernels.getOr(kk, () => fusedIsosurface(this.c.gpu, values, { field: exact ? iv.data : undefined, exact, colour: ic?.data }));
+    // colouring the surfaces by their own field: the colour IS the level (else a colour-field evaluation per vertex —
+    // for a net-backed field, millions of net evaluations per level)
+    const kernel = this.kernels.getOr(kk, () => fusedIsosurface(this.c.gpu, values, { field: exact ? iv.data : undefined, exact, colour: ic?.id === iv.id ? "level" : ic?.data }));
     const n = Math.max(...grid.size);
     // triangle budget from the measured complexity of this field (surfaces touch O(n²) of the n³ cells); before
     // any measurement a modest guess — an overflow is detected by the count readback and the set regrown
@@ -374,7 +376,7 @@ export class View3D implements MemoryUser {
         let m = marchingTetrahedra(grid, vals, level, {
           gradient: grad ? (p) => grad.value(p) ?? undefined : undefined,
           project: exact ? (p) => projectToLevel(iv.data, p, level, maxDist) : undefined,
-          colourAt: ic ? (p) => ic.data.value(p) ?? NaN : undefined,
+          colourAt: ic ? ic.id === iv.id ? () => level : (p) => ic.data.value(p) ?? NaN : undefined,
         });
         if (smooth > 0) m = smoothIsoMesh(m, smooth);
         return uploadMesh(this.c.gpu, packMesh(m));

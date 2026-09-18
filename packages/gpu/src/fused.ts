@@ -51,7 +51,7 @@ export interface FusedIsolines {
  * fields are projected exactly, sampled fields keep the marching-squares
  * segments.
  */
-export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData, opts: FusedIsolineOptions = {}): FusedIsolines {
+export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | undefined, values: GpuGrid, colour?: ScalarFieldData | "level", opts: FusedIsolineOptions = {}): FusedIsolines {
   const grid = values.grid;
   const slice = opts.slice;
   const exact = opts.exact ?? (slice ? slice.field.kind === "symbolic" : field?.kind === "symbolic");
@@ -68,7 +68,7 @@ export function fusedIsolines(backend: GpuBackend, field: ScalarFieldData | unde
     extra.push(`fn sl_f(q: vec2<f32>, pos: i32) -> f32 { return ${f3}(${lift("q")}, -1); }`);
     extra.push(`fn sl_vg(q: vec2<f32>, pos: i32) -> vec3<f32> { let v = ${vg3}(${lift("q")}, -1); return vec3<f32>(v.x, v[${keep[0] + 1}], v[${keep[1] + 1}]); }`);
   } else if (exact) { fn = b.scalar(field!); vg = b.valueGradient(field!); }
-  const col = colour ? b.scalar(colour) : undefined;
+  const col = colour && colour !== "level" ? b.scalar(colour) : undefined; // "level": the colour is the level itself, no field evaluated
   const lib = b.library();
   lib.code += `\n${extra.join("\n")}`;
   const cells = (grid.size[0]! - 1) * (grid.size[1]! - 1);
@@ -91,7 +91,7 @@ fn appendSeg(s: Seg) {
 ${ISO_GRID.code}
 ${marchingSquaresWgsl(ISO_GRID.ref)}
 ${exact ? projectionWgsl(fn, vg, slice ? sliceBox(slice) : field!.box) : ""}
-fn colour_(p: vec2<f32>) -> f32 { return ${col ? `${col}(p, -1)` : "0.0"}; }
+fn colour_(p: vec2<f32>) -> f32 { return ${colour === "level" ? "params[0]" : col ? `${col}(p, -1)` : "0.0"}; }
 fn chordDist_(a: vec2<f32>, b: vec2<f32>, m: vec2<f32>) -> f32 {
   let d = b - a; let l2 = dot(d, d);
   if (l2 == 0.0) { return distance(m, a); }

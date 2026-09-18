@@ -135,7 +135,7 @@ export class FusedGeometry implements MemoryUser {
   }
 
   /** marching-squares isolines of a resident grid with Taubin smoothing on the edge graph (non-exact path with `line` > 0) */
-  smoothedIsolines(kernelKey: string, setKey: string, values: GpuGrid, colour: ScalarFieldData | undefined, level: number, iterations: number): GpuSegments {
+  smoothedIsolines(kernelKey: string, setKey: string, values: GpuGrid, colour: ScalarFieldData | "level" | undefined, level: number, iterations: number): GpuSegments {
     const kernel = this.smoothKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => smoothedIsolines(this.gpu, values, colour)); // the kernel reads THIS grid's buffer
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|smooth`;
     const cs = this.isoSet(setKey, family, values, kernel.capacity);
@@ -149,7 +149,7 @@ export class FusedGeometry implements MemoryUser {
    * Segments of the isoline of `field` at `level`. `kernelKey` identifies (field, grid, colour field);
    * `setKey` identifies the slot (kernel + level index) whose segment set is reused across level changes.
    */
-  isolines(kernelKey: string, setKey: string, field: ScalarFieldData, values: GpuGrid, colour: ScalarFieldData | undefined, level: number, tol: number, exact?: boolean): GpuSegments {
+  isolines(kernelKey: string, setKey: string, field: ScalarFieldData, values: GpuGrid, colour: ScalarFieldData | "level" | undefined, level: number, tol: number, exact?: boolean): GpuSegments {
     const kernel = this.isoKernels.getOr(`${kernelKey}#${uidOf(values)}`, () => fusedIsolines(this.gpu, field, values, colour, { exact }));
     const family = `${kernelKey.replace(/\|\d+x\d+\|[^|]*/, "")}|${exact ? "exact" : "ms"}`; // the kernel key without its grid part
     const cs = this.isoSet(setKey, family, values, kernel.capacity);

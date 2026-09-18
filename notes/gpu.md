@@ -280,6 +280,14 @@ Open: a space switch restores that space's remembered resolution directly
 (256³ for iris: a 16.7 M-evaluation raster, 4 s) instead of ramping when the
 caches are cold — a resolution-controller issue, not a compile one.
 
+**Colour by the iso field itself is the level.** The fused isoline /
+isosurface / smoothed-isoline kernels evaluated the colour field at every
+vertex; with I_C = I_V on a net-backed field that was a net evaluation per
+vertex (~10 M for 3.45 M triangles, per level — a Safari perma-freeze, plus a
+second net-bearing compile). Passing `colour: "level"` (the viewer does when
+`ic.id === iv.id`, on the CPU paths too) makes `colour_` return the level.
+Colouring by a *different* costly field still evaluates it per vertex.
+
 **Exact projection of nets is latency-bound.** Measured on the iris loss at
 192² (Chrome, M-series): marching squares 1 ms per level, exact 47 ms — for
 351 segments. Not arithmetic: even with a single evaluation per projection

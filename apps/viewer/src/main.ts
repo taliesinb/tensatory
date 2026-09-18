@@ -464,6 +464,7 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
   const values = metric === null ? raw : boxBlur(grid, raw, metric);
   const [lo, hi] = rangeOf(f);
   const lines: Polyline[] = [];
+  const lineLevels: number[] = []; // the level of each line (its colour when I_C = I_V)
   let method = "linear", vertices = 0, maxRes = 0;
   const levels = isoLevelParams().map((t) => f.codomain.fromParam(t, lo, hi));
   // exact lines on the GPU: request every level; while any is still computing, show rough lines this frame
@@ -494,10 +495,15 @@ function isolines(grid: DenseGrid): IsoResult | undefined {
       if (line) ls = ls.map((l) => taubinSmooth(l, line));
     }
     lines.push(...ls);
+    for (let i = 0; i < ls.length; i++) lineLevels.push(level);
   }
   for (const l of lines) vertices += l.length / 2;
   let colours: (Float64Array | undefined)[] | undefined;
-  if (ic) {
+  if (ic && ic.id === f.id) {
+    // the colour is the level of each line: no sampling
+    const toParam = paramOf(ic);
+    colours = lines.map((l, i) => new Float64Array(l.length / 2).fill(toParam(lineLevels[i] ?? NaN)));
+  } else if (ic) {
     const toParam = paramOf(ic);
     colours = lines.map((l) => {
       const out = new Float64Array(l.length / 2);
@@ -932,11 +938,14 @@ function renderGpu(grid: DenseGrid, box: Box, scene2d: Scene, iso: IsoResult | u
       // NOT the colormap selection: it only filters the levels (isoLevelParams) and colours the raster; a kernel is a
       // shader compile (seconds for a net in Safari), and every set re-dispatches on its own level stamp anyway
       const kernelKey = `${f.id}|${gridKey(f, grid)}|${ic?.id ?? ""}|m${metric ?? ""}|${exact ? "exact" : line > 0 ? "smooth" : "ms"}`;
+      // colouring the isolines by their own field: the colour IS the level — no field evaluated per vertex (for a
+      // net-backed field that was a full net evaluation per vertex)
+      const icData = ic?.id === f.id ? "level" : ic?.data;
       isoLevelParams().forEach((t, k) => {
         const level = f.codomain.fromParam(t, lo, hi);
         const segs = !exact && line > 0
-          ? F.smoothedIsolines(kernelKey, `${kernelKey}|${k}`, values, ic?.data, level, line)
-          : F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, ic?.data, level, tol, exact);
+          ? F.smoothedIsolines(kernelKey, `${kernelKey}|${k}`, values, icData, level, line)
+          : F.isolines(kernelKey, `${kernelKey}|${k}`, f.data, values, icData, level, tol, exact);
         gs.lines.push({ segs, width: 2, alpha, color: [0.92, 0.92, 0.92], ...colour });
       });
     } else if (iso) {
