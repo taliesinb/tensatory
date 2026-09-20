@@ -42,7 +42,7 @@ import {
 import { MAPS, cmap, type Colormap } from "./colormap";
 import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lutFor, makeCmapInterval, selectParam, selectionKey } from "./cmapInterval";
 import { makeIntervalSlider, type IntervalEl } from "./interval";
-import { installLogCapture, showError, status, statusAwaitingPaint } from "./log";
+import { bootPhase, installLogCapture, showError, status, statusAwaitingPaint } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
 import type { Manifold, PointSet } from "@tensatory/core";
 import type { BundleSpec } from "@tensatory/schema";
@@ -60,13 +60,14 @@ import {
   installCollapsiblePanels,
   installTicks,
   fmtNum,
+  fmtSlider,
   installTooltips,
   makeChoice,
   makeDiscreteSlider,
   makeSlider,
   syncTicks,
-  tabBar,
   wheelStepper,
+  type ChoiceEl,
   type ValueControl,
 } from "./widgets";
 
@@ -194,6 +195,9 @@ const newRecolour = (gpu: GpuBackend): Recolour => new Recolour(gpu); // the fra
 let gpuRenderer: GpuRenderer | undefined;
 type Compute = "cpu" | "gpu"; type Render = "canvas" | "gpu";
 const modes: { compute: Compute; render: Render } = { compute: "cpu", render: "canvas" };
+const computeCh = $("computeBar") as ChoiceEl, renderCh = $("renderBar") as ChoiceEl;
+computeCh.addEventListener("change", () => { modes.compute = computeCh.value as Compute; applyModes(); });
+renderCh.addEventListener("change", () => { modes.render = renderCh.value as Render; applyModes(); });
 
 /** apply the compute / render modes: services, canvases, persistence */
 function applyModes(): void {
@@ -208,9 +212,11 @@ function applyModes(): void {
   } else { fused?.clear(); fused = undefined; }
   document.body.classList.toggle("gpu-render", modes.render === "gpu" || spaceDims() === 3);
   localStorage.setItem("tensatory.modes", JSON.stringify(modes));
-  tabBar($("computeBar"), [{ value: "cpu", label: "cpu" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], modes.compute, (v) => { modes.compute = v as Compute; applyModes(); });
+  // the choices reflect the modes (the setters fire no events); unavailable options are greyed out with the reason
   const is3 = spaceDims() === 3;
-  tabBar($("renderBar"), [{ value: "canvas", label: "canvas", disabled: is3, tip: is3 ? "3D spaces render with WebGPU only" : "" }, { value: "gpu", label: "gpu", disabled: !gpu, tip: gpu ? "" : "no WebGPU adapter" }], is3 ? "gpu" : modes.render, (v) => { modes.render = v as Render; applyModes(); });
+  computeCh.value = modes.compute; computeCh.setDisabled("gpu", gpu ? false : "no WebGPU adapter");
+  renderCh.value = is3 ? "gpu" : modes.render;
+  renderCh.setDisabled("canvas", is3 ? "3D spaces render with WebGPU only" : false); renderCh.setDisabled("gpu", gpu ? false : "no WebGPU adapter");
   $("pickCompute").textContent = `${sampler.label}${sampler.check ? " — agreement check on (see L)" : ""}`;
   STREAM_CACHE.clear(); PLAN_CACHE.clear(); isoCache = undefined; glyphCache = undefined; // geometry produced by the other backend
   state.dirty = true;
@@ -297,26 +303,30 @@ function rangeFrom(f: ScalarUse, st: { min: number; max: number }, posMin: () =>
 function rangeOf(f: ScalarUse): [number, number] {
   let r = rangeCache.get(f.id);
   if (r) return r;
-  if (f.data.kind === "symbolic" && f.data.dimCount === 2 && modes.compute === "gpu" && sampler.gpu) {
-    const coarse = new DenseGrid([24, 24], f.data.box);
+  const D = f.data.dimCount;
+  if (f.data.kind === "symbolic" && (D === 2 || D === 3) && modes.compute === "gpu" && sampler.gpu) {
+    // the coarse grid runs on the main thread: 10³ points keep even an exact symbolic curl of a large
+    // expression (~1 ms per point) under a second, where core's default 32³ stats grid would freeze the page
+    const coarse = new DenseGrid(D === 2 ? [24, 24] : [10, 10, 10], f.data.box);
     const vals = f.data.sampleOn(coarse);
     r = rangeFrom(f, computeStats(vals), () => { let m = Infinity; for (const v of vals) if (v > 0 && v < m) m = v; return m; });
     rangeCache.set(f.id, r);
     if (!rangePending.has(f.id)) {
       rangePending.add(f.id);
       const gpu = sampler.gpu, id = f.id, grid = costly(f.data) ? new DenseGrid([48, 48], f.data.box) : defaultStatsGrid(f.data.box);
-      const resident = fused ? fused.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid);
+      const shared = D === 2 ? fused : undefined; // 2D: the fused geometry owns resident grids; 3D: a temporary buffer
+      const resident = shared ? shared.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid);
       gpuStats(gpu, resident).then((st) => {
         if (!Number.isFinite(st.min)) return;
         rangeCache.set(id, rangeFrom(f, st, () => st.posMin));
         updateInfo(); isoCache = undefined; state.dirty = true;
-      }).catch((e) => console.warn("GPU stats failed:", e)).finally(() => { rangePending.delete(id); if (!fused) resident.destroy(); });
+      }).catch((e) => console.warn("GPU stats failed:", e)).finally(() => { rangePending.delete(id); if (!shared) resident.destroy(); });
     }
     return r;
   }
   const st = f.data.stats();
   r = rangeFrom(f, st, () => {
-    const g = f.data.samplePoints ?? new DenseGrid([64, 64], f.data.box);
+    const g = f.data.samplePoints ?? new DenseGrid(new Array<number>(D).fill(D === 3 ? 16 : 64), f.data.box);
     let m = Infinity;
     for (const v of f.data.sampleOn(g)) if (v > 0 && v < m) m = v;
     return m;
@@ -413,7 +423,9 @@ let isoCache: { key: string; result: IsoResult } | undefined;
 /** while the level is moving (animation, slider drag) contours are plain marching squares; exact projection follows once it settles */
 let isoLastChange = -1e9;
 const ISO_SETTLE_MS = 200;
-const isoMoving = () => (ui.isoAnim.checked && !state.paused) || performance.now() - isoLastChange < ISO_SETTLE_MS;
+/** whether the iso animation advances the level: ▶ on, not paused, and the panel enabled (a disabled panel's ▶ is inert) */
+const isoAnimating = () => ui.isoAnim.checked && ui.showIso.checked && !state.paused;
+const isoMoving = () => isoAnimating() || performance.now() - isoLastChange < ISO_SETTLE_MS;
 
 /*******************************************************/
 /* adaptive resolution (autores.ts): one controller per arm; the tier follows the isolines' moving / settled state */
@@ -809,23 +821,25 @@ function render(): void {
 
   // labels
   $("resv").textContent = `${grid.size.join("×")}${fused?.info.segments ? ` · ${fmtCount(fused.info.segments)} segs` : ""}${tier() === "moving" && autoRes2.moving !== autoRes2.settled ? ` · settles at ${autoRes2.resolution("settled")}` : ""}`;
-  $("isoValuev").textContent = isoField ? isoField.codomain.format(isoField.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(isoField))) : "—";
+  $("isoValuev").textContent = isoField ? fmtIsoValue(isoField) : "—";
   $("splitv").textContent = ui.split.value ?? "—";
-  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
+  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : fmtSlider(+ui.isoAlpha.value);
   $("metricv").textContent = ui.metric.value ?? "—";
   $("linev").textContent = ui.line.value ?? "—";
   // isoline diagnostics ("exact: N vertices, max |f − c| …" / "marching squares on …"); the #isoInfo row is commented out in index.html
   // $("isoInfo").textContent = iso?.info ?? "";
   $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
   $("slenv").textContent = ui.slen.value ?? "";
-  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
+  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : fmtSlider(+ui.sAlpha.value);
   $("tailv").textContent = ui.tail.value ?? "";
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
 }
+/** the `value` readout: the level in the I_V field's codomain, fixed-width (with the codomain's unit) */
+const fmtIsoValue = (f: ScalarUse): string => { const s = fmtSlider(f.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(f))); return f.codomain.unit ? `${s} ${f.codomain.unit}` : s; };
 /** the vector field panel's readouts (both arms) */
 function glyphLabels(): void {
   $("vspacev").textContent = `${ui.vspace.value ?? "—"} px`;
-  $("vAlphav").textContent = ui.vAlpha.value === null ? "—" : (+ui.vAlpha.value).toFixed(2);
+  $("vAlphav").textContent = ui.vAlpha.value === null ? "—" : fmtSlider(+ui.vAlpha.value);
   const gv = glyphVector();
   const lv = gv && glyphLevelShown ? `level ${glyphLevelShown.level} · ${fmt3(glyphLevelShown.spacing)} apart · ${fmtCount(glyphLevelShown.points)} pts in view` : "";
   $("vlevelv").textContent = lv || "—";
@@ -906,16 +920,16 @@ function render3d(): void {
   if (!v) { renderEmpty(); status("3D spaces need WebGPU"); return; }
   try { v.render(); } catch (e) { showError(e); }
   const isoField = slotScalar("iv");
-  $("isoValuev").textContent = isoField ? isoField.codomain.format(isoField.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(isoField))) : "—";
+  $("isoValuev").textContent = isoField ? fmtIsoValue(isoField) : "—";
   $("splitv").textContent = ui.split.value ?? "—";
-  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : (+ui.isoAlpha.value).toFixed(2);
+  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : fmtSlider(+ui.isoAlpha.value);
   const i3 = v.info;
   $("res3v").textContent = `${i3.grid.join("×")}${i3.triangles ? ` · ${fmtCount(i3.triangles)} △` : ""}${tier() === "moving" && autoRes3.moving !== autoRes3.settled ? ` · settles at ${autoRes3.resolution("settled")}` : ""}`;
   $("metricv").textContent = ui.metric.value ?? "—";
   $("linev").textContent = ui.line.value ?? "—";
   $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
   $("slenv").textContent = ui.slen.value ?? "";
-  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : (+ui.sAlpha.value).toFixed(2);
+  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : fmtSlider(+ui.sAlpha.value);
   $("tailv").textContent = ui.tail.value ?? "";
   $("ssplitv").textContent = ui.ssplit.value ?? "—";
   CROP_IDS.forEach((id, d) => { $(`${id}v`).textContent = fmtCrop(cropPreviewing ? [cropEl(id).lo, cropEl(id).hi] : cropCommitted[d]!); });
@@ -1479,7 +1493,7 @@ function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void
 }
 
 /** whether an animation is playing: the Controls rows are inert then (a rebuild would stutter it) */
-const animating = (): boolean => !state.paused && ((ui.isoAnim.checked && !!slotScalar("iv")) || (ui.anim.checked && num("lines") !== null && !!streamVector()));
+const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!state.paused && ui.anim.checked && num("lines") !== null && !!streamVector());
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
   state.bundleFile = file; state.baseSpec = parsed.spec;
@@ -1506,10 +1520,14 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): voi
 
 async function loadBundle(file: string, wantSpace?: string | null): Promise<void> {
   status(`loading ${file}…`);
+  const t0 = performance.now();
   try {
     const res = await fetch(`bundles/${file}`, { cache: "no-cache" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText} for bundles/${file}`);
-    setBundle(Bundle.parse(await res.json()), file, wantSpace);
+    const json = await res.json();
+    console.log(`bundle ${file}: fetched in ${(performance.now() - t0).toFixed(0)} ms`);
+    setBundle(Bundle.parse(json), file, wantSpace);
+    console.log(`bundle ${file}: ready in ${(performance.now() - t0).toFixed(0)} ms (space ${state.space})`);
   } catch (e) {
     console.error(e);
     status(e instanceof TensatoryError || e instanceof Error ? e.message : String(e));
@@ -1597,6 +1615,8 @@ $("flipx").onclick = () => { renderer.view.flipX = !renderer.view.flipX; orienta
 $("flipy").onclick = () => { renderer.view.flipY = !renderer.view.flipY; orientationChanged(); };
 $("cw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 1) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
 $("ccw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 3) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
+/** panel shortcut key → the ✓ checkbox it toggles (the colorfield panel is absent in 3D, where the key is inert) */
+const PANEL_KEYS: Partial<Record<string, "showScalar" | "showIso" | "showStream" | "showVec">> = { c: "showScalar", i: "showIso", s: "showStream", v: "showVec" };
 // a picked <select> (bundle, space) keeps keyboard focus, and space would then reopen its menu instead of toggling
 // play: once a choice is made, focus goes back to the page. Text inputs keep their keys (the guard below).
 for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.addEventListener("change", () => sel.blur());
@@ -1604,14 +1624,26 @@ window.addEventListener("keydown", (e) => {
   const t = e.target as HTMLElement | null;
   if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test((t as HTMLInputElement).type)) || t.tagName === "SELECT")) return;
   if (e.key === "r" || e.key === "R") refit();
+  // c / i / s / v toggle the gated panels (their underlined first letters = their columns in the mappings matrix);
+  // plain keys only, so ⌘C / ⌘V / ⌘S keep their meaning
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key in PANEL_KEYS) {
+    const cb = ui[PANEL_KEYS[e.key]!];
+    if (cb.closest<HTMLElement>(".panel")!.offsetParent !== null) { e.preventDefault(); cb.click(); }
+  }
   if (e.key === "=" || e.key === "+") stepBoxZoom(1);
   if (e.key === "-" || e.key === "_") stepBoxZoom(-1);
   if (e.key === "0" && state.space && state.boxZoom[state.space]) { state.boxZoom = { ...state.boxZoom, [state.space]: 0 }; rebuildBundle(); refit(); status(""); }
   if (e.key === " ") {
     e.preventDefault();
-    if (!ui.isoAnim.checked && !ui.anim.checked) {
-      // nothing is animating: space starts both (and unpauses) instead of toggling a pause of nothing
-      for (const cb of [ui.isoAnim, ui.anim]) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
+    // the ▶s that can animate: those of enabled panels (a disabled panel's ▶ is inert). When none of them is on,
+    // nothing is animating and space starts them all (and unpauses) instead of toggling a pause of nothing — so it
+    // always does something, and what starts is unambiguous: with one panel disabled only the other one starts.
+    // With both panels disabled it falls back to starting both.
+    const pairs: [play: HTMLInputElement, panel: HTMLInputElement][] = [[ui.isoAnim, ui.showIso], [ui.anim, ui.showStream]];
+    const live = pairs.filter(([, on]) => on.checked).map(([cb]) => cb);
+    const starts = live.length ? live : [ui.isoAnim, ui.anim];
+    if (!live.some((cb) => cb.checked)) {
+      for (const cb of starts) if (!cb.checked) { cb.checked = true; cb.dispatchEvent(new Event("change")); }
       state.paused = false;
       status("");
     } else {
@@ -1670,7 +1702,7 @@ function frame(now: number): void {
   }
   if (ui.anim.checked && !state.paused && num("lines") !== null && streamVector()) { state.animClock += state.dir.stream * dt; state.dirty = true; }
   if (spaceDims() === 3 && view3d?.flingTick(Math.min(0.1, frameMs / 1000))) state.dirty = true; // a flung orbit keeps turning (space does not pause it: it is not an animation of the data)
-  if (ui.isoAnim.checked && !state.paused && slotScalar("iv")) {
+  if (isoAnimating() && slotScalar("iv")) {
     const cycle = Math.pow(10, 2 * +ui.isoRate.value!);
     ui.isoValue.value = String((((+ui.isoValue.value! + (state.dir.iso * dt) / cycle) % 1) + 1) % 1);
     state.dirty = true;
@@ -1721,7 +1753,9 @@ const RECOLOUR_REFRESH = 4;
 
 (async () => {
   const params = new URLSearchParams(location.search);
+  bootPhase("WebGPU device");
   await sampler.init("auto");
+  console.log(`boot: compute backend ${sampler.label}`);
   if (sampler.gpu) sampler.gpu.onPipelineReady = () => { state.dirty = true; };
   sampler.check = params.get("check") === "1";
   try { Object.assign(modes, JSON.parse(localStorage.getItem("tensatory.modes") ?? "{}")); } catch { /* ignore */ }
@@ -1735,15 +1769,18 @@ const RECOLOUR_REFRESH = 4;
   const pin2 = Number(params.get("res")), pin3 = Number(params.get("res3"));
   if (pin2 > 1) autoRes2.pin = pin2;
   if (pin3 > 1) autoRes3.pin = pin3;
+  bootPhase("bundles/index.json");
   try {
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }
-  if (!bundleList.length) { status("no bundles found in bundles/index.json"); requestAnimationFrame(frame); return; }
+  if (!bundleList.length) { bootPhase(undefined); status("no bundles found in bundles/index.json"); requestAnimationFrame(frame); return; }
   pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file })));
   const want = params.get("bundle");
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
   pickSel.value = file;
+  bootPhase(`bundle ${file}`);
   await loadBundle(file, params.get("space"));
+  bootPhase(undefined);
   // UI overrides from the URL, e.g. &showIso=0&split=3&iv=loss&sg=lossGrad
   for (const [k, v] of params) {
     if ((CHECKS as readonly string[]).includes(k)) ui[k as CheckId].checked = v !== "0";

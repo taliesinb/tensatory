@@ -38,7 +38,8 @@ pipelines and either draw with Canvas 2D or upload their results. See
   `bundle` (picker and space picker, both with wheel/arrow switching; about
   = the description on one line with the full text as tooltip; R = wipe
   storage, L = log, ⤒ = open a local JSON), `system` (closed by default:
-  compute / render modes, device, `mem cap`, live memory with the adaptive
+  compute / render modes (choice flippers; unavailable options greyed with
+  the reason as tooltip), `mem cap`, device, live memory with the adaptive
   resolution's last decision, and `iso res` — the current grid and segment /
   triangle count, read-only), `controls` (only when the bundle asks for
   rows, see below), `2D space` (points / box flags; view: fit,
@@ -50,6 +51,15 @@ pipelines and either draw with Canvas 2D or upload their results. See
   Isolines and streamlines are OFF by default (the first frame of a costly
   field is then just the raster; the ticks are saved per bundle); a 3D space
   visited for the first time turns the isosurfaces on, since it has no raster.
+  The four GATED panels (colorfield / isolines / streamlines / vector field:
+  a `data-gate` ✓ tick on the strip) are `.off` while their tick is off: the
+  controls stay as they are under a half-transparent panel-coloured sheet
+  (`.body::after`) that takes every pointer event, so nothing in them hovers,
+  drags, scrolls or previews; the strip stays live. Their titles' underlined
+  first letters `c` / `i` / `s` / `v` are keyboard shortcuts that toggle the
+  tick (plain keys only — ⌘C / ⌘V / ⌘S keep their meaning; `c` is inert in 3D
+  where the panel is absent) and are the panels' column letters in the
+  mappings matrix.
   Locking a new I_V / S_∇ / V_∇ field while an animation plays pauses the
   animations first (`GEOMETRY_SLOTS` in `setSel`; space resumes): the new
   field's contours / integrations / lattices are recomputed — on the CPU for a
@@ -58,6 +68,29 @@ pipelines and either draw with Canvas 2D or upload their results. See
   the saved ▶ ticks say; space resumes, and turning a ▶ on lifts the pause.
 * **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
+
+## Logging and the Dock app
+
+`src/log.ts` wraps `console.*`, `window` errors and unhandled rejections into
+`LOG` (the L modal) and, on the dev server, SHIPS every line to
+`POST /__tensatory/log` in 500 ms batches (`keepalive`, flushed on
+`pagehide`); the Vite plugin `clientLog` (`vite.config.ts`) appends them to
+`apps/viewer/.logs/client-<date>.log` with the server's local time and a
+per-page-load session tag. The first line of a session says whether it is a
+`browser tab` or a `web app (standalone)` (`display-mode: standalone`), the
+UA, URL and whether `navigator.gpu` exists. The Dock app
+(`~/Applications/Tensatory.app`) is Safari's "Add to Dock" template app
+(`com.apple.Safari.WebApp`, start URL `http://127.0.0.1:5180/`): its own
+localStorage container, no scriptable console — this file IS its console.
+
+Boot is phased (`bootPhase`): `loading… WebGPU device` →
+`loading… bundles/index.json` → `loading… bundle <file>`; after 2 s in a
+phase the status appends the seconds elapsed and the log gets a warning at
+5 s and every 15 s, so a stall names its phase. Before the main module runs,
+an inline script in `index.html` collects early errors (drained into the log)
+and, if the module has not started after 5 s, turns the status red with
+"the main module did not start" — a failed import would otherwise leave
+`loading…` forever with no visible error.
 
 ## Controls: reseed and rescale random directions
 

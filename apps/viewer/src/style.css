@@ -25,6 +25,13 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .strip .tick.on { color: #3b82f6; }
 .panel .body { padding: 6px 12px 8px; }
 .panel .strip .title { cursor: zoom-out; }
+/* the underlined first letter of a gated panel's title is its keyboard shortcut (= its column letter in the mappings matrix) */
+.panel .strip .title.hot { display: inline-block; }
+.panel .strip .title.hot::first-letter { text-decoration: underline; text-decoration-color: #7d8db0; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+/* a gated panel whose ✓ is off: the controls stay as they are under a half-transparent panel-coloured sheet that
+   takes every pointer event (so nothing hovers, drags, scrolls or previews); the strip stays live */
+.panel.off .body { position: relative; }
+.panel.off .body::after { content: ""; position: absolute; inset: 0; z-index: 2; background: rgba(15,18,26,.6); pointer-events: auto; cursor: default; }
 .panel.collapsed .strip .title { cursor: zoom-in; }
 .panel.collapsed .body { display: none; }
 .panel.collapsed .strip { border-bottom: none; }
@@ -58,6 +65,14 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .ds .seg.on, .ch .seg.on { background: #3b82f6; color: #e8f0ff; }
 .ds .seg:hover:not(.on) , .ch .seg:hover:not(.on) { background: #282e3e; color: #7d879c; }
 .ch .seg { letter-spacing: 0; font-variant-numeric: normal; }
+/* data-justify on a .ch / .ds: stretch (default) = segments fill the width in proportion to their labels;
+   left / right / center = segments only as wide as their labels (+ padding), packed at that side (center = spread
+   over the width with the space between them) */
+.ch[data-justify]:not([data-justify="stretch"]) .seg, .ds[data-justify]:not([data-justify="stretch"]) .seg { flex: 0 0 auto; padding: 0 7px; }
+.ch[data-justify="left"], .ds[data-justify="left"] { justify-content: flex-start; }
+.ch[data-justify="right"], .ds[data-justify="right"] { justify-content: flex-end; }
+.ch[data-justify="center"], .ds[data-justify="center"] { justify-content: space-between; }
+.ch .seg.disabled, .ch .seg.disabled:hover:not(.on) { background: #1a1e28; color: #343b4c; cursor: default; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }
 input[type="file"] { max-width: 100%; font-size: 11px; }
 

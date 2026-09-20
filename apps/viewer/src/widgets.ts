@@ -1,3 +1,5 @@
+import { formatReal } from "@tensatory/core";
+
 // Framework-free widgets, ported from the loss-landscape prototype.
 // Controls are plain <div>s configured by data- attributes; sliders expose a
 // `.value` (string | null) property and dispatch 'input' (live) / 'change'
@@ -57,13 +59,15 @@ export function installCollapsiblePanels(storageKey: string, onToggle?: () => vo
 }
 
 /*******************************************************/
-/* ticks: a glyph label wrapping a hidden checkbox */
+/* ticks: a glyph label wrapping a hidden checkbox. A tick with `data-gate` enables its panel: while it is off the
+   panel is `.off` (its body sheeted over and inert, see style.css). */
 
 const tickSyncs: (() => void)[] = [];
 export function installTicks(): void {
   for (const lab of document.querySelectorAll<HTMLLabelElement>(".tick")) {
     const cb = lab.querySelector("input")!;
-    const sync = () => lab.classList.toggle("on", cb.checked);
+    const gated = lab.dataset.gate !== undefined ? lab.closest<HTMLElement>(".panel") : null;
+    const sync = () => { lab.classList.toggle("on", cb.checked); gated?.classList.toggle("off", !cb.checked); };
     cb.addEventListener("change", sync);
     sync();
     tickSyncs.push(sync);
@@ -76,6 +80,22 @@ export const syncTicks = (): void => tickSyncs.forEach((f) => f());
 
 export const fmtNum = (v: number): string =>
   Math.abs(v) >= 1000 ? `${(v / 1000).toString().replace(/\.0$/, "")}k` : String(v);
+
+/**
+ * Fixed-width readout of a continuous slider's value: three digits with the decimal point floating and trailing
+ * zeros kept (0.00, 0.01, 0.15, 1.25, 12.5, 125, 1.25k, 12.5M), so the readout does not jitter while the value
+ * animates. Non-zero magnitudes under 0.01 would all read "0.00", so they fall back to `formatReal` (6.24·10⁻⁵).
+ */
+export function fmtSlider(v: number): string {
+  if (!Number.isFinite(v)) return formatReal(v);
+  let a = Math.abs(v);
+  if (a !== 0 && a < 0.005) return formatReal(v, 3);
+  const units = ["", "k", "M", "G", "T"];
+  let u = 0;
+  while (a >= 999.5 && u < units.length - 1) { a /= 1000; u++; }
+  const s = a < 9.995 ? a.toFixed(2) : a < 99.95 ? a.toFixed(1) : a.toFixed(0);
+  return `${v < 0 && +s !== 0 ? "−" : ""}${s}${units[u]}`;
+}
 
 // A grey bar with a 3px blue tick at the value. Drag to scrub (pointer captured; clips past the ends);
 // shift-press while hovering previews the value until shift is released. data-nullable: a click (no drag,
@@ -179,6 +199,12 @@ export function wheelStepper(onStep: (dir: 1 | -1) => void): (e: WheelEvent) => 
 }
 
 /*******************************************************/
+/* segment layout of the discrete sliders and choices: data-justify="stretch" (default; segments share the width in
+   proportion to their labels) | "left" | "right" | "center" (natural widths, packed at that side / spread; style.css) */
+
+const stretches = (el: HTMLElement): boolean => (el.dataset.justify ?? "stretch") === "stretch";
+
+/*******************************************************/
 /* discrete slider: data-values="0,2,4" data-value [data-nullable] */
 
 export function makeDiscreteSlider(el0: HTMLElement): ValueControl {
@@ -186,7 +212,7 @@ export function makeDiscreteSlider(el0: HTMLElement): ValueControl {
   const values = el.dataset.values!.split(",").map(Number), nullable = el.dataset.nullable !== undefined;
   let value: number | null = el.dataset.value !== undefined && el.dataset.value !== "" ? +el.dataset.value : null;
   const nearest = (v: number) => values.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a));
-  const segs = values.map((v) => { const s = document.createElement("div"); s.className = "seg"; s.textContent = fmtNum(v); s.style.flexGrow = String(fmtNum(v).length + 1); el.appendChild(s); return s; });
+  const segs = values.map((v) => { const s = document.createElement("div"); s.className = "seg"; s.textContent = fmtNum(v); if (stretches(el)) s.style.flexGrow = String(fmtNum(v).length + 1); el.appendChild(s); return s; });
   const paint = () => segs.forEach((s, i) => s.classList.toggle("on", values[i] === value));
   const fire = (t: string) => el.dispatchEvent(new Event(t));
   const set = (v: number | null) => { value = v; paint(); fire("input"); fire("change"); };
@@ -206,22 +232,36 @@ export function makeDiscreteSlider(el0: HTMLElement): ValueControl {
 }
 
 /*******************************************************/
-/* choice: data-options="a,b,c" data-value="a" — a discrete slider over named options (never null); the same .seg look */
+/* choice: data-options="a,b,c" data-value="a" — a discrete slider over named options (never null); the same .seg look.
+   `setDisabled(option, reason)` greys an option out (unpickable by click / wheel / arrows; the reason replaces its
+   tooltip); `setDisabled(option, false)` restores it. */
 
-export function makeChoice(el0: HTMLElement): ValueControl {
-  const el = el0 as ValueControl;
+export interface ChoiceEl extends ValueControl {
+  setDisabled(option: string, reason: string | false): void;
+}
+
+export function makeChoice(el0: HTMLElement): ChoiceEl {
+  const el = el0 as ChoiceEl;
   const options = el.dataset.options!.split(",");
   const tips = el.dataset.tips?.split("|") ?? [];
   let value = options.includes(el.dataset.value ?? "") ? el.dataset.value! : options[0]!;
-  // segment widths follow the labels, as the discrete sliders do
-  const segs = options.map((o, i) => { const s = document.createElement("div"); s.className = "seg"; s.textContent = o; s.style.flexGrow = String(o.length + 1); if (tips[i]) s.dataset.tip = tips[i]!; el.appendChild(s); return s; });
+  // segment widths follow the labels, as the discrete sliders do. Every segment carries a data-tip (possibly empty,
+  // which shows nothing) so a later disabled reason has a tooltip listener to show through.
+  const segs = options.map((o, i) => { const s = document.createElement("div"); s.className = "seg"; s.textContent = o; if (stretches(el)) s.style.flexGrow = String(o.length + 1); s.dataset.tip = tips[i] ?? ""; el.appendChild(s); return s; });
+  const disabled = new Set<string>();
   const paint = () => segs.forEach((s, i) => s.classList.toggle("on", options[i] === value));
   const fire = (t: string) => el.dispatchEvent(new Event(t));
-  const set = (v: string) => { if (v === value) return; value = v; paint(); fire("input"); fire("change"); };
+  const set = (v: string) => { if (v === value || disabled.has(v)) return; value = v; paint(); fire("input"); fire("change"); };
   segs.forEach((s, i) => s.addEventListener("click", () => set(options[i]!)));
   let over = false;
   el.addEventListener("pointerenter", () => (over = true)); el.addEventListener("pointerleave", () => (over = false));
-  const step = (d: number) => set(options[Math.max(0, Math.min(options.length - 1, options.indexOf(value) + d))]!);
+  const step = (d: number) => { let i = options.indexOf(value); do i += d; while (i >= 0 && i < options.length && disabled.has(options[i]!)); if (i >= 0 && i < options.length) set(options[i]!); };
+  el.setDisabled = (o, reason) => {
+    const i = options.indexOf(o); if (i < 0) return;
+    if (reason === false) disabled.delete(o); else disabled.add(o);
+    segs[i]!.classList.toggle("disabled", reason !== false);
+    segs[i]!.dataset.tip = reason === false ? tips[i] ?? "" : reason;
+  };
   const wheel = wheelStepper(step);
   el.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
   window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowRight") { e.preventDefault(); step(1); } else if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); } });
@@ -231,21 +271,4 @@ export function makeChoice(el0: HTMLElement): ValueControl {
   });
   paint();
   return el;
-}
-
-/*******************************************************/
-/* tab bar: a row of .tab buttons, one active */
-
-export interface TabItem { value: string; label: string; tip?: string; disabled?: boolean }
-
-export function tabBar(el: HTMLElement, items: TabItem[], current: string | null, onPick: (value: string) => void): void {
-  el.replaceChildren();
-  for (const it of items) {
-    const b = document.createElement("button");
-    b.textContent = it.label; b.title = it.tip ?? "";
-    b.className = `tab${it.value === current ? " active" : ""}`;
-    b.disabled = Boolean(it.disabled);
-    b.onclick = () => onPick(it.value);
-    el.appendChild(b);
-  }
 }

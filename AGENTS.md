@@ -73,7 +73,18 @@ profiling test.
 * Core stays isomorphic (no DOM, no fetch); anything browser-specific lives in
   the viewer.
 * Verify UI changes in a browser against the running dev server; uncaught
-  errors show in red on the status line and in the L (log) modal.
+  errors show in red on the status line and in the L (log) modal. Every
+  client of the dev server (Chrome, STP, the Safari web app on the Dock —
+  `~/Applications/Tensatory.app`, a `com.apple.Safari.WebApp` template app
+  whose start URL is the dev server, with its own localStorage and no
+  inspectable console) also ships its console / status / error lines to the
+  server, which appends them to `apps/viewer/.logs/client-<date>.log`
+  (`vite.config.ts` `clientLog`, `src/log.ts`; sessions tagged, `web app
+  (standalone)` vs `browser tab`). When the user reports something that
+  happened in the Dock app, read that file. Boot runs in phases (`bootPhase`:
+  WebGPU device → bundles/index.json → the bundle) shown on the status line
+  with the seconds elapsed once a phase exceeds 2 s; an inline hook in
+  `index.html` reports a main module that never ran.
 
 ## Decisions (phase 1)
 
@@ -208,7 +219,7 @@ profiling test.
   marks); they never change values. Numbers are formatted compactly
   (`6.24·10⁻⁵`, unicode superscripts).
 * Viewer: one super-stack of panels top-left (`bundle`, `system` — closed by
-  default: compute / render, device, `mem cap`, live memory —, `controls`
+  default: compute / render, `mem cap`, device, live memory —, `controls`
   when the bundle has rows, `2D space`,
   `colorfield`, `isolines`, `streamlines`, `vector field` — isolines and
   streamlines OFF by default, isosurfaces on at a 3D space's first visit), the `mappings`
