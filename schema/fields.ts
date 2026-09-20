@@ -14,7 +14,8 @@ export type ScalarFieldSpec = {
   codomain?: CodomainSpec; // hints for visualization; defaults to "lin"
   exactGradient?: FieldId; // a vector field holding the EXACT gradient (e.g. from backprop during collection)
   name?: ShowString; // displayed name; defaults to the field id
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };
 
 export type VectorFieldSpec = {
@@ -22,5 +23,6 @@ export type VectorFieldSpec = {
   data: VectorFieldDataSpec;
   domain?: ManifoldId;
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };

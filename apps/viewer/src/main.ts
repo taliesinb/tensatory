@@ -17,6 +17,8 @@ import {
   arrowGlyphs,
   controlRows,
   zoomBoxes,
+  sliceSpec,
+  sliceable,
   zoomable,
   boxBlur,
   contourField,
@@ -55,6 +57,7 @@ import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
 import { ControlsPane } from "./controls";
+import { bindInfoIcon, installInfoModal, optionText } from "./info";
 import { GpuRenderer, type Camera3D, type Quat, quatLook, quatNormalize, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
@@ -77,8 +80,9 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getEleme
 /* widgets */
 
 installLogCapture();
-for (const el of document.querySelectorAll<HTMLElement>(".ch")) makeChoice(el); // before the tooltips: their options carry tips
+for (const el of document.querySelectorAll<HTMLElement>(".ch:not(.multi)")) makeChoice(el); // before the tooltips: their options carry tips (`.multi`: the slice bar, built per space)
 installTooltips();
+installInfoModal();
 installTicks();
 for (const el of document.querySelectorAll<HTMLElement>(".sl")) makeSlider(el);
 for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlider(el);
@@ -164,6 +168,9 @@ interface State {
   adjust: Adjustments;
   /** box zoom exponent per space (the symbolic fields' boxes scaled by BOX_ZOOM^k around their centres; `-` / `=`) */
   boxZoom: Record<string, number>;
+  /** committed slice per N-D space (3 < D <= 8): the 2 or 3 dimensions (0-based, ascending) the space is restricted to,
+   *  through the manifold's `origin`; absent = the first three. Applied to the base spec before the Bundle is built. */
+  slice: Record<string, number[]>;
   /** bumped whenever `bundle` is rebuilt from adjustments / zooms (a frame key component: the fields are new objects) */
   revision: number;
   bundleFile: string; // for options storage
@@ -183,7 +190,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, slice: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1268,8 +1275,8 @@ function guardResolution(): void {
 function matrixRows(): MetricsRow[] {
   const b = state.bundle!;
   return [
-    ...usable.scalars.map((id): MetricsRow => ({ id, name: b.scalarField(id).name, kind: "scalar" })),
-    ...usable.vectors.map((id): MetricsRow => ({ id, name: b.vectorField(id).name, kind: "vector" })),
+    ...usable.scalars.map((id): MetricsRow => ({ id, name: b.scalarField(id).name, kind: "scalar", info: b.scalarField(id).info })),
+    ...usable.vectors.map((id): MetricsRow => ({ id, name: b.vectorField(id).name, kind: "vector", info: b.vectorField(id).info })),
   ];
 }
 function buildMetrics(): void {
@@ -1304,7 +1311,7 @@ function savedCamera(c: Partial<Camera3D> & { yaw?: number; pitch?: number }): P
   if (typeof yaw === "number" && typeof pitch === "number" && Number.isFinite(yaw) && Number.isFinite(pitch)) return { ...rest, rot: quatLook([Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch)]) };
   return rest;
 }
-interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number> }
+interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number>; slice?: Record<string, number[]> }
 /**
  * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
  * their own 3D defaults (a volume wants more, fainter lines with several particles each; the HTML `data-value`s
@@ -1322,7 +1329,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
     ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
-    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom,
+    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom, slice: state.slice,
     spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
@@ -1384,6 +1391,8 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
+  bindInfoIcon($("spaceInfo"), m.info);
+  syncSliceRow();
   // a fresh space (or bundle) starts PAUSED whatever the saved ▶ ticks say: its first frames build everything from
   // scratch (for a costly field on the CPU), an animation on top piles them up; space resumes
   state.paused = true;
@@ -1398,11 +1407,13 @@ function setSpace(id: string, fromUser: boolean): void {
   $("lineLabel").textContent = m.numDims === 3 ? "surf sm" : "line sm";
 
   // defaults: colorfield and isoline value on the first scalar field; colour slots none (white lines;
-  // a colour slot equal to C would make lines vanish into the raster); streamline direction from the
-  // exact gradient when the bundle has one, otherwise the symbolic gradient of the field itself
+  // a colour slot equal to C would make lines vanish into the raster); streamline / glyph direction from
+  // the space's declared dynamical system (`flow`) when it has one, else the first field's exact gradient
+  // when the bundle has one, otherwise the symbolic gradient of the field itself
   const first = usable.scalars[0] ?? NONE;
   const exact = first ? bundle.scalarField(first).spec.exactGradient : undefined;
-  const vec = exact && usable.vectors.includes(exact) ? exact : first;
+  const flow = m.flow;
+  const vec = flow && usable.vectors.includes(flow) ? flow : exact && usable.vectors.includes(exact) ? exact : first;
   const sel: Sel = { c: first, iv: first, ic: NONE, sg: vec, sc: NONE, vg: vec, vc: NONE };
   state.sel = { ...sel }; state.lockedSel = { ...sel };
   state.dir = { iso: 1, stream: 1 }; syncPlayGlyphs();
@@ -1415,6 +1426,10 @@ function setSpace(id: string, fromUser: boolean): void {
   // isolines and streamlines default OFF (a costly field's first frame is then just the raster); a 3D space has no
   // raster, so on its first visit turn the isosurfaces on rather than show an empty box
   if (m.numDims === 3 && !hadSaved && !ui.showIso.checked && !ui.showStream.checked && !ui.showVec.checked) { ui.showIso.checked = true; syncTicks(); }
+  // a space with a declared `flow` is a dynamical system: its streamlines run FORWARD in time (following the field,
+  // "ascending") on its first visit; the descending default is for gradients of losses. `dir` is a bundle-level
+  // control, so a later choice sticks across the bundle's spaces.
+  if (m.flow && !hadSaved) ui.sdir.value = "ascending";
   if (m.numDims === 2 && !viewCustom) fitView();
   applyModes();
   $("streamBox").style.display = usable.scalars.length + usable.vectors.length ? "" : "none";
@@ -1427,41 +1442,53 @@ function setSpace(id: string, fromUser: boolean): void {
   state.dirty = true;
 }
 
-/** the one-line `about` value; the full text is its tooltip. The bundle's name is already the
- *  picker's entry, so only the description is shown — minus a redundant leading name (and the
- *  separator after it) if the description repeats it. */
-function aboutText(bundle: Bundle): string {
-  const d = (bundle.spec.description ?? "").trim();
-  if (!d.toLowerCase().startsWith(bundle.name.toLowerCase())) return d;
-  return d.slice(bundle.name.length).replace(/^[\s:.,;\-\u2013\u2014]*/, "") || d;
-}
-function setAbout(text: string): void { const el = $("pickAbout"); el.firstElementChild!.textContent = text; el.dataset.tip = text; }
 
 /*******************************************************/
 /* controls: adjustments (reseed / scale) of the bundle's random directions and arrays */
 
 const controls = new ControlsPane($("controlsPanel"));
 
-/** the box zoom step: `=` widens every symbolic field's box of the space by this factor, `-` narrows it */
+/** the box zoom step: `-` (zoom out) widens every symbolic field's box of the space by this factor, `=` (zoom in) narrows it */
 const BOX_ZOOM = 1.5;
 
-/** the bundle with the current adjustments and box zooms applied (the parsed bundle itself when there are none) */
+/** the default slice of an N-D space: its first three dimensions */
+const DEFAULT_SLICE = [0, 1, 2];
+/** a valid committed slice of an N-D manifold: 2 or 3 distinct dimensions in range, ascending; else the default */
+function sliceOf(spec: BundleSpec, m: string): number[] {
+  const D = spec.manifolds?.[m]?.numDims ?? 0;
+  const want = state.slice[m];
+  const ok = Array.isArray(want) && (want.length === 2 || want.length === 3) && new Set(want).size === want.length && want.every((d) => Number.isInteger(d) && d >= 0 && d < D);
+  return ok ? [...want].sort((a, b) => a - b) : DEFAULT_SLICE;
+}
+/** fields an N-D space lost in its slice (reason by field id), shown with the build errors */
+let sliceDropped = new Map<string, string>();
+
+/** the bundle with the current adjustments, slices and box zooms applied (the parsed bundle itself when there are none) */
 function adjustedBundle(parsed: Bundle): Bundle {
   const adj = Object.fromEntries(Object.entries(state.adjust).filter(([, a]) => a.seed !== undefined || (a.scale !== undefined && a.scale !== 1)));
   state.adjust = adj;
   state.boxZoom = Object.fromEntries(Object.entries(state.boxZoom).filter(([m, k]) => k !== 0 && Number.isInteger(k) && parsed.manifolds.has(m)));
   let spec = parsed.spec;
   if (Object.keys(adj).length) spec = adjustSpec(spec, adj);
+  // N-D spaces become their committed 2D / 3D slice (a spec rewrite: everything downstream sees ordinary fields)
+  sliceDropped = new Map();
+  for (const m of parsed.manifolds.keys()) {
+    if (!sliceable(spec, m)) continue;
+    const r = sliceSpec(spec, m, sliceOf(parsed.spec, m));
+    for (const [id, why] of Object.entries(r.dropped)) sliceDropped.set(id, why);
+    spec = r.spec;
+  }
   for (const [m, k] of Object.entries(state.boxZoom)) spec = zoomBoxes(spec, m, Math.pow(BOX_ZOOM, k));
   return spec === parsed.spec ? parsed : new Bundle(spec);
 }
 
-/** rebuild the bundle from the base spec with the current adjustments / zooms; everything keyed by field id stays */
+/** rebuild the bundle from the base spec with the current adjustments / slices / zooms; everything keyed by field id stays */
 function rebuildBundle(): void {
   if (!state.baseSpec) return;
   try {
     state.bundle = adjustedBundle(new Bundle(state.baseSpec));
     buildErrors = state.bundle.buildAll();
+    showBuildErrors();
     state.revision++;
     clearFieldCaches();
     updateInfo();
@@ -1470,7 +1497,64 @@ function rebuildBundle(): void {
   state.dirty = true;
 }
 
-/** `-` / `=`: zoom the symbolic fields' boxes of the current space by 1 / BOX_ZOOM / BOX_ZOOM around their centres */
+/** the bundle panel's `errors` row: fields that failed to build, and fields a slice had to leave out */
+function showBuildErrors(): void {
+  const lines = [...buildErrors].map(([id, e]) => `${id}: ${e.message}`);
+  for (const [id, why] of sliceDropped) lines.push(`${id}: not in this slice — ${why}`);
+  $("pickErrRow").style.display = lines.length ? "" : "none";
+  $("pickErr").textContent = lines.join("\n");
+}
+
+/*******************************************************/
+/* slice: an N-D space (3 < D <= 8) shown as an axis-aligned 2D / 3D slice through its origin. The bar lists the
+   dimensions 1..D; clicking picks / unpicks (blue); the committed slice is tinted; the ✓ appears when the pick has 2 or
+   3 dimensions and differs from the committed one, and commits it (a bundle rebuild: `adjustedBundle` slices the spec). */
+
+const sliceBar = $("sliceBar"), sliceTick = $("sliceTick");
+/** the dimensions currently picked in the bar (0-based) */
+let slicePick = new Set<number>();
+
+/** show / hide the slice row for the current space and paint its segments and tick */
+function syncSliceRow(): void {
+  const spec = state.baseSpec, m = state.space;
+  const show = !!spec && !!m && sliceable(spec, m);
+  $("sliceRow").style.display = show ? "" : "none";
+  if (!show) return;
+  const D = spec.manifolds![m]!.numDims, names = spec.manifolds![m]!.dimNames;
+  const committed = sliceOf(spec, m);
+  if (sliceBar.childElementCount !== D || sliceBar.dataset.space !== m) {
+    sliceBar.dataset.space = m;
+    sliceBar.replaceChildren(...Array.from({ length: D }, (_, i) => {
+      const seg = document.createElement("div");
+      seg.className = "seg"; seg.textContent = String(i + 1);
+      seg.dataset.tip = `${names?.[i] ?? `x${i}`}: click to pick / unpick this dimension for the slice`;
+      seg.addEventListener("click", () => { if (slicePick.has(i)) slicePick.delete(i); else slicePick.add(i); syncSliceRow(); });
+      return seg;
+    }));
+    installTooltips(sliceBar);
+    slicePick = new Set(committed);
+  }
+  const picked = [...slicePick].sort((a, b) => a - b);
+  [...sliceBar.children].forEach((seg, i) => { seg.classList.toggle("on", slicePick.has(i)); seg.classList.toggle("committed", committed.includes(i)); });
+  const differs = picked.join(",") !== committed.join(",");
+  sliceTick.style.display = (picked.length === 2 || picked.length === 3) && differs ? "" : "none";
+}
+
+/** commit the picked dimensions: rebuild the bundle with the new slice and re-enter the space (its arm may change) */
+function commitSlice(): void {
+  const spec = state.baseSpec, m = state.space;
+  if (!spec || !m || !sliceable(spec, m)) return;
+  const picked = [...slicePick].sort((a, b) => a - b);
+  if (picked.length !== 2 && picked.length !== 3) return;
+  state.slice = { ...state.slice, [m]: picked };
+  rebuildBundle();
+  setSpace(m, true);
+  const names = spec.manifolds![m]!.dimNames;
+  status(`slice: ${picked.map((d) => names?.[d] ?? `x${d}`).join(", ")} (other coordinates at the space's origin)`);
+}
+sliceTick.addEventListener("click", commitSlice);
+
+/** `-` / `=`: zoom the symbolic fields' boxes of the current space by BOX_ZOOM (out, dir = 1) / 1 / BOX_ZOOM (in, dir = -1) around their centres */
 function stepBoxZoom(dir: 1 | -1): void {
   if (!state.baseSpec || !state.space) return;
   if (!zoomable(state.baseSpec, state.space)) { status("no symbolic fields to zoom in this space (sampled fields keep their grid)"); return; }
@@ -1479,7 +1563,7 @@ function stepBoxZoom(dir: 1 | -1): void {
   rebuildBundle();
   // the domain changed on purpose: show all of it (a pan / zoom of the view would hide the new margin or leave it empty)
   if (spaceDims() === 3) { if (view3d) { view3d.cameraCustom = false; view3d.fit(); } } else fitView();
-  status(k === 0 ? "" : `box ×${Math.pow(BOX_ZOOM, k).toPrecision(3)} (− / = to zoom the fields' domain, 0 to reset)`);
+  status(k === 0 ? "" : `domain ×${Math.pow(BOX_ZOOM, k).toPrecision(3)} (= zooms in, − out, 0 resets; the colour range and the isoline levels follow the visible domain)`);
 }
 
 /**
@@ -1504,19 +1588,19 @@ const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!sta
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
   state.bundleFile = file; state.baseSpec = parsed.spec;
-  const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {};
+  const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {}; state.slice = opts0.slice ?? {};
   let bundle: Bundle;
-  try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; bundle = parsed; } // stale adjustments (the bundle changed): drop them
+  try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; state.slice = {}; try { bundle = adjustedBundle(parsed); } catch { bundle = parsed; } } // stale adjustments (the bundle changed): drop them
   state.bundle = bundle; state.revision++;
   clearFieldCaches(); state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
   controls.build(controlRows(parsed.spec), () => state.adjust, applyAdjustment);
-  const errors = buildErrors;
-  setAbout(aboutText(bundle));
-  $("pickErrRow").style.display = errors.size ? "" : "none";
-  $("pickErr").textContent = [...errors].map(([id, e]) => `${id}: ${e.message}`).join("\n");
+  // the bundle's ⓘ (summary / details); the loaded bundle knows more than its index entry, so its option's hover follows
+  bindInfoIcon($("bundleInfo"), bundle.info);
+  const opt = [...pickSel.options].find((o) => o.value === file); if (opt) opt.title = optionText(bundle.info);
+  showBuildErrors();
   const spaces = spaceList();
-  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name })));
+  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name, title: optionText(m.info) })));
   spaceSel.disabled = spaces.length < 2;
   const saved = readOpts().space;
   const pick = [wantSpace, saved, spaces.find((m) => m.numDims === 2)?.id, spaces[0]?.id].find((id) => id && spaces.some((m) => m.id === id));
@@ -1541,7 +1625,8 @@ async function loadBundle(file: string, wantSpace?: string | null): Promise<void
   }
 }
 
-let bundleList: { file: string; name?: string }[] = [];
+/** bundles/index.json: `summary` mirrors the bundle's own (the hover of a not-yet-loaded alternative) */
+let bundleList: { file: string; name?: string; summary?: string }[] = [];
 const pickSel = $<HTMLSelectElement>("pickBundle");
 function chooseBundle(i: number): void {
   if (!bundleList.length) return;
@@ -1564,7 +1649,7 @@ function stepOnWheel(sel: HTMLSelectElement, step: (dir: number) => void): void 
 $("uploadBtn").onclick = () => $<HTMLInputElement>("pickFile").click();
 $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
   const file = (ev.target as HTMLInputElement).files?.[0]; if (!file) return;
-  try { setBundle(Bundle.parse(JSON.parse(await file.text())), `local:${file.name}`); setAbout(`${file.name} (local) — ${$("pickAbout").textContent}`); }
+  try { setBundle(Bundle.parse(JSON.parse(await file.text())), `local:${file.name}`); status(`${file.name} (local)`); }
   catch (e) { console.error(e); status(e instanceof Error ? e.message : String(e)); }
 });
 
@@ -1645,8 +1730,8 @@ window.addEventListener("keydown", (e) => {
     const cb = ui[PANEL_KEYS[e.key]!];
     if (cb.closest<HTMLElement>(".panel")!.offsetParent !== null) { e.preventDefault(); cb.click(); }
   }
-  if (e.key === "=" || e.key === "+") stepBoxZoom(1);
-  if (e.key === "-" || e.key === "_") stepBoxZoom(-1);
+  if (e.key === "=" || e.key === "+") stepBoxZoom(-1); // zoom IN: a narrower domain
+  if (e.key === "-" || e.key === "_") stepBoxZoom(1); // zoom OUT: a wider domain
   if (e.key === "0" && state.space && state.boxZoom[state.space]) { state.boxZoom = { ...state.boxZoom, [state.space]: 0 }; rebuildBundle(); refit(); status(""); }
   if (e.key === " ") {
     e.preventDefault();
@@ -1789,7 +1874,7 @@ const RECOLOUR_REFRESH = 4;
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }
   if (!bundleList.length) { bootPhase(undefined); status("no bundles found in bundles/index.json"); requestAnimationFrame(frame); return; }
-  pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file })));
+  pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file, title: b.summary ?? "" })));
   const want = params.get("bundle");
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
   pickSel.value = file;

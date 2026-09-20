@@ -15,9 +15,13 @@ import type { NdArray } from "../arrays/ndarray";
 
 export const ManifoldDefinitionSchema: z.ZodType<ManifoldDefinitionSpec> = z.object({
   name: z.string().optional(),
+  summary: z.string().optional(),
+  details: z.string().optional(),
   numDims: z.number().int().positive(),
   dimNames: z.array(z.string()).optional(),
   dimWeights: z.array(z.number()).optional(),
+  origin: z.array(z.number()).optional(),
+  flow: z.string().optional(),
 });
 
 export const PointSetSchema: z.ZodType<PointSetSpec> = z.object({
@@ -31,7 +35,8 @@ export const PointSetSchema: z.ZodType<PointSetSpec> = z.object({
 export const BundleSchema: z.ZodType<BundleSpec> = z.object({
   tensatory: z.literal(BUNDLE_VERSION),
   name: z.string().optional(),
-  description: z.string().optional(),
+  summary: z.string().optional(),
+  details: z.string().optional(),
   manifolds: z.record(z.string(), ManifoldDefinitionSchema).optional(),
   defaultManifold: z.string().optional(),
   fields: z.record(z.string(), FieldSchema),
@@ -42,6 +47,18 @@ export const BundleSchema: z.ZodType<BundleSpec> = z.object({
 /*******************************************************/
 /* runtime */
 
+/** what a bundle / space / field / net says about itself: `summary` is meant to be one line, `details` any length */
+export interface Info {
+  name: string;
+  summary?: string | undefined;
+  details?: string | undefined;
+}
+/** the Info of a spec with optional summary / details, or undefined when it has neither */
+export function infoOf(name: string, spec: { summary?: string; details?: string }): Info | undefined {
+  const summary = spec.summary?.trim() || undefined, details = spec.details?.trim() || undefined;
+  return summary || details ? { name, summary, details } : undefined;
+}
+
 export class Manifold {
   readonly name: string;
   readonly dimNames: readonly string[];
@@ -51,9 +68,14 @@ export class Manifold {
       throw new SpecError(`dimNames has ${spec.dimNames.length} entries for ${spec.numDims} dims`, ["manifolds", id]);
     if (spec.dimWeights && spec.dimWeights.length !== spec.numDims)
       throw new SpecError(`dimWeights has ${spec.dimWeights.length} entries for ${spec.numDims} dims`, ["manifolds", id]);
+    if (spec.origin && spec.origin.length !== spec.numDims)
+      throw new SpecError(`origin has ${spec.origin.length} entries for ${spec.numDims} dims`, ["manifolds", id]);
     this.dimNames = spec.dimNames ?? Array.from({ length: spec.numDims }, (_, i) => `x${i}`);
   }
   get numDims(): number { return this.spec.numDims; }
+  /** the id of the vector field declared as this space's dynamical system (ẋ = flow(x)), if any */
+  get flow(): string | undefined { return this.spec.flow; }
+  get info(): Info | undefined { return infoOf(this.name, this.spec); }
 }
 
 export class PointSet {
@@ -81,6 +103,7 @@ export class ScalarField {
   get exactGradient(): VectorField | undefined {
     return this.spec.exactGradient === undefined ? undefined : this.bundle.vectorField(this.spec.exactGradient);
   }
+  get info(): Info | undefined { return infoOf(this.name, this.spec); }
 }
 
 export class VectorField {
@@ -89,6 +112,7 @@ export class VectorField {
   constructor(readonly id: string, readonly spec: Extract<FieldSpec, { kind: "vector" }>, readonly domain: Manifold, readonly data: VectorFieldData) {
     this.name = spec.name ?? id;
   }
+  get info(): Info | undefined { return infoOf(this.name, this.spec); }
 }
 
 export type Field = ScalarField | VectorField;
@@ -158,6 +182,7 @@ export class Bundle {
     return new Bundle(r.data);
   }
 
+  get info(): Info | undefined { return infoOf(this.name, this.spec); }
   get fieldIds(): string[] { return Object.keys(this.spec.fields); }
   get scalarFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "scalar"); }
   get vectorFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "vector"); }
@@ -239,6 +264,16 @@ export class Bundle {
     for (const id of this.fieldIds) {
       try { this.field(id); } catch (e) {
         if (e instanceof TensatoryError) errors.set(id, e); else throw e;
+      }
+    }
+    // a manifold's `flow` must name a vector field living on that manifold
+    for (const m of this.manifolds.values()) {
+      if (m.flow === undefined) continue;
+      try {
+        const f = this.vectorField(m.flow, ["manifolds", m.id, "flow"]);
+        if (f.domain !== m) throw new SpecError(`flow field "${m.flow}" lives on manifold "${f.domain.id}"`, ["manifolds", m.id, "flow"]);
+      } catch (e) {
+        if (e instanceof TensatoryError) errors.set(`manifolds.${m.id}`, e); else throw e;
       }
     }
     return errors;

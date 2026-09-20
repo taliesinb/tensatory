@@ -157,7 +157,8 @@ export type NetDefinitionSpec = {
   outputs: Record<ArrayName, ShapeSpec>;     // names of inputs or nodes; the declared shape is CHECKED
                                              // against the inferred one (a typo becomes an error, not NaNs)
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };
 
 // Partial application: fix some inputs to arrays. The result is a net whose
@@ -171,7 +172,8 @@ export type BoundNetSpec = {
   net: NetId | NetSpec;
   bind: Record<ArrayName, ArraySpec>;
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };
 
 // Displacement: "around" a net. Takes a net and K DIRECTIONS; each direction
@@ -194,7 +196,8 @@ export type DisplacedNetSpec = {
   coeffs?: ArrayName;                          // the new [K] input; defaults to "t"
   directions: DirectionSpec[];                 // K >= 1
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };
 
 // One direction. The arrays of a direction are ONE vector in the joint space
@@ -226,7 +229,8 @@ export type GradNetSpec = {
   outputs: Record<ArrayName, GradOutputSpec>; // new output name -> which gradient
   keep?: ArrayName[];                          // forward outputs to pass through unchanged
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
 };
 
 // One gradient output: d(of)/d(wrt).

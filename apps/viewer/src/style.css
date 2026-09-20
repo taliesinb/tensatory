@@ -73,6 +73,13 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .ch[data-justify="right"], .ds[data-justify="right"] { justify-content: flex-end; }
 .ch[data-justify="center"], .ds[data-justify="center"] { justify-content: space-between; }
 .ch .seg.disabled, .ch .seg.disabled:hover:not(.on) { background: #1a1e28; color: #343b4c; cursor: default; }
+/* the slice multi-flipper (bundle panel): `.on` = picked (blue, as any choice), `.committed` = the slice in use (a tint
+   under the pick, so the two states read together: picked+committed blue, committed-only tinted, picked-only blue) */
+#sliceBar .seg.committed:not(.on) { background: #1e3a6e; color: #9fb3d9; }
+#sliceBar .seg.committed:not(.on):hover { background: #26467f; color: #c4d2ee; }
+#sliceBar .seg { padding: 0 6px; min-width: 8px; }
+.commit { color: #3b82f6; font-size: 14px; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; padding: 0 4px; flex: none; }
+.commit:hover { color: #93c5fd; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }
 input[type="file"] { max-width: 100%; font-size: 11px; }
 
@@ -81,11 +88,6 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #picker .prow label, #system .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
 #picker .pval, #system .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-/* about: one line, the full text (name — description) in the tooltip. The ellipsized text sits in a span that takes
-   no pointer events: Chrome shows a native tooltip with the full text of any line it clips with an ellipsis, which
-   would double our own; with the hover landing on the wrapper there is nothing clipped under the pointer. */
-#picker .pval.about { font-size: inherit; line-height: inherit; min-width: 0; cursor: help; user-select: none; -webkit-user-select: none; }
-#picker .pval.about > span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 #pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }
 
 #cursorPane { position: absolute; right: 12px; bottom: 12px; display: none; pointer-events: none; }
@@ -127,12 +129,19 @@ label[data-tip]:not(.tick) { cursor: help; }
 #gear svg { display: block; animation: gear-spin 1.6s linear infinite; animation-play-state: paused; }
 #gear.on svg { animation-play-state: running; }
 @keyframes gear-spin { to { transform: rotate(360deg); } }
-#logModal { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none; z-index: 50; align-items: center; justify-content: center; }
-#logModal.open { display: flex; }
+.modal { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none; z-index: 50; align-items: center; justify-content: center; }
+.modal.open { display: flex; }
 .logbox { background: #0b0d12; border: 1px solid #2a2f3d; border-radius: 8px; width: min(760px, 92vw); max-height: 82vh; display: flex; flex-direction: column; }
 .loghead { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; border-bottom: 1px solid #2a2f3d; color: #cfd6e6; font-size: 12px; }
 .loghead button { background: none; border: none; color: #aab; cursor: pointer; font-size: 14px; }
 #logText { margin: 0; padding: 10px 12px; overflow: auto; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cdd; white-space: pre-wrap; word-break: break-all; user-select: text; -webkit-user-select: text; }
+/* the details modal (info.ts): prose, so a narrower box and proportional type */
+.infobox { width: min(560px, 92vw); }
+#infoText { padding: 10px 14px 12px; overflow: auto; font-size: 12.5px; line-height: 1.45; color: #d4dae8; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+/* ⓘ: shown beside a picker (and on a fields row) when the item has a summary or details; hover = the tooltip
+   (summary, else details), click = the details modal. Same delay and cursor as the panel keys' tooltips. */
+.info { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 13px; height: 13px; border: 1px solid #6a7690; border-radius: 50%; color: #8a96b0; font: italic 9.5px/1 Georgia, "Times New Roman", serif; cursor: help; user-select: none; -webkit-user-select: none; }
+.info:hover { color: #cfd6e6; border-color: #9fb3d9; }
 
 /* interval slider (interval.ts), plain variant: the 3D crop ranges. The colormap variant below overrides. */
 .isl { flex: 1; min-width: 0; height: 14px; background: #222631; border-radius: 3px; position: relative; cursor: pointer; }

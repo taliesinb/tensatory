@@ -1,7 +1,6 @@
 {
  "tensatory": "0.1",
  "name": "symbolic 3D",
- "description": "Fields defined by expressions only, on several 3D volumes: spheres and tori, a Gaussian mixture, the gyroid, 3D Rosenbrock.",
  "manifolds": {
   "volume": {
    "name": "spheres and tori",
@@ -10,7 +9,8 @@
     "x",
     "y",
     "z"
-   ]
+   ],
+   "summary": "nested spheres x² + y² + z² and tori around the z axis: the simplest isosurfaces"
   },
   "mix3": {
    "name": "mixture volume",
@@ -19,7 +19,8 @@
     "x",
     "y",
     "z"
-   ]
+   ],
+   "summary": "three Gaussian bumps in a volume (centres A, B, C), the mixture's gradient and its norm"
   },
   "gyroidSpace": {
    "name": "gyroid volume",
@@ -28,7 +29,8 @@
     "x",
     "y",
     "z"
-   ]
+   ],
+   "summary": "the gyroid sin x cos y + sin y cos z + sin z cos x: level 0 is the minimal surface"
   },
   "rosen3": {
    "name": "Rosenbrock volume",
@@ -37,7 +39,8 @@
     "x",
     "y",
     "z"
-   ]
+   ],
+   "summary": "the 3D Rosenbrock function (log codomain): a curved valley floor in a volume"
   }
  },
  "fields": {
@@ -45,7 +48,7 @@
    "kind": "scalar",
    "name": "x² + y² + z²",
    "domain": "volume",
-   "description": "Nested spheres: the simplest isosurfaces.",
+   "details": "Nested spheres: the simplest isosurfaces.",
    "data": {
     "type": "symbolic",
     "box": [
@@ -109,7 +112,7 @@
    "kind": "scalar",
    "name": "torus",
    "domain": "volume",
-   "description": "(√(x² + y²) − 1.2)² + z²: level sets are tori around the z axis; the level 1.44 pinches at the origin.",
+   "details": "(√(x² + y²) − 1.2)² + z²: level sets are tori around the z axis; the level 1.44 pinches at the origin.",
    "data": {
     "type": "symbolic",
     "box": [
@@ -176,7 +179,7 @@
    "name": "Gaussian mixture",
    "domain": "mix3",
    "codomain": "p",
-   "description": "Three Gaussian bumps in a volume; A, B, C mark their centres.",
+   "details": "Three Gaussian bumps in a volume; A, B, C mark their centres.",
    "data": {
     "type": "symbolic",
     "box": [
@@ -327,7 +330,7 @@
    "kind": "scalar",
    "name": "gyroid",
    "domain": "gyroidSpace",
-   "description": "sin x cos y + sin y cos z + sin z cos x: the level 0 is the gyroid minimal surface.",
+   "details": "sin x cos y + sin y cos z + sin z cos x: the level 0 is the gyroid minimal surface.",
    "data": {
     "type": "symbolic",
     "box": [
@@ -428,7 +431,7 @@
    "name": "Rosenbrock",
    "domain": "rosen3",
    "codomain": "log",
-   "description": "(1 − x)² + 100 (y − x²)² + (1 − y)² + 100 (z − y²)²; minimum at (1, 1, 1).",
+   "details": "(1 − x)² + 100 (y − x²)² + (1 − y)² + 100 (z − y²)²; minimum at (1, 1, 1).",
    "data": {
     "type": "symbolic",
     "box": [
@@ -584,5 +587,6 @@
     "min"
    ]
   }
- }
+ },
+ "summary": "Fields defined by expressions only, on several 3D volumes: spheres and tori, a Gaussian mixture, the gyroid, 3D Rosenbrock."
 }

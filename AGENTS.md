@@ -110,10 +110,26 @@ profiling test.
   byte-identical and NO shader recompiles (pipelines are cached by code;
   `gpu/test/nets.test.ts` asserts it); rows commit on release and are inert
   while an animation plays; live dragging is a follow-up. Box zoom is the
-  same pattern: `-` / `=` (`0` resets) scale the boxes of the current
-  space's SYMBOLIC fields by 1.5 around their centres (core `zoomBoxes`;
+  same pattern: `=` / `-` zoom the DOMAIN in / out (`0` resets): they scale
+  the boxes of the current space's SYMBOLIC fields by 1/1.5 / 1.5 around
+  their centres (core `zoomBoxes`;
   per-space option `boxZoom: k`), sampled fields keep their grid, the
-  view re-fits.
+  view re-fits. SLICES are the same pattern again (`notes/viewer.md`): a
+  manifold with 3 < D ≤ 8 dims is shown as an axis-aligned 2D / 3D slice
+  through its `origin` (default 0); the bundle panel's `slice` row is a
+  multi-flipper of the dimensions (blue = picked, tinted = in use, ✓ to
+  commit 2 or 3 of them; per-space option `slice: [dims]`, default
+  `[0,1,2]`). Core `sliceSpec` (`bundle/slice.ts`) REWRITES the spec before
+  the Bundle is built (adjust → slice → zoom): fields become ordinary k-D
+  fields — expressions rewritten on the AST with N-D vectors unrolled so
+  |∇f| / dot keep their N-D meaning and `grad` is differentiated in N-D
+  first, arguments inlined on demand for fixed-dimension derivatives (dense
+  / net arguments cannot be: the field is dropped with a reason), dense
+  grids sliced at the nearest sample, scalar nets given `E·p + o` as input,
+  point sets projected — so nothing downstream (GPU included; WGSL has no
+  vec5) sees mixed dimensions. `bundles/symbolic-nd.json`
+  (`tools/symbolic-nd/build.mjs`) has 4D / 5D Gaussians, quadratic forms,
+  Rosenbrock and waves for it.
 * Field data has `kind: "symbolic" | "sampled"`. Sampled data has
   `samplePoints`. Pointwise-derived data is sampled iff any argument is; all
   sampled arguments must have IDENTICAL sample points (error otherwise).
@@ -214,7 +230,16 @@ profiling test.
   domain only (no pushforward). 1-forms are not distinguished yet.
 * `exactGradient` on a scalar field names a vector field holding gradients
   sampled during collection (backprop); the viewer uses it for streamlines by
-  default.
+  default. A manifold's `flow` names the vector field of a dynamical system
+  ẋ = F(x) on it: the viewer's default S_∇ / V_∇ for that space, integrated
+  forward in time (`dir` starts ascending). `bundles/dynamical-systems.json`
+  (`tools/dynamical-systems/build.mjs`) is the textbook: a space per system
+  (linear zoo, gradient flows, pendulum, Duffing, Van der Pol, Hopf,
+  Lotka–Volterra, competition, saddle-focus, Lorenz, Rössler) with F, |F|,
+  energies / potentials / first integrals, exact Lyapunov derivatives ∇H·F
+  and divergences as pointwise expressions, equilibria labelled by type, and
+  limit cycles / attractors / separatrices RK4-integrated from the same
+  expression trees as ordered point sets.
 * Codomains are visualization hints (bounds, log base, flip, wrap, unit,
   marks); they never change values. Numbers are formatted compactly
   (`6.24·10⁻⁵`, unicode superscripts).
@@ -222,8 +247,14 @@ profiling test.
   default: compute / render, `mem cap`, device, live memory —, `controls`
   when the bundle has rows, `2D space`,
   `colorfield`, `isolines`, `streamlines`, `vector field` — isolines and
-  streamlines OFF by default, isosurfaces on at a 3D space's first visit), the `mappings`
-  matrix bottom-left, cursor pane + legend bottom-right. The matrix assigns
+  streamlines OFF by default, isosurfaces on at a 3D space's first visit), the `fields`
+  matrix bottom-left, cursor pane + legend bottom-right. Bundles, manifolds,
+  fields and nets have independent optional `summary` (one line) and
+  `details` (any length); the viewer shows them behind a ⓘ beside the bundle
+  / space pickers and on each field row (hover: summary else details, click:
+  details else summary in a modal; picker alternatives show the summary else
+  the details' first line as their `title` — `bundles/index.json` repeats
+  each bundle's name and summary for that, `apps/viewer/src/info.ts`). The matrix assigns
   fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND
   vector field, as a TREE: names are paths (`train/loss/setosa`), drawn
   flattened with a subtle indent, subtrees collapsed until clicked, a

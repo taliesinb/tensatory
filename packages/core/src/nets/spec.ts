@@ -56,7 +56,7 @@ export const ArrayExprSchema: z.ZodType<ArrayExpr> = z.lazy(() =>
   ]),
 );
 
-const netCommon = { name: z.string().optional(), description: z.string().optional() };
+const netCommon = { name: z.string().optional(), summary: z.string().optional(), details: z.string().optional() };
 
 export const DirectionSchema = z.object({
   arrays: z.record(name, ArraySchema),

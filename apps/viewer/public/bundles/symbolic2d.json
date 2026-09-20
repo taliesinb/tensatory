@@ -1,7 +1,6 @@
 {
  "tensatory": "0.1",
  "name": "symbolic 2D",
- "description": "Fields defined by expressions only, on several 2D planes: bowl and saddle, Rosenbrock, a Gaussian mixture, waves.",
  "manifolds": {
   "plane": {
    "name": "bowl plane",
@@ -9,7 +8,8 @@
    "dimNames": [
     "x",
     "y"
-   ]
+   ],
+   "summary": "x² + y² and its saddle companion x² − y² on one plane; ∇(x² + y²) as an explicit exact gradient"
   },
   "rosen": {
    "name": "Rosenbrock plane",
@@ -17,7 +17,8 @@
    "dimNames": [
     "x",
     "y"
-   ]
+   ],
+   "summary": "the Rosenbrock banana (a = 1, b = 100, log codomain) with its symbolic gradient; minimum at (1, 1)"
   },
   "mix": {
    "name": "mixture plane",
@@ -25,7 +26,8 @@
    "dimNames": [
     "x",
     "y"
-   ]
+   ],
+   "summary": "three Gaussian bumps of different heights and widths (centres A, B, C) and |∇| of the mixture"
   },
   "wavy": {
    "name": "waves plane",
@@ -33,7 +35,8 @@
    "dimNames": [
     "x",
     "y"
-   ]
+   ],
+   "summary": "sin(3x) cos(2y) over one period: a periodic lattice of maxima, minima and saddles"
   }
  },
  "fields": {
@@ -123,7 +126,7 @@
    "kind": "scalar",
    "name": "x² − y²",
    "domain": "plane",
-   "description": "A saddle: the bowl's companion on the same plane.",
+   "details": "A saddle: the bowl's companion on the same plane.",
    "data": {
     "type": "symbolic",
     "box": [
@@ -161,7 +164,7 @@
    "kind": "scalar",
    "name": "Rosenbrock",
    "codomain": "log",
-   "description": "(a - x)² + b (y - x²)², a = 1, b = 100; log-scaled codomain",
+   "details": "(a - x)² + b (y - x²)², a = 1, b = 100; log-scaled codomain",
    "data": {
     "type": "symbolic",
     "box": [
@@ -470,5 +473,6 @@
    ],
    "ordered": true
   }
- }
+ },
+ "summary": "Fields defined by expressions only, on several 2D planes: bowl and saddle, Rosenbrock, a Gaussian mixture, waves."
 }

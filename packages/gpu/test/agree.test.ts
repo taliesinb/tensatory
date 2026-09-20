@@ -14,6 +14,8 @@ import {
   SymbolicVectorFieldData,
   buildScalarFieldData,
   buildVectorFieldData,
+  sliceSpec,
+  sliceable,
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
@@ -157,7 +159,12 @@ describe("example bundles agree on every field and derived use", () => {
   for (const file of files) {
     it(file, async () => {
       if (!gpu) return;
-      const b = Bundle.parse(JSON.parse(readFileSync(join(dir, file), "utf8")));
+      // N-D manifolds (D > 3) reach the GPU only as 2D / 3D slices (the viewer slices before building): test those,
+      // one 2D and one 3D slice per manifold, alternating the axes
+      let spec = JSON.parse(readFileSync(join(dir, file), "utf8"));
+      const nd = Object.keys(spec.manifolds ?? {}).filter((m) => sliceable(spec, m));
+      for (const [i, m] of nd.entries()) { const r = sliceSpec(spec, m, i % 2 ? [0, 2, 3] : [1, 3]); expect(r.dropped).toEqual({}); spec = r.spec; }
+      const b = Bundle.parse(spec);
       expect(b.buildAll().size).toBe(0);
       const gridFor = (d: { samplePoints?: DenseGrid | undefined; box: Box }) => d.samplePoints ?? new DenseGrid(d.box.dimCount === 3 ? [14, 13, 12] : [48, 48], d.box);
       for (const id of b.scalarFieldIds) {

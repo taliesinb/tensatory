@@ -9,7 +9,8 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 |---|---|
 | `index.html` | the panels; controls are plain `<div>`s configured by `data-` attributes |
 | `src/widgets.ts` | tooltips (0.25 s), collapsible panels (state in `tensatory.collapsed`), tick glyphs over hidden checkboxes, the compact slider (drag scrub, shift-hover preview, nullable click/Backspace, wheel "document", arrow nudges, Escape cancels), the discrete slider (one step per wheel gesture), tab bars |
-| `src/metrics.ts` | the mappings matrix: one SVG, hit-testing from pointer coordinates, shift-preview, click-to-lock, wheel/arrows, header clicks toggle panels, dimmed disabled columns, ∇ / \|·\| use glyphs |
+| `src/info.ts` | summary / details of bundles, spaces and fields: option hover texts, the ⓘ icon binding, the details modal |
+| `src/metrics.ts` | the fields matrix: one SVG, hit-testing from pointer coordinates, shift-preview, click-to-lock, wheel/arrows, header clicks toggle panels, dimmed disabled columns, ∇ / \|·\| use glyphs |
 | `src/render2d.ts` | camera (centre, scale, flips, quarter turns as one linear map), cached colormap raster drawn through an affine transform, line layers binned by colour/alpha into `Path2D`s, particle tails (alpha fade, butt caps), point sets, box, crop clip; `overlay` mode draws only box + points over the WebGPU canvas |
 | `src/sampler.ts` | field values on grids: GPU (async, read back) or CPU, cached, NaN outside the field box, optional agreement check |
 | `src/gpuGeometry.ts` | GPU compute + canvas render: exact isolines and streamlines computed on the GPU and read back asynchronously |
@@ -35,9 +36,15 @@ pipelines and either draw with Canvas 2D or upload their results. See
 ## Layout
 
 * **Left super-stack** (one rounded container; strips are coloured rows):
-  `bundle` (picker and space picker, both with wheel/arrow switching; about
-  = the description on one line with the full text as tooltip; R = wipe
-  storage, L = log, ⤒ = open a local JSON), `system` (closed by default:
+  `bundle` (picker and space picker, both with wheel/arrow switching; each
+  gets a ⓘ to its right when the selected bundle / space has a `summary` or
+  `details` — hover = summary else details (the shared 0.25 s tooltip,
+  `cursor: help` like the panel keys), click = details else summary in a
+  modal; hovering an alternative in the dropdown shows its summary, else the
+  first line of its details (the option `title`; for bundles not yet loaded
+  that is the `summary` copied into `bundles/index.json`, which the core
+  bundle test keeps in sync). R = wipe storage, L = log, ⤒ = open a local
+  JSON), `system` (closed by default:
   compute / render modes (choice flippers; unavailable options greyed with
   the reason as tooltip), `mem cap`, device, live memory with the adaptive
   resolution's last decision, and `iso res` — the current grid and segment /
@@ -59,14 +66,14 @@ pipelines and either draw with Canvas 2D or upload their results. See
   first letters `c` / `i` / `s` / `v` are keyboard shortcuts that toggle the
   tick (plain keys only — ⌘C / ⌘V / ⌘S keep their meaning; `c` is inert in 3D
   where the panel is absent) and are the panels' column letters in the
-  mappings matrix.
+  fields matrix.
   Locking a new I_V / S_∇ / V_∇ field while an animation plays pauses the
   animations first (`GEOMETRY_SLOTS` in `setSel`; space resumes): the new
   field's contours / integrations / lattices are recomputed — on the CPU for a
   costly field — and a re-render every frame on top would pile frames up.
   For the same reason a load or a space / bundle switch starts PAUSED whatever
   the saved ▶ ticks say; space resumes, and turning a ▶ on lifts the pause.
-* **mappings** matrix bottom-left, **legend** and **cursor pane** bottom-right,
+* **fields** matrix bottom-left, **legend** and **cursor pane** bottom-right,
   status line bottom centre (errors in red).
 
 ## Logging and the Dock app
@@ -114,12 +121,47 @@ ranges); adjustments commit on release, the rows are inert while an
 animation plays. Rows are per bundle, not per space (iris shows d₂ in the 2D
 space, where it does nothing). Live dragging is the planned follow-up.
 
-## Slots and the mappings matrix
+## Slices: N-D spaces
+
+A manifold with 3 < D ≤ 8 dimensions (core `sliceable`) is shown as an
+axis-aligned 2D or 3D **slice** through the manifold's `origin` (default 0).
+The bundle panel's `slice` row lists the dimensions 1…D as a multi-flipper:
+clicking picks / unpicks (blue); the slice in use is tinted; when the pick has
+2 or 3 dimensions and differs from the committed one a ✓ appears and commits
+it. Committed slices are a per-space option (`slice: {m: [dims]}`, default
+`[0, 1, 2]`); a commit rebuilds the bundle and re-enters the space (a 2-
+slice gets the 2D arm, a 3-slice the 3D arm, everything else as usual).
+
+The slice is a **spec rewrite** done before the Bundle is built
+(`adjustedBundle`: adjustments → slices → box zooms; core
+`sliceSpec(spec, manifold, dims)` in `bundle/slice.ts`), so nothing
+downstream — zod, field data, the GPU transpiler (WGSL has no vec5), the arms
+— ever meets a mixed-dimension object. Semantics are those of the N-D field
+on the slice: scalars f(embed(p)); vectors the components along the slice;
+expressions are rewritten on the normalized AST with N-D vector
+subexpressions UNROLLED into their N components, so `|∇f|`, dot products and
+cosine similarities keep their full N-D meaning and `grad` is differentiated
+in N-D first. A derivative along a fixed dimension (or a fixed component of
+a vector argument) needs the argument's own N-D expression, which is inlined
+on demand (symbolic / pointwise / pullback data, following ids); sampled and
+net arguments cannot be, and the field is then left out of the slice with a
+reason in the `errors` row. Dense grids are sliced at the sample nearest the
+origin; scalar net fields get their point input rewritten to `E·p + o`
+(vector net fields are not sliced yet); point sets are projected (their
+shadow); the manifold keeps its id, gets k dimensions, the sliced `dimNames`
+and its `flow` if that field survived. `core/test/slice.test.ts` checks
+slices against the N-D fields at embedded points (values, derivatives,
+vector projections, dense grids, pullbacks, iris nets); the GPU agreement
+test runs every N-D bundle through a 2D and a 3D slice.
+
+## Slots and the fields matrix
 
 Slots: **C** colorfield, **I_V** isoline value, **I_C** isoline colour,
 **S_∇** streamline direction (vector), **S_C** streamline colour, **V_∇**
 glyph vector field, **V_C** glyph colour. Rows are
-every scalar *and* vector field of the bundle. A slot resolves its field to a
+every scalar *and* vector field of the bundle; a field with a `summary` /
+`details` carries a ⓘ at the right edge of the name column (same hover /
+click behaviour as the pickers' ⓘ; the name is shortened to make room). A slot resolves its field to a
 "use": a vector slot given a scalar uses its gradient (∇ glyph), a scalar
 slot given a vector uses its norm (|·| glyph), otherwise the field itself.
 Derived norms get a log-scaled codomain (`{min: 0, log: "10"}`): gradient
@@ -127,8 +169,12 @@ norms are heavy-tailed — thousands in the corners of the Rosenbrock box,
 vanishing at the minimum — and a linear range hides everything but the corners.
 Defaults: C = I_V = first scalar field, colour slots none (a colour slot equal
 to C would paint lines the raster's own colour and hide them), S_∇ = V_∇ = the
-field's `exactGradient` if any, else the field (→ its gradient). Column
-headers toggle their panel; disabled columns stay visible, dimmed.
+space's `flow` (a manifold's declared dynamical system ẋ = F(x)) if it has one,
+else the field's `exactGradient` if any, else the field (→ its gradient). A
+space with a `flow` also starts its streamline `dir` at *ascending* (forward in
+time; the descending default is for gradients of losses) unless the bundle has
+a saved choice. Column headers toggle their panel; disabled columns stay
+visible, dimmed.
 
 Field names are paths (`train/loss/setosa`): the table draws the name tree
 flattened with a 9 px indent per level and the last segment as label (full
@@ -157,19 +203,23 @@ view box, else the adaptive resolution along the longer side
 ([resolution.md](resolution.md): two tiers, moving ≤ settled, ladder 32 …
 2048, frame / latency / memory feedback; `?res=N` pins it).
 
-### Box zoom (`-` / `=`, `0` resets)
+### Box zoom (`=` in, `-` out, `0` resets)
 
-The wheel zooms the VIEW; `=` / `-` zoom the DOMAIN: every symbolic field of
-the current space (`symbolic` / `symbolicv` / `net` / `netv`, inline
+The wheel zooms the VIEW; `=` / `-` zoom the DOMAIN in / out: every symbolic
+field of the current space (`symbolic` / `symbolicv` / `net` / `netv`, inline
 arguments of pointwise fields and pullbacks included) gets its box scaled by
-1.5 / (1/1.5) around its centre (core `zoomBoxes`, `bundle/zoom.ts`), sampled
+1/1.5 (`=`) or 1.5 (`-`) around its centre (core `zoomBoxes`, `bundle/zoom.ts`), sampled
 fields keep their grid (a space with none of the former says so on the status
 line). It is a spec adjustment like the Controls rows: the exponent is a
 per-space option (`boxZoom: { space: k }`), `rebuildBundle()` applies
 adjustments + zooms to the base spec and clears the field caches, and the
 view / camera re-fits so the new margin is shown. Statistics follow the box
 (symbolic ranges are computed on a grid over it), so colormap ranges widen
-with the domain. A step compiles the kernels that bake the field box
+with the domain — which also means a lone centred blob (a Gaussian) looks
+nearly the same at every zoom: the box fills the same pixels, the colours
+and the isoline levels re-spread over the new range; the legend numbers and
+the status line are the tell. Sliced N-D spaces zoom like any other (the zoom
+is applied to the sliced spec, after the slice). A step compiles the kernels that bake the field box
 (streamlines bake `A` / `B`): one or two pipelines per step, not per frame.
 
 ## Isolines and streamlines in the viewer

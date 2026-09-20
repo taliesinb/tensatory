@@ -11,6 +11,14 @@
 // unselected siblings stay hidden. A path may be a field AND a parent
 // ("train/loss" with "train/loss/setosa" below it); a path that is only a
 // parent ("train") is a pure heading with no matrix cells.
+//
+// A field with a summary / details gets a ⓘ at the right edge of the name
+// column: hover = the summary (else details) tooltip, click = the details modal
+// (info.ts); the name is shortened to leave it room.
+
+import type { Info } from "@tensatory/core";
+import { hoverText, showInfo } from "./info";
+import { installTooltips } from "./widgets";
 
 export type SlotKey = string;
 export const NONE = null;
@@ -33,7 +41,7 @@ export interface SlotDef {
   toggle?: () => void;
 }
 
-export interface MetricsRow { id: string; name: string; kind: FieldKind }
+export interface MetricsRow { id: string; name: string; kind: FieldKind; info?: Info | undefined }
 
 /** how a slot of `type` would use a field of `kind` */
 export const useGlyph = (type: FieldKind, kind: FieldKind): string => (type === kind ? "" : type === "vector" ? "∇" : "|·|");
@@ -57,6 +65,7 @@ interface Node {
   depth: number;
   id?: string;
   kind?: FieldKind;
+  info?: Info | undefined;
   children: Node[];
 }
 
@@ -74,7 +83,7 @@ export class MetricsTable {
   private last: PointerEvent | null = null;
   /** expanded headings (by path); survives rebuilds so a space switch keeps the tree as the user left it */
   private readonly expanded = new Set<string>();
-  private readonly geo = { rowH: 15, headH: 20, nameW: 172, cellW: 24, pad: 4, paneW: 282, indent: 9 };
+  private readonly geo = { rowH: 15, headH: 20, nameW: 172, cellW: 24, pad: 4, paneW: 282, indent: 9, infoW: 16 };
 
   constructor(private readonly o: MetricsTableOptions) {
     if (o.paneW) this.geo.paneW = o.paneW;
@@ -109,7 +118,7 @@ export class MetricsTable {
           if (node.id !== undefined) { // two fields with one name: keep both as siblings (the second under its id)
             node = { path: `${path}${SEP}#${r.id}`, label, depth, children: [] }; siblings.push(node);
           }
-          node.id = r.id; node.kind = r.kind;
+          node.id = r.id; node.kind = r.kind; node.info = r.info;
         }
         siblings = node.children;
       });
@@ -140,7 +149,7 @@ export class MetricsTable {
   /*******************************************************/
   /* pointer logic */
 
-  private hit(e: PointerEvent | WheelEvent): { line: Line; col: SlotKey | "all"; header: boolean; marker: boolean } | null {
+  private hit(e: PointerEvent | WheelEvent): { line: Line; col: SlotKey | "all"; header: boolean; marker: boolean; info: boolean } | null {
     const svg = this.o.body.querySelector("svg");
     if (!svg || !this.lines.length) return null;
     const r = svg.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, g = this.geo;
@@ -148,7 +157,8 @@ export class MetricsTable {
     const row = Math.max(0, Math.min(this.lines.length - 1, Math.floor((y - g.headH) / g.rowH)));
     const line = this.lines[row]!;
     const col = x < g.nameW ? "all" : this.cols[Math.max(0, Math.min(this.cols.length - 1, Math.floor((x - g.nameW) / g.cellW)))]!;
-    return { line, col, header, marker: x < this.nameX(line.node) };
+    const info = !header && line.node.info !== undefined && x >= g.nameW - g.infoW && x < g.nameW;
+    return { line, col, header, marker: x < this.nameX(line.node), info };
   }
 
   /** name-column targets: the visible slots that are set, or all of them */
@@ -162,7 +172,7 @@ export class MetricsTable {
     this.o.setSel(this.prev!.col === "all" ? this.allSlots(id) : { [this.prev!.col]: id }, false);
   }
   private readonly global = (e: PointerEvent) => { if (!e.shiftKey) { this.end(); return; } const h = this.hit(e); if (h) this.apply(h); };
-  private start(e: PointerEvent): void { const h = this.hit(e); if (this.prev || !h || h.header) return; this.prev = { col: h.col }; window.addEventListener("pointermove", this.global); this.apply(h); }
+  private start(e: PointerEvent): void { const h = this.hit(e); if (this.prev || !h || h.header || h.info) return; this.prev = { col: h.col }; window.addEventListener("pointermove", this.global); this.apply(h); }
   private end(): void { if (!this.prev) return; this.prev = null; window.removeEventListener("pointermove", this.global); this.o.setSel({ ...this.o.lockedSel() }, false); }
 
   private step(e: PointerEvent | WheelEvent, dir: number): void {
@@ -225,10 +235,19 @@ export class MetricsTable {
         const dim = !open && lines[r + 1]?.forced === true && lines[r + 1]!.node.depth > node.depth;
         el("text", { x: x - g.indent + 4, y: y + g.rowH - 4, fill: dim ? "#6a7690" : "#8a96b0", "font-size": 11, "text-anchor": "middle", "pointer-events": "none" }, open ? "\u2212" : "+");
       }
-      const maxChars = Math.max(6, Math.floor((g.nameW - x - 2) / 6.4));
+      const maxChars = Math.max(6, Math.floor((g.nameW - x - 2 - (node.info ? g.infoW : 0)) / 6.4));
       const name = node.label.length > maxChars ? `${node.label.slice(0, maxChars - 1)}…` : node.label;
       const t = el("text", { x, y: y + g.rowH - 4, fill: heading ? "#7c869c" : "#aab" }, name);
       if (node.label !== node.path) { const title = document.createElementNS(ns, "title"); title.textContent = node.path; t.appendChild(title); }
+      if (node.info) {
+        // ⓘ at the right edge of the name column; its tooltip goes through the shared [data-tip] mechanism
+        const cx = g.nameW - g.infoW / 2 - 1, cy = y + g.rowH / 2;
+        const grp = document.createElementNS(ns, "g");
+        grp.dataset.tip = hoverText(node.info); grp.style.cursor = "help"; grp.setAttribute("class", "info");
+        const c = document.createElementNS(ns, "circle"); c.setAttribute("cx", String(cx)); c.setAttribute("cy", String(cy)); c.setAttribute("r", "5"); c.setAttribute("fill", "transparent"); c.setAttribute("stroke", "#6a7690"); c.setAttribute("stroke-width", "1");
+        const i = document.createElementNS(ns, "text"); i.setAttribute("x", String(cx)); i.setAttribute("y", String(cy + 3)); i.setAttribute("text-anchor", "middle"); i.setAttribute("font-size", "8"); i.setAttribute("font-style", "italic"); i.setAttribute("font-family", "Georgia, 'Times New Roman', serif"); i.setAttribute("fill", "#8a96b0"); i.setAttribute("pointer-events", "none"); i.textContent = "i";
+        grp.append(c, i); svg.appendChild(grp);
+      }
       if (heading) return;
       cols.forEach((k, c) => {
         el("rect", { x: g.nameW + c * g.cellW + 1.5, y: y + 1.5, width: g.cellW - 3, height: g.rowH - 3, fill: "#232a3a", "data-slot": k, "data-id": node.id! });
@@ -243,6 +262,7 @@ export class MetricsTable {
     svg.addEventListener("pointermove", (e) => { this.last = e; });
     svg.addEventListener("pointerdown", (e) => {
       const h = this.hit(e); this.end(); if (!h) return;
+      if (h.info) { showInfo(h.line.node.info!); return; }
       if (h.header) { if (h.col !== "all") this.o.slots.find((s) => s.key === h.col)?.toggle?.(); return; }
       const n = h.line.node;
       // headings toggle from anywhere in the name column; a field that is also a parent toggles from its marker only
@@ -257,6 +277,7 @@ export class MetricsTable {
     });
     svg.addEventListener("wheel", (e) => { if (e.shiftKey) return; e.preventDefault(); if (e.deltaY && !this.hit(e)?.header) this.step(e, e.deltaY > 0 ? 1 : -1); }, { passive: false });
     body.appendChild(svg);
+    installTooltips(svg);
     this.paint();
     this.o.onLayout?.();
   }

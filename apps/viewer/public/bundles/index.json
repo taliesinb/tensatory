@@ -1,26 +1,42 @@
 [
   {
     "file": "symbolic2d.json",
-    "name": "symbolic 2D"
+    "name": "symbolic 2D",
+    "summary": "Fields defined by expressions only, on several 2D planes: bowl and saddle, Rosenbrock, a Gaussian mixture, waves."
   },
   {
     "file": "symbolic3d.json",
-    "name": "symbolic 3D"
+    "name": "symbolic 3D",
+    "summary": "Fields defined by expressions only, on several 3D volumes: spheres and tori, a Gaussian mixture, the gyroid, 3D Rosenbrock."
   },
   {
     "file": "dense.json",
-    "name": "dense sampled landscape"
+    "name": "dense sampled landscape",
+    "summary": "A 25×25 grid of inline samples (a synthetic 'loss'), its exact gradient from the collection phase, an 'accuracy' with a fraction codomain, and derived fields."
   },
   {
     "file": "arrays.json",
-    "name": "array-defined fields"
+    "name": "array-defined fields",
+    "summary": "Dense fields whose sample arrays are themselves defined symbolically (cell index expressions), constant, or one-hot."
   },
   {
     "file": "iris.json",
-    "name": "iris MLP (net evaluator)"
+    "name": "iris MLP",
+    "summary": "A 4-16-3 ReLU MLP trained on iris; validation and training loss / accuracy / per-class loss landscapes around θ* along 2 or 3 random directions (reseed / rescale in Controls)."
   },
   {
     "file": "navier-stokes.json",
-    "name": "Navier–Stokes blowup (closed-form pieces)"
+    "name": "Navier–Stokes blowup (closed-form pieces)",
+    "summary": "The two closed-form pieces of the 2026 finite-time-blowup construction for 3D Navier–Stokes at one snapshot τ: the exact heat-exterior vortex and the leading-order concentrating core."
+  },
+  {
+    "file": "dynamical-systems.json",
+    "name": "dynamical systems (textbook)",
+    "summary": "Textbook continuous dynamical systems ẋ = F(x), one space each: linear zoo, gradient flows, pendulum, Duffing, Van der Pol, Hopf, Lotka–Volterra, competition, saddle-focus, Lorenz, Rössler."
+  },
+  {
+    "file": "symbolic-nd.json",
+    "name": "symbolic N-D",
+    "summary": "Symbolic fields on 4D and 5D spaces — Gaussians, quadratic forms, Rosenbrock, waves — viewed through 2D / 3D slices (the slice row of the bundle panel)."
   }
 ]

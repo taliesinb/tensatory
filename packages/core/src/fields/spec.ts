@@ -98,7 +98,8 @@ export const VectorFieldDataSchema: z.ZodType<VectorFieldDataSpec> = z.lazy(() =
 const fieldCommon = {
   domain: z.string().optional(),
   name: z.string().optional(),
-  description: z.string().optional(),
+  summary: z.string().optional(),
+  details: z.string().optional(),
 };
 
 const ScalarFieldObject = z.object({

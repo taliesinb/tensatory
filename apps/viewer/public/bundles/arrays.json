@@ -1,164 +1,164 @@
 {
-  "tensatory": "0.1",
-  "name": "array-defined fields",
-  "description": "Dense fields whose sample arrays are themselves defined symbolically (cell index expressions), constant, or one-hot.",
-  "fields": {
-    "checker": {
-      "kind": "scalar",
-      "name": "checkerboard (symbolic array)",
-      "data": {
-        "type": "dense",
-        "box": [
-          [
-            0,
-            8
-          ],
-          [
-            0,
-            8
-          ]
-        ],
-        "samples": {
-          "type": "symbolic",
-          "shape": [
-            9,
-            9
-          ],
-          "expr": {
-            "op": "mod",
-            "vals": [
-              {
-                "op": "add",
-                "vals": [
-                  {
-                    "op": "coord",
-                    "index": 0
-                  },
-                  {
-                    "op": "coord",
-                    "index": 1
-                  }
-                ]
-              },
-              2
-            ]
-          }
-        }
-      }
-    },
-    "ramp": {
-      "kind": "scalar",
-      "name": "radial ramp (symbolic array, origin at centre)",
-      "codomain": "distance",
-      "data": {
-        "type": "dense",
-        "box": [
-          [
-            -1,
-            1
-          ],
-          [
-            -1,
-            1
-          ]
-        ],
-        "samples": {
-          "type": "symbolic",
-          "shape": [
-            33,
-            33
-          ],
-          "origin": [
-            16,
-            16
-          ],
-          "expr": {
-            "op": "norm",
-            "vec": {
-              "op": "coordv"
-            }
-          }
-        }
-      }
-    },
-    "hot": {
-      "kind": "scalar",
-      "name": "one-hot rows",
-      "data": {
-        "type": "dense",
-        "samples": {
-          "type": "oneHot",
-          "shape": [
-            5,
-            5
-          ],
-          "pos": [
-            0,
-            1,
-            2,
-            3,
-            4
-          ]
-        }
-      }
-    },
-    "blend": {
-      "kind": "scalar",
-      "name": "0.5\u00b7ramp\u00b2 + bowl (pointwise, mixed sampled/symbolic)",
-      "data": {
-        "type": "pointwise",
-        "expr": {
-          "op": "add",
-          "vals": [
-            {
-              "op": "mul",
-              "vals": [
-                0.5,
-                {
-                  "op": "square",
-                  "val": "r"
-                }
-              ]
-            },
-            "b"
-          ]
-        },
-        "scalars": {
-          "r": "ramp",
-          "b": {
-            "type": "symbolic",
-            "box": [
-              [
-                -1,
-                1
-              ],
-              [
-                -1,
-                1
-              ]
-            ],
-            "expr": {
-              "op": "add",
-              "vals": [
-                {
-                  "op": "square",
-                  "val": {
-                    "op": "coord",
-                    "index": 0
-                  }
-                },
-                {
-                  "op": "square",
-                  "val": {
-                    "op": "coord",
-                    "index": 1
-                  }
-                }
-              ]
-            }
-          }
-        }
-      }
+ "tensatory": "0.1",
+ "name": "array-defined fields",
+ "fields": {
+  "checker": {
+   "kind": "scalar",
+   "name": "checkerboard (symbolic array)",
+   "data": {
+    "type": "dense",
+    "box": [
+     [
+      0,
+      8
+     ],
+     [
+      0,
+      8
+     ]
+    ],
+    "samples": {
+     "type": "symbolic",
+     "shape": [
+      9,
+      9
+     ],
+     "expr": {
+      "op": "mod",
+      "vals": [
+       {
+        "op": "add",
+        "vals": [
+         {
+          "op": "coord",
+          "index": 0
+         },
+         {
+          "op": "coord",
+          "index": 1
+         }
+        ]
+       },
+       2
+      ]
+     }
     }
+   }
+  },
+  "ramp": {
+   "kind": "scalar",
+   "name": "radial ramp (symbolic array, origin at centre)",
+   "codomain": "distance",
+   "data": {
+    "type": "dense",
+    "box": [
+     [
+      -1,
+      1
+     ],
+     [
+      -1,
+      1
+     ]
+    ],
+    "samples": {
+     "type": "symbolic",
+     "shape": [
+      33,
+      33
+     ],
+     "origin": [
+      16,
+      16
+     ],
+     "expr": {
+      "op": "norm",
+      "vec": {
+       "op": "coordv"
+      }
+     }
+    }
+   }
+  },
+  "hot": {
+   "kind": "scalar",
+   "name": "one-hot rows",
+   "data": {
+    "type": "dense",
+    "samples": {
+     "type": "oneHot",
+     "shape": [
+      5,
+      5
+     ],
+     "pos": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ]
+    }
+   }
+  },
+  "blend": {
+   "kind": "scalar",
+   "name": "0.5·ramp² + bowl (pointwise, mixed sampled/symbolic)",
+   "data": {
+    "type": "pointwise",
+    "expr": {
+     "op": "add",
+     "vals": [
+      {
+       "op": "mul",
+       "vals": [
+        0.5,
+        {
+         "op": "square",
+         "val": "r"
+        }
+       ]
+      },
+      "b"
+     ]
+    },
+    "scalars": {
+     "r": "ramp",
+     "b": {
+      "type": "symbolic",
+      "box": [
+       [
+        -1,
+        1
+       ],
+       [
+        -1,
+        1
+       ]
+      ],
+      "expr": {
+       "op": "add",
+       "vals": [
+        {
+         "op": "square",
+         "val": {
+          "op": "coord",
+          "index": 0
+         }
+        },
+        {
+         "op": "square",
+         "val": {
+          "op": "coord",
+          "index": 1
+         }
+        }
+       ]
+      }
+     }
+    }
+   }
   }
+ },
+ "summary": "Dense fields whose sample arrays are themselves defined symbolically (cell index expressions), constant, or one-hot."
 }

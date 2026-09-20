@@ -23,7 +23,8 @@ export type PointSetSpec = {
 export type BundleSpec = {
   tensatory: typeof BUNDLE_VERSION;
   name?: ShowString;
-  description?: ShowString;
+  summary?: ShowString; // one line
+  details?: ShowString; // any length
   manifolds?: Record<ManifoldId, ManifoldDefinitionSpec>;
   defaultManifold?: ManifoldId; // used by fields without `domain`; defaults to the sole manifold if there is exactly one
   fields: Record<FieldId, FieldSpec>;
