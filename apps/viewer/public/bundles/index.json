@@ -18,5 +18,9 @@
   {
     "file": "iris.json",
     "name": "iris MLP (net evaluator)"
+  },
+  {
+    "file": "navier-stokes.json",
+    "name": "Navier–Stokes blowup (closed-form pieces)"
   }
 ]

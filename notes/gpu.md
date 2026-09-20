@@ -161,10 +161,14 @@ Each pass has a test in `test/passes.test.ts` asserting agreement with core.
   readback of the partials, folded on the CPU. NaN/±∞ samples are skipped by
   bit test (`isfinite_`). Returns the same `Stats` shape as core's
   `computeStats` (`posMin` for log codomains). The viewer's `rangeOf` uses it
-  for symbolic fields in gpu compute mode: a provisional range from a 24×24 CPU
-  grid is returned synchronously (sliders and legend need a number at once),
-  the reduction over the field's default stats grid replaces it when it lands
-  and marks the frame dirty. Sampled data keeps core's precomputed stats.
+  for symbolic fields in gpu compute mode, 2D and 3D: a provisional range from a
+  coarse CPU grid (24², 10³) is returned synchronously (sliders and legend need
+  a number at once), the reduction over the field's default stats grid (128²,
+  32³) replaces it when it lands and marks the frame dirty. The coarse grid is
+  the only main-thread sampling of a symbolic field, so it is kept small: the
+  Navier–Stokes bundle's closed-form vorticity costs ~0.1 ms per point on the
+  CPU, and core's 32³ default (which 3D used to sample directly) froze the page
+  for 25 s. Sampled data keeps core's precomputed stats.
 * `blurResidentSync(backend, src, radius)` — separable, edge-truncated box
   blur of a resident grid, NaN propagating, identical to core's `boxBlur`
   (returns `src` unchanged for radius ≤ 0 or multi-channel grids). The viewer
