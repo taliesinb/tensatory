@@ -12,8 +12,62 @@ import { VERT_WGSL, type GpuMesh } from "./mesh";
 import type { Lut, ValueMap } from "./render";
 import { SEG_FLOATS, type GpuSegments } from "./segments";
 
-/** orbit camera: looks at `target` from `distance` along (yaw, pitch); perspective with vertical `fov` */
-export interface Camera3D { target: [number, number, number]; distance: number; yaw: number; pitch: number; fov: number }
+/** unit quaternion [x, y, z, w] */
+export type Quat = [number, number, number, number];
+/**
+ * orbit camera: looks at `target` from `distance`, oriented by `rot` — the rotation taking the camera frame
+ * (x right, y up, z towards the eye: the camera looks along −z) to world; perspective with vertical `fov`.
+ * A quaternion rather than yaw / pitch so the camera can roll over the poles (no gimbal lock, no clamp).
+ */
+export interface Camera3D { target: [number, number, number]; distance: number; rot: Quat; fov: number }
+
+/** q · p (apply p first, then q) */
+export function quatMul(q: Quat, p: Quat): Quat {
+  const [qx, qy, qz, qw] = q, [px, py, pz, pw] = p;
+  return [qw * px + qx * pw + qy * pz - qz * py, qw * py - qx * pz + qy * pw + qz * px, qw * pz + qx * py - qy * px + qz * pw, qw * pw - qx * px - qy * py - qz * pz];
+}
+/** rotation by `angle` (radians, right-handed) about `axis` (any length; a zero axis gives the identity) */
+export function quatAxisAngle(axis: ArrayLike<number>, angle: number): Quat {
+  const l = Math.hypot(axis[0]!, axis[1]!, axis[2]!);
+  if (l < 1e-12) return [0, 0, 0, 1];
+  const s = Math.sin(angle / 2) / l;
+  return [axis[0]! * s, axis[1]! * s, axis[2]! * s, Math.cos(angle / 2)];
+}
+export function quatNormalize(q: Quat): Quat {
+  const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+}
+/** rotate vector `v` by `q` */
+export function quatRotate(q: Quat, v: ArrayLike<number>): [number, number, number] {
+  const [x, y, z, w] = q, vx = v[0]!, vy = v[1]!, vz = v[2]!;
+  // t = 2 (q_v × v); v' = v + w t + q_v × t
+  const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+  return [vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx];
+}
+/**
+ * the orientation of a camera whose eye lies along `dir` from the target (world) with `up` as near vertical as
+ * possible on screen; when `dir` is parallel to `up`, `altUp` (default world y) takes its place.
+ */
+export function quatLook(dir: ArrayLike<number>, up: ArrayLike<number> = [0, 0, 1], altUp: ArrayLike<number> = [0, 1, 0]): Quat {
+  const z = norm3([dir[0]!, dir[1]!, dir[2]!]);
+  let x = cross3([up[0]!, up[1]!, up[2]!], z);
+  if (Math.hypot(x[0]!, x[1]!, x[2]!) < 1e-6) x = cross3([altUp[0]!, altUp[1]!, altUp[2]!], z);
+  x = norm3(x);
+  const y = cross3(z, x);
+  // rotation matrix with columns x, y, z → quaternion (Shepperd's method)
+  const m00 = x[0]!, m10 = x[1]!, m20 = x[2]!, m01 = y[0]!, m11 = y[1]!, m21 = y[2]!, m02 = z[0]!, m12 = z[1]!, m22 = z[2]!;
+  const tr = m00 + m11 + m22;
+  let q: Quat;
+  if (tr > 0) { const s = Math.sqrt(tr + 1) * 2; q = [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, s / 4]; }
+  else if (m00 > m11 && m00 > m22) { const s = Math.sqrt(1 + m00 - m11 - m22) * 2; q = [s / 4, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]; }
+  else if (m11 > m22) { const s = Math.sqrt(1 + m11 - m00 - m22) * 2; q = [(m01 + m10) / s, s / 4, (m12 + m21) / s, (m02 - m20) / s]; }
+  else { const s = Math.sqrt(1 + m22 - m00 - m11) * 2; q = [(m02 + m20) / s, (m12 + m21) / s, s / 4, (m10 - m01) / s]; }
+  return quatNormalize(q);
+}
+/** the camera's world-space axes: right, up, back (towards the eye) */
+export function cameraAxes(c: Camera3D): { right: [number, number, number]; up: [number, number, number]; back: [number, number, number] } {
+  return { right: quatRotate(c.rot, [1, 0, 0]), up: quatRotate(c.rot, [0, 1, 0]), back: quatRotate(c.rot, [0, 0, 1]) };
+}
 
 export interface GpuMeshLayer {
   mesh: GpuMesh;
@@ -85,10 +139,20 @@ const dot3 = (a: number[], b: number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]!
 const cross3 = (a: number[], b: number[]) => [a[1]! * b[2]! - a[2]! * b[1]!, a[2]! * b[0]! - a[0]! * b[2]!, a[0]! * b[1]! - a[1]! * b[0]!];
 const norm3 = (a: number[]) => { const l = Math.hypot(a[0]!, a[1]!, a[2]!) || 1; return [a[0]! / l, a[1]! / l, a[2]! / l]; };
 
-/** eye position of an orbit camera (z up) */
+/** eye position of an orbit camera */
 export function cameraEye(c: Camera3D): [number, number, number] {
-  const cp = Math.cos(c.pitch);
-  return [c.target[0] + c.distance * cp * Math.cos(c.yaw), c.target[1] + c.distance * cp * Math.sin(c.yaw), c.target[2] + c.distance * Math.sin(c.pitch)];
+  const b = quatRotate(c.rot, [0, 0, 1]);
+  return [c.target[0] + c.distance * b[0], c.target[1] + c.distance * b[1], c.target[2] + c.distance * b[2]];
+}
+/** world → camera: the inverse of the camera's rigid transform (rows = its axes) */
+function cameraView(c: Camera3D, eye: number[]): Mat4 {
+  const { right: x, up: y, back: z } = cameraAxes(c);
+  const m = new Float32Array(16);
+  m[0] = x[0]; m[4] = x[1]; m[8] = x[2]; m[12] = -dot3(x, eye);
+  m[1] = y[0]; m[5] = y[1]; m[9] = y[2]; m[13] = -dot3(y, eye);
+  m[2] = z[0]; m[6] = z[1]; m[10] = z[2]; m[14] = -dot3(z, eye);
+  m[15] = 1;
+  return m;
 }
 /**
  * view / projection of an orbit camera for a canvas of `aspect` (width / height). With `region` (fractions of the
@@ -99,7 +163,7 @@ export function cameraEye(c: Camera3D): [number, number, number] {
 export function cameraMatrices(c: Camera3D, aspect: number, radius: number, region?: [number, number, number, number]): { view: Mat4; proj: Mat4; viewProj: Mat4; eye: [number, number, number] } {
   const eye = cameraEye(c);
   const near = Math.max(1e-3 * radius, c.distance - 2 * radius), far = c.distance + 2 * radius;
-  const view = lookAt(eye, c.target, [0, 0, 1]);
+  const view = cameraView(c, eye);
   let proj = perspective(c.fov, aspect * regionAspect(region), near, far);
   if (region) {
     const [x0, y0, x1, y1] = region;

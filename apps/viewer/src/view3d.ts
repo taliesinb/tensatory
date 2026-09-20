@@ -42,6 +42,11 @@ import {
   isResidentGrid,
   VERT_LAYOUT,
   SEG3_LAYOUT,
+  cameraAxes,
+  quatAxisAngle,
+  quatLook,
+  quatMul,
+  quatNormalize,
   type Camera3D,
   type ColourSource,
   type RecolourProgress,
@@ -161,7 +166,11 @@ export interface Frame3DInfo { n: number; grid: number[]; triangles: number; cap
 
 export class View3D implements MemoryUser {
   readonly renderer: GpuRenderer3D;
-  camera: Camera3D = { target: [0, 0, 0], distance: 8, yaw: -0.9, pitch: 0.55, fov: 0.7 };
+  /** the default orientation: from +x, −y, +z (the old yaw −0.9 / pitch 0.55), z up */
+  static readonly DEFAULT_ROT = quatLook([Math.cos(0.55) * Math.cos(-0.9), Math.cos(0.55) * Math.sin(-0.9), Math.sin(0.55)]);
+  /** radians of orbit per css px of drag */
+  static readonly ORBIT_RAD_PX = 0.008;
+  camera: Camera3D = { target: [0, 0, 0], distance: 8, rot: View3D.DEFAULT_ROT, fov: 0.7 };
   /** true after the user orbited / zoomed; a fitted camera is re-fitted when the box changes */
   cameraCustom = false;
   /** what the last frame drew: for the resolution row and the adaptive-resolution loop */
@@ -290,10 +299,28 @@ export class View3D implements MemoryUser {
     this.cameraCustom = false;
   }
 
-  /** orbit by a pointer drag (css px) */
+  /**
+   * frame the box looking at its centre from direction `dir` (world), z up on screen — or y up when looking along
+   * z: the xy / yz / xz / xyz presets. Counts as a user orientation (saved, not re-fitted on a box change).
+   */
+  look(dir: [number, number, number]): void {
+    this.fit();
+    this.camera.rot = quatLook(dir);
+    this.cameraCustom = true;
+  }
+
+  /**
+   * orbit by a pointer drag (css px): horizontal motion turns the camera about the world vertical (a turntable —
+   * reversed while the camera is upside down, so the scene always follows the pointer), vertical motion about the
+   * camera's own horizontal axis, with no limit: the camera rolls over the poles and comes back upside down
+   * (no gimbal lock; a vertical fling tumbles forever).
+   */
   orbit(dx: number, dy: number): void {
-    this.camera.yaw -= dx * 0.008;
-    this.camera.pitch = Math.max(-1.5, Math.min(1.5, this.camera.pitch + dy * 0.008));
+    const { right, up } = cameraAxes(this.camera);
+    const upright = up[2] >= 0 ? 1 : -1;
+    const yaw = quatAxisAngle([0, 0, 1], -dx * View3D.ORBIT_RAD_PX * upright);
+    const pitch = quatAxisAngle(right, -dy * View3D.ORBIT_RAD_PX);
+    this.camera.rot = quatNormalize(quatMul(quatMul(yaw, pitch), this.camera.rot));
     this.cameraCustom = true;
   }
 
@@ -337,20 +364,17 @@ export class View3D implements MemoryUser {
     this.flingVel = [vx * View3D.FLING_GAIN, vy * View3D.FLING_GAIN];
     return true;
   }
-  /** advance the spin by `dt` seconds; returns whether the camera moved. A pitch spin stops at the pole. */
+  /** advance the spin by `dt` seconds; returns whether the camera moved (a pitch spin tumbles over the poles) */
   flingTick(dt: number): boolean {
     if (!this.flingVel) return false;
-    const pitch = this.camera.pitch;
     this.orbit(this.flingVel[0] * dt, this.flingVel[1] * dt);
-    if (this.flingVel[1] !== 0 && this.camera.pitch === pitch && Math.abs(pitch) >= 1.5) { if (this.flingVel[0] === 0) { this.flingVel = undefined; return true; } this.flingVel = [this.flingVel[0], 0]; }
     return true;
   }
   get flinging(): boolean { return this.flingVel !== undefined; }
   /** pan the target in the view plane */
   pan(dx: number, dy: number): void {
     const s = (2 * this.camera.distance * Math.tan(this.camera.fov / 2)) / this.regionHeight();
-    const cy = Math.cos(this.camera.yaw), sy = Math.sin(this.camera.yaw), cp = Math.cos(this.camera.pitch), sp = Math.sin(this.camera.pitch);
-    const right = [-sy, cy, 0], up = [-sp * cy, -sp * sy, cp];
+    const { right, up } = cameraAxes(this.camera);
     const t = this.camera.target;
     this.camera.target = [t[0] - (dx * right[0]! - dy * up[0]!) * s, t[1] - (dx * right[1]! - dy * up[1]!) * s, t[2] - (dx * right[2]! - dy * up[2]!) * s];
     this.cameraCustom = true;

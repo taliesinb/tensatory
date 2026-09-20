@@ -338,11 +338,19 @@ profiling test.
   marching tetrahedra (`core/src/iso/marchingTets.ts`, tables shared with the
   fused GPU kernel in `gpu/src/mesh.ts`) into a triangle soup with gradient
   normals (exact for symbolic fields) pointing towards increasing values;
-  `GpuRenderer3D` = orbit camera (an orbit drag released while the pointer
-  still moves FLINGS: the camera keeps turning at an eighth of the mean
-  velocity of the last 80 ms of the drag, if above 40 px/s — a click or a
-  drag that came to rest does not; a release within 30° of horizontal /
-  vertical snaps to a pure yaw / pitch spin; any pointerdown stops it;
+  `GpuRenderer3D` = orbit camera — a QUATERNION (`Camera3D.rot`, camera
+  frame → world; `quat*` helpers in `render3d.ts`), not yaw / pitch, so
+  there is no gimbal lock and no pitch clamp: horizontal drag turns about
+  the world vertical (sign flipped while upside down so the scene follows
+  the pointer), vertical drag about the camera's right axis and over the
+  poles; `view` presets xy / yz / xz / xyz (`View3D.look(dir)`, `data-look`)
+  frame the box face-on / from the (1, −1, 1) diagonal; saved yaw / pitch
+  cameras are converted on load (`savedCamera`). An orbit drag released
+  while the pointer still moves FLINGS: the camera keeps turning at an
+  eighth of the mean velocity of the last 80 ms of the drag, if above
+  40 px/s — a click or a drag that came to rest does not; a release within
+  30° of horizontal / vertical snaps to a pure yaw / pitch spin (a pitch
+  spin tumbles through the poles forever); any pointerdown stops it;
   `View3D.fling*`), vertex-pulled meshes via drawIndirect,
   two-sided headlight, weighted-blended OIT for translucent levels, depth-
   tested thick lines (box, trajectories, face outlines, streamlines); points /

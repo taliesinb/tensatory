@@ -55,7 +55,7 @@ import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
 import { ControlsPane } from "./controls";
-import { GpuRenderer, type Camera3D, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
+import { GpuRenderer, type Camera3D, type Quat, quatLook, quatNormalize, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
   installTicks,
@@ -1297,6 +1297,13 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
 interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
+/** a saved camera, with the orientation of one saved as yaw / pitch (before the quaternion camera) converted and a malformed `rot` dropped */
+function savedCamera(c: Partial<Camera3D> & { yaw?: number; pitch?: number }): Partial<Camera3D> {
+  const { yaw, pitch, rot, ...rest } = c;
+  if (Array.isArray(rot) && rot.length === 4 && rot.every(Number.isFinite) && Math.hypot(...rot) > 1e-6) return { ...rest, rot: quatNormalize(rot as Quat) };
+  if (typeof yaw === "number" && typeof pitch === "number" && Number.isFinite(yaw) && Number.isFinite(pitch)) return { ...rest, rot: quatLook([Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch)]) };
+  return rest;
+}
 interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number> }
 /**
  * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
@@ -1345,7 +1352,7 @@ function loadOpts(): boolean {
     if (so?.view) { renderer.view = { ...renderer.view, ...so.view }; viewCustom = so.view.scale !== undefined; }
     // dir.stream used to be the integration sign (now the `sdir` UI value): saves without `sdir` predate that and are not playback directions
     if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: o.ui?.sdir !== undefined && so.dir.stream === -1 ? -1 : 1 };
-    if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...so.camera }; view3d.cameraCustom = true; }
+    if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...savedCamera(so.camera) }; view3d.cameraCustom = true; }
     if (so?.res) autoRes().restore(so.res); // the last good resolutions of this space
     guardResolution(); // ... unless a costly field is selected: those start from the bottom
     syncPlayGlyphs();
@@ -1604,6 +1611,14 @@ let viewCustom = false; // true after a pan / zoom; a fitted view is re-fitted o
 const fitView = () => { renderer.fit(viewBox, viewRegion()); viewCustom = false; };
 const refit = () => { if (spaceDims() === 3) view3d?.fit(); else fitView(); state.dirty = true; saveOptsSoon(); };
 $("fit").onclick = refit;
+// 3D view presets: look at the box's centre from the direction in data-look (xy / yz / xz face-on, xyz diagonal)
+for (const b of document.querySelectorAll<HTMLButtonElement>("#viewBar [data-look]")) {
+  b.onclick = () => {
+    const dir = b.dataset.look!.split(",").map(Number) as [number, number, number];
+    view3d?.look(dir);
+    state.dirty = true; saveOptsSoon();
+  };
+}
 /** after an orientation change: reflect it on the buttons and keep a fitted view fitted */
 function orientationChanged(): void {
   $("flipx").classList.toggle("active", renderer.view.flipX);
