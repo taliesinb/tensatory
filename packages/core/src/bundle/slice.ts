@@ -38,8 +38,11 @@
 
 import type {
   ArrayExpr,
+  ArraySpec,
   BundleSpec,
+  CurveSpec,
   FieldSpec,
+  InlineArraySpec,
   ManifoldDefinitionSpec,
   NetScalarFieldDataSpec,
   PointSetSpec,
@@ -48,7 +51,7 @@ import type {
   SymbolicVector,
   VectorFieldDataSpec,
 } from "@tensatory/schema";
-import { buildArray, noArrays, type ArrayResolver } from "../arrays/spec";
+import { buildAnyArray, buildArray, noArrays, type ArrayResolver } from "../arrays/spec";
 import { NdArray } from "../arrays/ndarray";
 import { SpecError } from "../errors";
 import { Box } from "../geometry/box";
@@ -615,6 +618,25 @@ export function sliceSpec(spec: BundleSpec, manifold: string, dims: readonly num
     if (domainOf(spec, ps.domain) !== manifold) { pointSets[id] = ps; continue; }
     pointSets[id] = { ...ps, points: ps.points.map((p) => sorted.map((d) => p[d]!)) };
   }
+  // curves: sampled ones are projected (points and velocities become inline arrays over the kept dims); the rest
+  // (symbolic, flow, pullbacks) would need the expression rewrite and are left out with a reason
+  const curves: Record<string, CurveSpec> = {};
+  for (const [id, c] of Object.entries(spec.curves ?? {})) {
+    if (domainOf(spec, c.domain) !== manifold) { curves[id] = c; continue; }
+    if (c.data.type !== "sampled") { dropped[`curves.${id}`] = `${c.data.type} curves are not sliced yet`; continue; }
+    try {
+      const project = (a: ArraySpec, what: string): InlineArraySpec => {
+        const arr = buildAnyArray(a, ["curves", id, "data", what], arrays);
+        if (arr.ndim !== 2 || arr.shape[1] !== D) throw new NotSliceable(`${what} of rank ${arr.ndim} on a ${D}D manifold`);
+        const N = arr.shape[0]!, data: number[] = [];
+        for (let i = 0; i < N; i++) for (const d of sorted) data.push(arr.data[i * D + d]!);
+        return { type: "inline", shape: [N, sorted.length], data };
+      };
+      curves[id] = { ...c, data: { ...c.data, points: project(c.data.points, "points"), ...(c.data.velocities ? { velocities: project(c.data.velocities, "velocities") } : {}) } };
+    } catch (e) {
+      if (e instanceof NotSliceable || e instanceof SpecError) dropped[`curves.${id}`] = e.message; else throw e;
+    }
+  }
 
   const { origin: _o, ...rest } = m;
   const manifoldSpec: ManifoldDefinitionSpec = {
@@ -625,5 +647,5 @@ export function sliceSpec(spec: BundleSpec, manifold: string, dims: readonly num
     ...(m.flow !== undefined && !(m.flow in fields) ? { flow: undefined } : {}),
   };
   if (manifoldSpec.flow === undefined) delete manifoldSpec.flow;
-  return { spec: { ...spec, manifolds: { ...spec.manifolds, [manifold]: manifoldSpec }, fields, ...(spec.pointSets ? { pointSets } : {}) }, dropped };
+  return { spec: { ...spec, manifolds: { ...spec.manifolds, [manifold]: manifoldSpec }, fields, ...(spec.pointSets ? { pointSets } : {}), ...(spec.curves ? { curves } : {}) }, dropped };
 }

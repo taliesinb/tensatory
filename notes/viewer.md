@@ -73,8 +73,24 @@ pipelines and either draw with Canvas 2D or upload their results. See
   costly field — and a re-render every frame on top would pile frames up.
   For the same reason a load or a space / bundle switch starts PAUSED whatever
   the saved ▶ ticks say; space resumes, and turning a ▶ on lifts the pause.
-* **fields** matrix bottom-left, **legend** and **cursor pane** bottom-right,
-  status line bottom centre (errors in red).
+* **Bottom-left column** (`#bottomLeft`; the left stack's max-height leaves
+  room for it): the **curves** panel — present when the space has curves —
+  above the **fields** matrix. One row per curve: its name (click = show /
+  hide; struck through when hidden), the shown range readout in the curve's
+  parameter (`param`: name, unit, codomain formatting; "all" when
+  unrestricted), a ⓘ for its summary / details, and beneath them an interval
+  slider over [t₀, t₁] with the crop-range gestures (drag out a range, drag a
+  handle or the band, click a handle to open that end, Backspace clears);
+  while a handle is dragged the drawn range follows live (`onPreview`). No
+  interval = the whole curve. A curve is drawn as a white polyline over the
+  shown range (`CurveData.polyline`: a sampled curve's own samples are the
+  vertices, cubic / symbolic / flow data is sampled at 512 points plus the
+  samples), small dots at the samples of a sampled curve (≤ 120 of them, with
+  their labels) and a red dot at the end of the shown range; in 3D the
+  polyline is a depth-tested line layer and the dots live on the overlay.
+  Per-bundle option `curves: { id: { on?, lo?, hi? } }`.
+* **legend** and **cursor pane** bottom-right, status line bottom centre
+  (errors in red).
 
 ## Logging and the Dock app
 
@@ -318,7 +334,8 @@ rebuilt from that state (widgets are re-created on each `updateInfo`).
 
 Per bundle in `localStorage["tensatory.opts.<file>"]`: every control, locked
 slot selections, colormaps, colormap interval selections, animation
-directions, Controls-pane adjustments (`controls`: `{ rowId: { seed?, scale? } }`), and the view — but a
+directions, Controls-pane adjustments (`controls`: `{ rowId: { seed?, scale? } }`), curve visibility and
+ranges (`curves`), and the view — but a
 *fitted* view is never saved (only flips/rotation), so it always re-fits to
 the current layout; only user-panned/zoomed views are restored. Collapsed
 panels are global. Query parameters override anything after load:

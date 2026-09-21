@@ -1,7 +1,8 @@
-// Curves: parametrized paths γ: [t0, t1] → M in a manifold. DESIGN, NOT
-// IMPLEMENTED: these types compile and are exported, but BundleSpec has no
-// `curves` yet, the runtime has no Curve object, and `along` / `velocity` are
-// not members of the field-data unions. notes/curves.md is the long form.
+// Curves: parametrized paths γ: [t0, t1] → M in a manifold. Status: `curves`
+// is a member of BundleSpec and the runtime builds every CurveDataSpec below
+// (packages/core/src/curves); the viewer draws them with a per-curve interval
+// slider. NOT yet: `along` / `velocity` as field data (declared at the end,
+// not members of the field-data unions). notes/curves.md is the long form.
 //
 // Why: `pointSets: { ordered: true }` is a drawing hint standing in for a
 // geometric object. A curve deserves what fields got — a `kind` that is
@@ -33,11 +34,11 @@ export type CurveId = string;
 /*******************************************************/
 /* ROOT */
 //
-// BundleSpec gains
+// BundleSpec has
 //   curves?: Record<CurveId, CurveSpec>;
 // `pointSets` stay for UNORDERED labelled points (θ*, equilibria, minima, the
-// members of a sweep); `ordered: true` becomes deprecated sugar for a sampled
-// curve whose `times` are the index.
+// members of a sweep); `ordered: true` is deprecated sugar for a sampled
+// curve whose `times` are the index (still drawn, no longer written).
 
 export type CurveSpec = {
   data: CurveDataSpec;

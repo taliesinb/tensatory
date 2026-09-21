@@ -16,7 +16,7 @@ the short summary; when a decision changes, update both.
 | [gpu.md](gpu.md) | the WebGPU backend: WGSL transpilation, compute-shader sampling, CPU/GPU agreement tests, Dawn-in-node pitfalls |
 | [3d.md](3d.md) | spaces and the 3D arm: marching tetrahedra, exact projection, the WebGPU 3D renderer, face outlines, crop, 3D streamlines |
 | [resolution.md](resolution.md) | the adaptive resolution (two tiers, frame / latency / memory feedback), sets sized from measured complexity, the memory cap, device limits |
-| [curves.md](curves.md) | design (not built) for curves — parametrized paths as bundle citizens: symbolic / sampled / flow data, pushforwards, fields along a curve and its velocity on the parameter interval, migration from `pointSets.ordered` |
+| [curves.md](curves.md) | curves — parametrized paths as bundle citizens: symbolic / sampled / flow data, pushforwards, the runtime and the viewer's curves panel (built); fields along a curve and its velocity on the parameter interval (design) |
 | [sweeps.md](sweeps.md) | the design of external arrays (§1, now built — see bundle-schema.md) and of sweeps (§2, not built): members with flat records, `common`, faceted navigation, options keyed by structural signature |
 | [roadmap.md](roadmap.md) | what comes next (array backends and the rest of the unimplemented schema, quadtree seeding, 3D round two, GPU, server), and what is done since phase 1 |
 

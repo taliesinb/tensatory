@@ -1,4 +1,4 @@
-export { Bundle, BundleSchema, Manifold, Net, PointSet, ScalarField, VectorField, ManifoldDefinitionSchema, PointSetSchema, infoOf } from "./bundle";
+export { Bundle, BundleSchema, Curve, Manifold, Net, PointSet, ScalarField, VectorField, ManifoldDefinitionSchema, PointSetSchema, infoOf } from "./bundle";
 export type { Field, Info } from "./bundle";
 export { collectHandles, loadArrays } from "./handles";
 export type { LoadProgress } from "./handles";

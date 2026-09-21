@@ -4,6 +4,7 @@ export * from "./symbolic";
 export * from "./arrays";
 export * from "./nets";
 export * from "./fields";
+export * from "./curves";
 export * from "./bundle";
 export * from "./iso";
 export * from "./flow";

@@ -79,15 +79,6 @@ function rk4(F, p, h) {
 }
 const round = (p) => p.map((x) => +x.toPrecision(5));
 const inBox = (p, box) => p.every((x, i) => x >= box[i][0] && x <= box[i][1]);
-/** integrate for `transient`, then record every `every`-th step for time T */
-function orbit(F, p0, { dt, transient, T, every }) {
-  let p = p0;
-  for (let t = 0; t < transient; t += dt) p = rk4(F, p, dt);
-  const pts = [];
-  const n = Math.round(T / dt);
-  for (let i = 0; i < n; i++) { if (i % every === 0) pts.push(round(p)); p = rk4(F, p, dt); }
-  return pts;
-}
 /** one period of a planar limit cycle: after the transient, from one upward crossing of y = 0 to the next */
 function limitCycle(F, p0, { dt, transient, every }) {
   let p = p0;
@@ -115,7 +106,11 @@ function stableManifold(F, saddle, vStable, box, { dt, every, eps = 1e-4, maxSte
 }
 
 /* ---------- field builders ---------- */
-const bundle = { tensatory: "0.1", manifolds: {}, fields: {}, pointSets: {} };
+const bundle = { tensatory: "0.1", manifolds: {}, fields: {}, pointSets: {}, curves: {} };
+/** a curve as the integral curve of the space's F from `start` over [t0, t1] (t = 0 at `start`), integrated in the viewer */
+const flowCurve = (space, name, start, [t0, t1], step, summary) => ({ domain: space, name, param: { name: "t", unit: null }, summary, data: { type: "flow", field: `${space}/F`, start, interval: [t0, t1], method: { step } } });
+/** a curve through recorded points (a closed one wraps back to its first point) */
+const sampledCurve = (space, name, pts, summary, extra = {}) => ({ domain: space, name, summary, data: { type: "sampled", points: { type: "inline", shape: [pts.length, pts[0].length], data: pts.flat() }, ...extra } });
 const speedName = "|F|";
 /** a one-line summary from the details when none is given: the details of every field here open with the formula,
  *  set off by ": " or the first sentence end */
@@ -228,7 +223,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
     },
   });
   // a pendulum rotating over the top (from θ ≈ −2π) losing energy until it is captured by the well at θ = 0
-  bundle.pointSets["pendulum/orbit"] = { domain: "pendulum", ordered: true, name: "a damped orbit", points: orbit(Ffn, [-6.5, 2.9], { dt: 0.01, transient: 0, T: 45, every: 5 }) };
+  bundle.curves["pendulum/orbit"] = flowCurve("pendulum", "a damped orbit", [-6.5, 2.9], [0, 45], 0.01, "the integral curve of F from (θ, θ̇) = (−6.5, 2.9): a pendulum rotating over the top, losing energy to friction until the well at θ = 0 captures it (integrated live, RK4)");
   note("pendulum", "θ̈ = −sin θ − γ θ̇: the energy H (isolines = frictionless orbits, separatrix at H = 2), its dissipation Ḣ ≤ 0, a captured rotating orbit");
 }
 
@@ -260,7 +255,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
     fields: [divField(2, "∇·F = μ(1 − x²): changes sign at |x| = 1 — Bendixson's criterion allows the limit cycle only because the divergence is not of one sign.")],
     points: { equilibria: { points: [[0, 0]], labels: ["unstable spiral"] } },
   });
-  bundle.pointSets["vanderpol/cycle"] = { domain: "vanderpol", ordered: true, name: "limit cycle", points: limitCycle(Ffn, [2, 0], { dt: 0.005, transient: 60, every: 4 }) };
+  bundle.curves["vanderpol/cycle"] = sampledCurve("vanderpol", "limit cycle", limitCycle(Ffn, [2, 0], { dt: 0.005, transient: 60, every: 4 }).slice(0, -1), "one period of the attracting limit cycle, integrated to convergence by the build tool (closed)", { closed: true });
   note("vanderpol", "a relaxation oscillator: an unstable spiral inside a globally attracting limit cycle (drawn, integrated to convergence)");
 }
 
@@ -276,7 +271,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
     ],
     points: { equilibria: { points: [[0, 0]], labels: ["unstable spiral"] } },
   });
-  bundle.pointSets["hopf/cycle"] = { domain: "hopf", ordered: true, name: "limit cycle r = √μ", points: Array.from({ length: 97 }, (_, i) => (i % 96 === 0 ? [1, 0] : round([Math.cos((2 * PI * i) / 96), Math.sin((2 * PI * i) / 96)]))) };
+  bundle.curves["hopf/cycle"] = { domain: "hopf", name: "limit cycle r = √μ", param: { name: "φ", unit: "rad" }, summary: "the circle of radius √μ = 1: (cos φ, sin φ), an exact expression of the parameter", data: { type: "symbolic", interval: [0, 2 * PI], expr: { op: "compv", coeffs: [{ op: "cos", val: { op: "coord", index: 0 } }, { op: "sin", val: { op: "coord", index: 0 } }] } } };
   note("hopf", "the supercritical Hopf normal form after the bifurcation: repelling origin, circular limit cycle of radius √μ, the radial rate d(r²)/dt as the trapping mechanism");
 }
 
@@ -305,7 +300,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
   });
   // Jacobian at (1, 1): [[−1, −2], [−1, −1]], eigenvalues −1 ± √2; stable eigenvector ∝ (√2, 1)
   const s = Math.hypot(Math.SQRT2, 1);
-  bundle.pointSets["competition/separatrix"] = { domain: "competition", ordered: true, name: "separatrix (stable manifold of the saddle)", points: stableManifold(Ffn, [1, 1], [Math.SQRT2 / s, 1 / s], box, { dt: 0.005, every: 10 }) };
+  bundle.curves["competition/separatrix"] = sampledCurve("competition", "separatrix (stable manifold of the saddle)", stableManifold(Ffn, [1, 1], [Math.SQRT2 / s, 1 / s], box, { dt: 0.005, every: 10 }), "the saddle's stable manifold, both branches integrated backwards by the build tool; the boundary between the two basins");
   note("competition", "bistable competition: two stable nodes, a saddle, the separatrix between the basins (the saddle's stable manifold, integrated backwards)");
 }
 
@@ -363,7 +358,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
     ],
     points: { equilibria: { points: [[0, 0, 0], round([c, c, rho - 1]), round([-c, -c, rho - 1])], labels: ["saddle", "C₊ saddle-focus", "C₋ saddle-focus"] } },
   });
-  bundle.pointSets["lorenz/attractor"] = { domain: "lorenz", ordered: true, name: "strange attractor", points: orbit(Ffn, [1, 1, 1], { dt: 0.005, transient: 20, T: 30, every: 2 }) };
+  bundle.curves["lorenz/attractor"] = flowCurve("lorenz", "strange attractor", [1, 1, 1], [20, 50], 0.005, "the integral curve of F from (1, 1, 1) after a transient of 20 time units: 30 time units on the attractor (integrated live, RK4); drag the interval to follow it");
   note("lorenz", "σ = 10, ρ = 28, β = 8/3: three saddle-type equilibria, a strange attractor (30 time units drawn), a trapping ellipsoid and its Lyapunov derivative");
 }
 
@@ -379,7 +374,7 @@ const gradVField = (V) => ["gradV", { kind: "vector", name: "∇V", summary: "th
     fields: [divField(3, "∇·F = a + x − c: negative over the attractor except where x > c − a = 5.5, the fold region where the flow expands.")],
     points: { equilibria: { points: [P((c - disc) / 2), P((c + disc) / 2)], labels: ["P₋ saddle-focus", "P₊ saddle-focus"] } },
   });
-  bundle.pointSets["rossler/attractor"] = { domain: "rossler", ordered: true, name: "strange attractor", points: orbit(Ffn, [1, 1, 0], { dt: 0.02, transient: 200, T: 150, every: 3 }) };
+  bundle.curves["rossler/attractor"] = flowCurve("rossler", "strange attractor", [1, 1, 0], [200, 350], 0.02, "the integral curve of F from (1, 1, 0) after a transient of 200 time units: 150 time units of spiral-and-fold (integrated live, RK4)");
   note("rossler", "a = b = 0.2, c = 5.7: the spiral-and-fold strange attractor (150 time units drawn), the divergence marking the fold");
 }
 
@@ -390,10 +385,10 @@ bundle.summary = "Textbook continuous dynamical systems ẋ = F(x), one space ea
 bundle.details =
   "Continuous dynamical systems ẋ = F(x), one space per system, the time evolution F as a symbolic vector field (the space's `flow`, so streamlines and glyphs follow it forward in time; turn on the S and V columns of the fields panel).\n\n" +
   "In every space: |F| is the speed (zero at the equilibria); H / V / C are energies, potentials and first integrals whose level sets are orbits or are cut orthogonally by them; ∇H·F, ∇V·F, ∇r²·F are exact symbolic Lyapunov derivatives; ∇·F the divergence. " +
-  "Equilibria are labelled by type; limit cycles, strange attractors and separatrices are ordered point sets integrated by RK4 from the same expression trees. Parameters (γ, δ, μ, σ ρ β, …) are `consts` of each F and can be edited in the JSON.\n\n" +
+  "Equilibria are labelled by type. Orbits and strange attractors are `flow` CURVES — the integral curve of F from a start point, integrated by RK4 in the viewer (the curves panel restricts the drawn time range); the Hopf cycle is an exact expression, the Van der Pol cycle and the competition separatrix are sampled by the build tool. Parameters (γ, δ, μ, σ ρ β, …) are `consts` of each F and can be edited in the JSON.\n\n" +
   "Each space's ⓘ says what it shows. Generated by tools/dynamical-systems/build.mjs.";
 
 const out = join(dirname(fileURLToPath(import.meta.url)), "../../apps/viewer/public/bundles/dynamical-systems.json");
 writeFileSync(out, JSON.stringify(bundle) + "\n");
 const nPts = Object.values(bundle.pointSets).reduce((s, p) => s + p.points.length, 0);
-console.log(`wrote ${out}: ${Object.keys(bundle.manifolds).length} spaces, ${Object.keys(bundle.fields).length} fields, ${Object.keys(bundle.pointSets).length} point sets (${nPts} points)`);
+console.log(`wrote ${out}: ${Object.keys(bundle.manifolds).length} spaces, ${Object.keys(bundle.fields).length} fields, ${Object.keys(bundle.pointSets).length} point sets (${nPts} points), ${Object.keys(bundle.curves).length} curves`);

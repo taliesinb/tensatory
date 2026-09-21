@@ -1,5 +1,7 @@
 import { z } from "zod";
-import type { BundleSpec, FieldSpec, ManifoldDefinitionSpec, NetSpec, PointSetSpec } from "@tensatory/schema";
+import type { BundleSpec, CodomainSpec, CurveSpec, FieldSpec, ManifoldDefinitionSpec, NetSpec, PointSetSpec } from "@tensatory/schema";
+import { CurveSchema, buildCurveData, type CurveResolver } from "../curves/spec";
+import type { CurveData } from "../curves/curveData";
 import { BUNDLE_VERSION } from "@tensatory/schema";
 import { SpecError, TensatoryError } from "../errors";
 import { Codomain } from "../fields/codomain";
@@ -44,6 +46,7 @@ export const BundleSchema: z.ZodType<BundleSpec> = z.object({
   defaultManifold: z.string().optional(),
   fields: z.record(z.string(), FieldSchema),
   pointSets: z.record(z.string(), PointSetSchema).optional(),
+  curves: z.record(z.string(), CurveSchema).optional(),
   nets: z.record(z.string(), NetSchema).optional(),
 });
 
@@ -120,6 +123,19 @@ export class VectorField {
 
 export type Field = ScalarField | VectorField;
 
+/** a parsed curve: γ: [t0, t1] → domain (schema/curves.ts) */
+export class Curve {
+  readonly name: string;
+  constructor(readonly id: string, readonly spec: CurveSpec, readonly domain: Manifold, readonly data: CurveData) {
+    this.name = spec.name ?? id;
+  }
+  /** what the parameter means (display only): defaults to { name: "t" } */
+  get param(): { name: string; unit: string | null; codomain: CodomainSpec | undefined } {
+    return { name: this.spec.param?.name ?? "t", unit: this.spec.param?.unit ?? null, codomain: this.spec.param?.codomain };
+  }
+  get info(): Info | undefined { return infoOf(this.name, this.spec); }
+}
+
 /** a parsed net: its spec, inferred signature, and (lazily) its compiled program */
 export class Net {
   readonly name: string;
@@ -154,6 +170,8 @@ export class Bundle {
   private readonly building = new Set<string>();
   private readonly builtNets = new Map<string, Net>();
   private readonly buildingNets = new Set<string>();
+  private readonly builtCurves = new Map<string, Curve>();
+  private readonly buildingCurves = new Set<string>();
   private readonly netResolver: ProgramResolver = {
     net: (id, path) => this.net(id, path).signature,
     program: (id, path) => this.net(id, path).program,
@@ -205,6 +223,41 @@ export class Bundle {
   get scalarFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "scalar"); }
   get vectorFieldIds(): string[] { return this.fieldIds.filter((id) => this.spec.fields[id]!.kind === "vector"); }
   get netIds(): string[] { return Object.keys(this.spec.nets ?? {}); }
+  get curveIds(): string[] { return Object.keys(this.spec.curves ?? {}); }
+
+  /** the resolver curve builders use: this bundle's fields, curves and arrays */
+  private get curveResolver(): CurveResolver {
+    return {
+      fields: { scalar: (ref, p) => this.scalarField(ref, p).data, vector: (ref, p) => this.vectorField(ref, p).data, nets: this.netResolver, arrays: this.arrays },
+      curve: (id, p) => this.curve(id, p).data,
+      arrays: this.arrays,
+    };
+  }
+
+  /** a curve by id, built lazily (curves may refer to fields and to each other); cycles are errors */
+  curve(id: string, path: string[] = []): Curve {
+    const done = this.builtCurves.get(id);
+    if (done) return done;
+    const spec = this.spec.curves?.[id];
+    if (!spec) throw new SpecError(`unknown curve "${id}"`, path);
+    if (this.buildingCurves.has(id)) throw new SpecError(`curve "${id}" refers to itself (cycle: ${[...this.buildingCurves, id].join(" -> ")})`, path);
+    this.buildingCurves.add(id);
+    try {
+      const domain = this.manifoldOf(spec.domain, ["curves", id]);
+      const c = new Curve(id, spec, domain, buildCurveData(spec.data, domain.numDims, this.curveResolver, ["curves", id, "data"]));
+      this.builtCurves.set(id, c);
+      return c;
+    } finally {
+      this.buildingCurves.delete(id);
+    }
+  }
+
+  /** every curve that built (call `buildAll()` first for the errors) */
+  get curves(): Curve[] {
+    const out: Curve[] = [];
+    for (const id of this.curveIds) { try { out.push(this.curve(id)); } catch (e) { if (!(e instanceof TensatoryError)) throw e; } }
+    return out;
+  }
 
   private manifoldOf(id: string | undefined, path: string[]): Manifold {
     if (id === undefined) {
@@ -283,6 +336,11 @@ export class Bundle {
     for (const id of this.fieldIds) {
       try { this.field(id); } catch (e) {
         if (e instanceof TensatoryError) errors.set(id, e); else throw e;
+      }
+    }
+    for (const id of this.curveIds) {
+      try { this.curve(id); } catch (e) {
+        if (e instanceof TensatoryError) errors.set(`curves.${id}`, e); else throw e;
       }
     }
     // a manifold's `flow` must name a vector field living on that manifold

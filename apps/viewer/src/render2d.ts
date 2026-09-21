@@ -3,6 +3,7 @@
 // Axis 0 is horizontal (right), axis 1 vertical (up unless flipped).
 
 import type { Box, DenseGrid, PointSet, Polyline } from "@tensatory/core";
+import type { CurveDrawable } from "./curvesPane";
 import { toCss, type Colormap, type RGB } from "./colormap";
 
 /** camera: world centre, pixels per world unit, and an orientation (axis flips + quarter turns clockwise) */
@@ -74,6 +75,7 @@ export interface Scene {
   lines: LineLayer[];
   triangles?: TriangleLayer[];
   pointSets: PointSet[];
+  curves?: CurveDrawable[];
 }
 
 const COLOR_BINS = 32, ALPHA_BINS = 12;
@@ -171,6 +173,7 @@ export class Renderer2D {
       for (const t of s.triangles ?? []) this.drawTriangles(t);
     }
     this.drawPointSets(s.pointSets);
+    if (s.curves) this.drawCurves(s.curves);
     ctx.restore();
     if (s.showBox) {
       ctx.strokeStyle = "#7f8fb8"; ctx.lineWidth = 1.5;
@@ -319,6 +322,25 @@ export class Renderer2D {
     for (let i = 0; i < line.length; i += 2) {
       const [x, y] = this.toScreen([line[i]!, line[i + 1]!]);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+  }
+
+  /** a curve: a white polyline over its shown range, small dots at its samples (with labels), a red dot at the end */
+  private drawCurves(curves: CurveDrawable[]): void {
+    const ctx = this.ctx;
+    for (const c of curves) {
+      const n = c.points.length / c.dimCount;
+      if (n >= 2) {
+        ctx.beginPath();
+        for (let i = 0; i < n; i++) { const [x, y] = this.toScreen([c.points[i * c.dimCount]!, c.points[i * c.dimCount + 1]!]); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+      for (const m of c.markers) {
+        const [x, y] = this.toScreen(m.p);
+        ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 2 * Math.PI); ctx.fillStyle = "#ffffff"; ctx.fill();
+        if (m.label) { ctx.fillStyle = "#fff"; ctx.font = "11px system-ui, sans-serif"; ctx.fillText(m.label, x + 8, y - 6); }
+      }
+      if (c.head) { const [x, y] = this.toScreen(c.head); ctx.beginPath(); ctx.arc(x, y, 5, 0, 2 * Math.PI); ctx.fillStyle = "#ff4d4d"; ctx.fill(); }
     }
   }
 

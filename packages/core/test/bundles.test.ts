@@ -61,10 +61,25 @@ describe("example bundles", () => {
     const hdot = b.scalarField("pendulum/Hdot").data;
     const g = new DenseGrid([41, 31], hdot.box);
     for (const v of hdot.sampleOn(g)) expect(v).toBeLessThanOrEqual(1e-9);
-    // the Van der Pol cycle is a closed ordered point set on which F is tangent to the polyline (a coarse check)
-    const cyc = b.pointSets.get("vanderpol/cycle")!;
-    expect(cyc.ordered).toBe(true);
-    expect(cyc.points[0]).toEqual(cyc.points[cyc.points.length - 1]);
+    // the Van der Pol cycle is a closed sampled curve: it wraps back to its first point
+    const cyc = b.curve("vanderpol/cycle").data;
+    expect(cyc.kind).toBe("sampled");
+    expect(cyc.point(cyc.t1)).toEqual(cyc.point(cyc.t0));
+    // the Hopf cycle is the unit circle written as an expression; the Lorenz attractor a flow curve that integrates
+    // F live and stays inside the box over its whole interval
+    const hopf = b.curve("hopf/cycle").data;
+    expect(Math.hypot(...hopf.point(1.234)!)).toBeCloseTo(1, 12);
+    const lorenz = b.curve("lorenz/attractor");
+    expect(lorenz.data.kind).toBe("symbolic");
+    const pts = lorenz.data.polyline();
+    expect(pts.length / 3).toBeGreaterThan(1000);
+    const box = b.scalarField("lorenz/trap").data.box;
+    let inside = 0;
+    for (let i = 0; i < pts.length; i += 3) if (box.contains([pts[i]!, pts[i + 1]!, pts[i + 2]!], 1e-9)) inside++;
+    expect(inside / (pts.length / 3)).toBeGreaterThan(0.99);
+    // the pendulum orbit ends captured near the well at θ = 0
+    const end = b.curve("pendulum/orbit").data.point(45)!;
+    expect(Math.abs(end[0]!)).toBeLessThan(0.5);
   });
 
   it("summary / details: `info` of bundles, spaces and fields, and index.json mirrors every bundle's name and summary", async () => {

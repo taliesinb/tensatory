@@ -7,7 +7,7 @@ apps/viewer/public/bundles/mnist-mlp/:
 
   bundle.json   the net (784-256-256-10 ReLU MLP, cross-entropy over N examples), theta* bound, displaced along
                 the top-3 PCA directions of the trajectory; loss / accuracy fields on a 2D and a 3D PCA space,
-                evaluated IN THE BROWSER by the net evaluator; the projected trajectory and theta* as point sets;
+                evaluated IN THE BROWSER by the net evaluator; the projected trajectory as a sampled curve and theta* as a point set;
                 the prototype's own sampled volume (subsampled) as reference fields in the 3D space
   arrays.npz    theta* (weights transposed to [in, out]), the 3 PCA directions likewise, the eval set as uint8
                 pixels (the normalization is in the net), labels, and the same for the first 256 examples
@@ -237,10 +237,18 @@ def main() -> None:
             "sampledAcc": sampled(1, "sampled/accuracy", "fraction", f"the prototype's PyTorch-sampled accuracy (64³ → 32³, N = {EVAL_N})"),
         },
         "pointSets": {
-            "traj2": {"domain": "pca2", "points": traj[:, :2].round(5).tolist(), "ordered": True, "name": "SGD trajectory"},
-            "traj3": {"domain": "pca3", "points": traj.round(5).tolist(), "ordered": True, "name": "SGD trajectory"},
             "theta2": {"domain": "pca2", "points": [[0.0, 0.0]], "labels": ["θ*"]},
             "theta3": {"domain": "pca3", "points": [[0.0, 0.0, 0.0]], "labels": ["θ*"]},
+        },
+        "curves": {
+            **{
+                f"traj{d}": {
+                    "domain": f"pca{d}", "name": "SGD trajectory", "param": {"name": "snapshot"},
+                    "summary": f"the {len(traj)} parameter snapshots of the SGD run (every 50 steps, plus the initial and final weights), projected onto the top-{d} PCA directions; the last is θ*",
+                    "data": {"type": "sampled", "points": {"type": "inline", "shape": [len(traj), d], "data": traj[:, :d].round(5).flatten().tolist()}},
+                }
+                for d in (2, 3)
+            },
         },
     }
     (OUT / "bundle.json").write_text(json.dumps(bundle, ensure_ascii=False, indent=1) + "\n")

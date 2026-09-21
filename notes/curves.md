@@ -1,9 +1,14 @@
-# Curves (design, not yet implemented)
+# Curves
 
-Parametrized paths γ: [t₀, t₁] → M as bundle citizens. The types are in
-`schema/curves.ts` (exported, compiled, not yet wired into `BundleSpec` or the
-field-data unions); this note records the reasoning. Status against other
-work: [roadmap.md](roadmap.md).
+Parametrized paths γ: [t₀, t₁] → M as bundle citizens. Status: **built** —
+`curves` in `BundleSpec`, every `CurveDataSpec` (symbolic / sampled / flow /
+translate / scale) in `packages/core/src/curves`, the viewer's curves panel
+([viewer.md](viewer.md) "Bottom-left column"); the bundles that used
+`pointSets.ordered` are migrated. **Not built**: `along` / `velocity` as field
+data (declared at the end of `schema/curves.ts`, not in the field-data
+unions), slicing of non-sampled curves, adaptive `method.tol`, a 1-D arm.
+This note records the reasoning. Ordering against other work:
+[roadmap.md](roadmap.md).
 
 ## Why
 
@@ -88,44 +93,79 @@ is d(loss)/dt for free; ⟨∇f(γ(t)), γ'(t)⟩ — the tangent quantity the
 loss-landscape papers plot — is a `pointwise` over two along-curve vectors, as
 above.
 
-## Runtime
+## Runtime (as built: `packages/core/src/curves/`)
 
-`CurveData` mirrors `ScalarFieldData` / `VectorFieldData`: `kind`,
-`dimCount`, `interval`, `sampleTimes` (defined iff sampled), `point(t)`,
-`velocity()` (data on the same interval, composable to acceleration),
-`sampleOn(ts)`, `polyline(tolerance)` (adaptive chords — the exact-isoline
-refinement applied to a parametric curve), `arcLength(t)`. `Bundle.curve(id)`
-is built lazily like fields; `buildAll()` reports errors under `curves.<id>`;
-`flow` reuses the streamline integrators (RK4 through a sampled copy of the
-field on the grid in the viewer, exact expression evaluation in core) and the
-GPU streamline kernels can carry a flow curve as a one-seed job. Slices
-(`bundle/slice.ts`) project curves as they project point sets; the `.npz`
-handle backend takes the trajectories (`points` is an `ArraySpec`).
+`CurveData` (`curveData.ts`) mirrors the field data: `kind`, `dimCount`,
+`interval`, `sampleTimes` (defined iff sampled), `pointInto(t, out)` /
+`velocityInto(t, out)` (false outside the interval), `point(t)` /
+`velocity(t)`, `sampleOn(ts)`, `polyline(a, b, n)` (the drawing vertices over
+a sub-range: a sampled curve's own samples inside it plus the exact ends,
+cubic / symbolic / flow data also `n` uniform points; the step interpolant
+gives both ends of every jump) and `arcLength(t)`.
 
-## Viewer (later)
+* `SymbolicCurveData`: the expression is normalized in the MANIFOLD's
+  dimension (its vectors are D-vectors) with `coord 0` as t; the other
+  coordinates, `coordv` and `grad` are rejected (`checkCurveExpr`); the
+  velocity is the exact symbolic derivative (`diffVector` wrt coordinate 0).
+* `SampledCurveData`: `times` strictly increasing (default the index, or an
+  interval sampled uniformly); linear / step / cubic (Hermite with the given
+  `velocities`, Catmull–Rom tangents otherwise); `closed` adds one segment
+  back to the first point over one more time step; `velocity` of a linear
+  curve is the chord slope (or the interpolated given velocities).
+* `FlowCurveData`: integrates ẋ = F(x) from `start` (t = 0) once, lazily, by
+  RK4 (or Euler) with a fixed `step` (default: the larger |t|-extent / 1000,
+  capped at the interval), backwards for t₀ < 0 and forwards for t₁ > 0,
+  into a finely sampled linear curve it evaluates through; `velocity` reads F
+  at the point. A scalar `field` means its gradient (`dir` descending by
+  default) — the slot rule — built with the same `SymbolicVectorFieldData`
+  `grad` idiom the viewer uses. `method.tol` is a SpecError until adaptive
+  stepping exists.
+* `AffineCurveData` (`translateCurve` / `scaleCurve`): origin + s ⊙ (γ − origin)
+  + vec, keeping the kind and the sample times; velocities scale.
 
-* A curve is a polyline with direction arrows and sample markers, coloured by
-  a slot (its own `along` value or a colour field), and a **t scrubber**: the
-  streamline particle animation is the same machinery; `param.codomain`
-  formats the readout ("step 1 200"). By t or by arc length is a scrubber
-  option, not a curve property.
-* The cursor pane shows the current field values *at γ(t)* while scrubbing —
-  along-curve fields are useful before any 1-D plot exists.
-* A 1-D arm (plots of `along` fields against t) is the natural third arm after
-  2D and 3D; it is not part of this design.
-* Curves belong to a space like point sets; charts (roadmap 4) show the
-  parameter-space trajectory and its PCA image as one object.
+`Bundle.curve(id)` builds lazily with cycle detection through a
+`CurveResolver` (the bundle's fields, curves and arrays); `Bundle.curves`
+lists the ones that built; `buildAll()` reports errors under `curves.<id>`.
+`collectHandles` walks sampled points / times / velocities, flow starts and
+inline fields, pullback vectors, so trajectories may be `.npz` members.
+`sliceSpec` projects sampled curves (points and velocities over the kept
+dims) and drops the others with a reason under `curves.<id>` in `dropped`.
+Tests: `packages/core/test/curves.test.ts` (RK4 against exact solutions,
+Hermite reproducing a parabola, the closed cycle, pushforwards, handles,
+slices) and the dynamical-systems checks in `bundles.test.ts`.
 
-## Migration
+## Viewer
 
-Mechanical. Every `pointSets` entry with `ordered: true` becomes
-`{ data: { type: "sampled", points } }` (times = the index) and `ordered` is
-deprecated; unordered point sets — θ*, equilibria, minima, a sweep's members —
-stay point sets. `dynamical-systems.json`'s orbits, cycles and separatrices
-become `flow` curves and `tools/dynamical-systems/build.mjs` loses its RK4;
-the convnet bundle's trajectory becomes a sampled curve with `param.name =
-"step"`, and once the `.pt` checkpoints are exported (roadmap 5) the same
-curve appears in parameter space as a `.npz` handle.
+Built: the **curves panel** above the fields matrix — per curve a name that
+toggles drawing, an interval slider over [t₀, t₁] (no interval = the whole
+curve; the drawn range follows a drag live), the range readout in the curve's
+parameter and a ⓘ; drawn as a white polyline with sample dots (≤ 120, with
+labels) and a red end dot, in 2D and 3D ([viewer.md](viewer.md)). Later:
+
+* direction arrows and colouring by a slot (its own `along` value or a colour
+  field); a **t scrubber** (the streamline particle animation is the same
+  machinery) — by t or by arc length is a scrubber option, not a curve
+  property;
+* the cursor pane showing the field values *at γ(t)* while scrubbing —
+  along-curve fields are useful before any 1-D plot exists;
+* a 1-D arm (plots of `along` fields against t), the natural third arm after
+  2D and 3D;
+* charts (roadmap 4) showing the parameter-space trajectory and its PCA image
+  as one object.
+
+## Migration (done)
+
+Every `pointSets` entry with `ordered: true` became a curve; `ordered` is
+deprecated (still drawn). `dynamical-systems.json`: the pendulum orbit and the
+Lorenz / Rössler attractors are `flow` curves (the build tool lost its
+`orbit` RK4; the transients became the interval's t₀), the Hopf cycle is the
+exact expression (cos φ, sin φ), the Van der Pol cycle a closed sampled curve
+and the competition separatrix a sampled one (both still integrated by the
+tool: a limit cycle's period and a stable manifold's two backward branches
+are not one flow). The SGD trajectories of `dense.json`, `mnist-convnet-pca/`
+and `mnist-mlp/` are sampled curves with `param.name = "snapshot"`; the
+mixture `centres` of the symbolic bundles were never paths and are plain
+labelled points now.
 
 ## Left out, deliberately
 

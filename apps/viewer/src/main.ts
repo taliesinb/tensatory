@@ -49,7 +49,7 @@ import { NO_SELECTION, type Selection, asSelection, isMasked, isNoSelection, lut
 import { makeIntervalSlider, type IntervalEl } from "./interval";
 import { bootPhase, installLogCapture, showError, status, statusAwaitingPaint } from "./log";
 import { MetricsTable, NONE, type MetricsRow, type Sel } from "./metrics";
-import type { Manifold, PointSet } from "@tensatory/core";
+import type { Curve, Manifold, PointSet } from "@tensatory/core";
 import type { BundleSpec } from "@tensatory/schema";
 import { Renderer2D, type LineLayer, type Scene, type TriangleLayer } from "./render2d";
 import { Sampler, type Values } from "./sampler";
@@ -60,6 +60,7 @@ import { AutoRes, ladder, type FrameReport, type Tier } from "./autores";
 import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
 import { ControlsPane } from "./controls";
+import { CurvesPane, curveOn, curveRange, type CurveDrawable, type CurveOpts } from "./curvesPane";
 import { bindInfoIcon, installInfoModal, optionText } from "./info";
 import { GpuRenderer, type Camera3D, type Quat, quatLook, quatNormalize, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
@@ -176,6 +177,8 @@ interface State {
   /** committed slice per N-D space (3 < D <= 8): the 2 or 3 dimensions (0-based, ascending) the space is restricted to,
    *  through the manifold's `origin`; absent = the first three. Applied to the base spec before the Bundle is built. */
   slice: Record<string, number[]>;
+  /** per curve id: drawn or not, and the shown parameter range (null ends = the curve's own) */
+  curves: Record<string, CurveOpts>;
   /** bumped whenever `bundle` is rebuilt from adjustments / zooms (a frame key component: the fields are new objects) */
   revision: number;
   bundleFile: string; // for options storage
@@ -195,7 +198,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, curves: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -781,6 +784,7 @@ function render(): void {
   const scene: Scene = {
     box, crop: [1, 1], showBox: ui.showBox.checked, lines: [],
     pointSets: ui.showPoints.checked ? spacePointSets() : [],
+    curves: curveDrawables(),
   };
   const gpuDraw = modes.render === "gpu" && !!fused && !!gpuRenderer;
   const fusedCompute = gpuDraw && modes.compute === "gpu";
@@ -910,6 +914,7 @@ function view3dOf(): View3D | undefined {
     crop: () => cropCommitted,
     cropPreview: () => (cropPreviewing ? CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange) : undefined),
     pointSets: spacePointSets,
+    curves: curveDrawables,
     colour: (u: Use3) => { const f = u as ScalarUse; return { map: valueMap(f), lut: lutOf(f), key: selKeyOf(f) }; },
     streamVector: () => streamVector(),
     streamColour: () => slotScalar("sc"),
@@ -1316,7 +1321,7 @@ function savedCamera(c: Partial<Camera3D> & { yaw?: number; pitch?: number }): P
   if (typeof yaw === "number" && typeof pitch === "number" && Number.isFinite(yaw) && Number.isFinite(pitch)) return { ...rest, rot: quatLook([Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch)]) };
   return rest;
 }
-interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number>; slice?: Record<string, number[]> }
+interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; maps?: Record<string, number>; intervals?: Record<string, unknown>; space?: string; spaces?: Record<string, SpaceOpts>; controls?: Adjustments; boxZoom?: Record<string, number>; slice?: Record<string, number[]>; curves?: Record<string, CurveOpts> }
 /**
  * Streamline controls whose good values differ between the arms: saved under `ui` in 2D and `ui3` in 3D, with
  * their own 3D defaults (a volume wants more, fainter lines with several particles each; the HTML `data-value`s
@@ -1334,7 +1339,7 @@ function saveOpts(): void {
   const o: Opts = {
     ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
     ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
-    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom, slice: state.slice,
+    maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom, slice: state.slice, curves: state.curves,
     spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
@@ -1386,6 +1391,48 @@ function spaceList(): Manifold[] {
 const currentSpace = (): Manifold | undefined => state.bundle?.manifolds.get(state.space);
 const spaceDims = (): number => currentSpace()?.numDims ?? 2;
 const spacePointSets = (): PointSet[] => (state.bundle ? [...state.bundle.pointSets.values()].filter((ps) => ps.domain.id === state.space) : []);
+
+/*******************************************************/
+/* curves: the bundle's parametrized paths in this space, each drawn over its shown parameter range (curves panel) */
+
+const curvesPane = new CurvesPane($("curvesPanel"));
+/** a curve whose slider is being dragged: the shown range follows the pointer before it is committed */
+let curvePreview: { id: string; lo: number | null; hi: number | null } | undefined;
+curvesPane.onPreview = (id, lo, hi) => { curvePreview = { id, lo, hi }; state.dirty = true; };
+const spaceCurves = (): Curve[] => (state.bundle ? state.bundle.curves.filter((c) => c.domain.id === state.space) : []);
+
+const CURVE_MAX_MARKERS = 120; // a densely sampled curve reads as a line, not as beads
+function curveDrawables(): CurveDrawable[] {
+  const out: CurveDrawable[] = [];
+  for (const c of spaceCurves()) {
+    const o = state.curves[c.id];
+    if (!curveOn(o)) continue;
+    const pv = curvePreview?.id === c.id ? curvePreview : undefined;
+    const [lo, hi] = pv ? [pv.lo ?? c.data.t0, pv.hi ?? c.data.t1] : curveRange(c, o);
+    const D = c.data.dimCount;
+    const points = c.data.polyline(lo, hi, 512);
+    const markers: CurveDrawable["markers"] = [];
+    const ts = c.data.sampleTimes;
+    if (ts && ts.length <= CURVE_MAX_MARKERS) {
+      const labels = c.spec.data.type === "sampled" ? c.spec.data.labels : undefined;
+      for (let i = 0; i < ts.length; i++) { const t = ts[i]!; if (t < lo - 1e-12 || t > hi + 1e-12) continue; const p = c.data.point(t); if (p) markers.push({ p, label: labels?.[i] }); }
+    }
+    const head = points.length >= D ? Array.from(points.subarray(points.length - D)) : undefined;
+    out.push({ id: c.id, points, dimCount: D, markers, head });
+  }
+  return out;
+}
+
+/** a curves-panel change: remember and redraw (nothing is recomputed but the polyline) */
+function setCurveOpts(id: string, o: CurveOpts): void {
+  const next = { ...state.curves };
+  if (o.on !== false && o.lo == null && o.hi == null) delete next[id]; else next[id] = o;
+  state.curves = next;
+  curvePreview = undefined;
+  curvesPane.refresh(state.curves);
+  state.dirty = true;
+  saveOptsSoon();
+}
 const spaceSel = $<HTMLSelectElement>("pickSpaceSel");
 spaceSel.onchange = () => setSpace(spaceSel.value, true);
 
@@ -1407,6 +1454,7 @@ function setSpace(id: string, fromUser: boolean): void {
     vectors: bundle.vectorFieldIds.filter((id) => !buildErrors.has(id) && bundle.vectorField(id).domain === m),
   };
   document.body.classList.toggle("dim3", m.numDims === 3);
+  curvesPane.build(spaceCurves(), () => state.curves, setCurveOpts);
   $("spaceTitle").textContent = `${m.numDims}D space`;
   $("isoTitle").textContent = m.numDims === 3 ? "isosurfaces" : "isolines";
   $("lineLabel").textContent = m.numDims === 3 ? "surf sm" : "line sm";
@@ -1452,6 +1500,15 @@ function setSpace(id: string, fromUser: boolean): void {
 /* controls: adjustments (reseed / scale) of the bundle's random directions and arrays */
 
 const controls = new ControlsPane($("controlsPanel"));
+
+// the left stack scrolls within the height the bottom-left column (curves, fields) leaves it
+{
+  const left = $("left"), bottom = $("bottomLeft");
+  const fit = () => { left.style.maxHeight = `${Math.max(120, innerHeight - 24 - bottom.offsetHeight - 8)}px`; };
+  new ResizeObserver(fit).observe(bottom);
+  window.addEventListener("resize", fit);
+  fit();
+}
 
 /** the box zoom step: `-` (zoom out) widens every symbolic field's box of the space by this factor, `=` (zoom in) narrows it */
 const BOX_ZOOM = 1.5;
@@ -1593,7 +1650,7 @@ const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!sta
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
   state.bundleFile = file; state.baseSpec = parsed.spec; state.arrays = parsed.arrays;
-  const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {}; state.slice = opts0.slice ?? {};
+  const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {}; state.slice = opts0.slice ?? {}; state.curves = opts0.curves ?? {};
   let bundle: Bundle;
   try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; state.slice = {}; try { bundle = adjustedBundle(parsed); } catch { bundle = parsed; } } // stale adjustments (the bundle changed): drop them
   state.bundle = bundle; state.revision++;

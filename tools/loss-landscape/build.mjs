@@ -11,7 +11,7 @@
 // manifold per volume (`pca`: dimWeights = explained variance; `random`: none), a dense scalar field per channel —
 // each a `handle` into the same `vol.bin` with `part: [null, null, null, c]` selecting the channel and
 // `axes: [2, 1, 0]` turning the kept (z, y, x) into (x, y, z) — a derived `loss` (10^log10_loss, `celoss`
-// codomain), the trajectory as an ordered point set and θ* as a labelled point. The file itself is copied unchanged
+// codomain), the trajectory as a sampled CURVE (parameter: the snapshot index) and θ* as a labelled point. The file itself is copied unchanged
 // (512 KB for 40³, 2 MB for 64³).
 //
 // Then add the bundle to apps/viewer/public/bundles/index.json by hand (`"file": "<out>/bundle.json"`).
@@ -101,9 +101,21 @@ const bundle = {
   defaultManifold: dirs,
   fields,
   pointSets: {
-    ...(trajectory ? { trajectory: { domain: dirs, points: trajectory, ordered: true, name: "optimizer trajectory" } } : {}),
     theta: { domain: dirs, points: [new Array(D).fill(0)], labels: ["θ*"], name: "θ*" },
   },
+  ...(trajectory
+    ? {
+        curves: {
+          trajectory: {
+            domain: dirs,
+            name: "optimizer trajectory",
+            param: { name: "snapshot" },
+            summary: `the ${trajectory.length} parameter snapshots of the training run, projected onto the ${dirs} directions; the last one is θ*`,
+            data: { type: "sampled", points: { type: "inline", shape: [trajectory.length, D], data: trajectory.flat() } },
+          },
+        },
+      }
+    : {}),
 };
 
 writeFileSync(join(outDir, "bundle.json"), JSON.stringify(bundle, null, 1) + "\n");

@@ -12,6 +12,7 @@ import type {
   ArrayExpr,
   ArraySpec,
   BundleSpec,
+  CurveDataSpec,
   NetSpec,
   PointSpec,
   ScalarFieldDataSpec,
@@ -101,8 +102,25 @@ export function collectHandles(spec: BundleSpec): Map<string, ArrayHint> {
         return;
     }
   };
+  const curve = (c: CurveDataSpec, at: string[]) => {
+    switch (c.type) {
+      case "symbolic": return;
+      case "sampled":
+        any(c.points, [...at, "points"]);
+        if (c.times !== undefined && !Array.isArray(c.times)) any(c.times, [...at, "times"]);
+        any(c.velocities, [...at, "velocities"]);
+        return;
+      case "flow":
+        if (typeof c.field === "object") data(c.field, [...at, "field"]);
+        point(c.start, [...at, "start"]);
+        return;
+      case "translate": if (typeof c.arg === "object") curve(c.arg, [...at, "arg"]); point(c.vec, [...at, "vec"]); return;
+      case "scale": if (typeof c.arg === "object") curve(c.arg, [...at, "arg"]); point(c.origin, [...at, "origin"]); return;
+    }
+  };
   for (const [id, f] of Object.entries(spec.fields)) data(f.data, ["fields", id, "data"]);
   for (const [id, n] of Object.entries(spec.nets ?? {})) net(n, ["nets", id]);
+  for (const [id, c] of Object.entries(spec.curves ?? {})) curve(c.data, ["curves", id, "data"]);
   return out;
 }
 

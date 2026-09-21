@@ -30,15 +30,13 @@ out) but build to `NotSupportedError`.
 2. **Sparse supports** (`sparse` / `sparsev`; needs a sampled-data
    representation that is not a grid). Their `points` / `samples` arrays
    already load.
-2b. **Curves** ([curves.md](curves.md), types in `schema/curves.ts`):
-   parametrized paths γ: [t₀, t₁] → M with the field design — `symbolic`
-   (an expression of t), `sampled` (points at times, optional exact
-   velocities, linear / cubic / step), `flow` (the integral curve of a vector
-   field or a scalar field's gradient from a start point), translate / scale
-   pushforwards; fields `along` a curve and its `velocity` as fields on the
-   curve's 1-D parameter interval (loss along the SGD trajectory, ⟨∇f, γ'⟩).
-   Replaces `pointSets.ordered`; `dynamical-systems.json`'s baked RK4 orbits
-   become `flow` curves. A t scrubber in the viewer; a 1-D arm later.
+2b. ~~Curves~~ — built ([curves.md](curves.md)): `curves` in the bundle,
+   symbolic / sampled / flow / pushforward data, the viewer's curves panel
+   (per-curve toggle and interval slider), the bundles migrated off
+   `pointSets.ordered`. Left: `along` / `velocity` as field data on the
+   curve's parameter interval (loss along the SGD trajectory, ⟨∇f, γ'⟩),
+   slicing of non-sampled curves, adaptive stepping for `flow`, a t
+   scrubber with the cursor pane reading the fields at γ(t), a 1-D arm.
 3. **Sweeps** ([sweeps.md §2](sweeps.md)): a `SweepSpec` root holding
    members (each a `BundleSpec`, inline or by path) with flat metadata
    records and a merged `common` partial; faceted navigation over the

@@ -470,8 +470,7 @@
     "A",
     "B",
     "C"
-   ],
-   "ordered": true
+   ]
   }
  },
  "summary": "Fields defined by expressions only, on several 2D planes: bowl and saddle, Rosenbrock, a Gaussian mixture, waves."

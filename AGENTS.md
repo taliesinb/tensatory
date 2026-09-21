@@ -36,7 +36,15 @@ whose format follows its extension — raw `.bin`, `.npy`, a member of an
 selecting / keeping axes, an `axes` permutation and a `dtype`; a bundle with
 external arrays is a directory, `bundles/<name>/bundle.json` + sidecars,
 loaded by `Bundle.load(json, byteSource)` up front so the build stays
-synchronous; `notes/bundle-schema.md`); and small
+synchronous; `notes/bundle-schema.md`); CURVES (`curves`, `schema/curves.ts`,
+`notes/curves.md`): parametrized paths γ: [t₀, t₁] → M with the field design
+— `symbolic` (an expression of t = `coord 0`, D-vectors), `sampled` (points
+at `times`, default the index; optional exact `velocities`; linear / cubic /
+step; `closed`; `labels`), `flow` (the integral curve of a vector field, or a
+scalar field's gradient with `dir`, from `start` = t 0, RK4 with
+`method.step`, integrated lazily), `translate` / `scale` pushforwards;
+`param` names the parameter for display; `pointSets.ordered` is deprecated
+(still drawn); and small
 neural networks (`nets`, `schema/nets.ts`, `notes/nets.md`) whose outputs can
 back fields (`net` / `netv` field data). `tools/loss-landscape/build.mjs`
 turns a volume of the original prototype into such a directory
@@ -257,8 +265,9 @@ profiling test.
   Lotka–Volterra, competition, saddle-focus, Lorenz, Rössler) with F, |F|,
   energies / potentials / first integrals, exact Lyapunov derivatives ∇H·F
   and divergences as pointwise expressions, equilibria labelled by type, and
-  limit cycles / attractors / separatrices RK4-integrated from the same
-  expression trees as ordered point sets.
+  orbits / attractors as `flow` CURVES integrated live in the viewer (the Hopf
+  cycle an exact expression, the Van der Pol cycle and the competition
+  separatrix sampled by the build tool).
 * Codomains are visualization hints (bounds, log base, flip, wrap, unit,
   marks); they never change values. Numbers are formatted compactly
   (`6.24·10⁻⁵`, unicode superscripts).
@@ -266,8 +275,14 @@ profiling test.
   default: compute / render, `mem cap`, device, live memory —, `controls`
   when the bundle has rows, `2D space`,
   `colorfield`, `isolines`, `streamlines`, `vector field` — isolines and
-  streamlines OFF by default, isosurfaces on at a 3D space's first visit), the `fields`
-  matrix bottom-left, cursor pane + legend bottom-right. Bundles, manifolds,
+  streamlines OFF by default, isosurfaces on at a 3D space's first visit), a
+  bottom-left column with the `curves` panel (when the space has curves: per
+  curve a name that toggles drawing, an interval slider over [t₀, t₁] — no
+  interval = the whole curve, live while dragged —, the range readout in the
+  curve's `param`, a ⓘ; drawn as a white polyline with sample dots ≤ 120 and
+  a red end dot, in 2D and 3D; per-bundle option `curves`; the left stack's
+  max-height leaves room for the column) above the `fields` matrix, cursor
+  pane + legend bottom-right. Bundles, manifolds,
   fields and nets have independent optional `summary` (one line) and
   `details` (any length); the viewer shows them behind a ⓘ beside the bundle
   / space pickers and on each field row (hover: summary else details, click:

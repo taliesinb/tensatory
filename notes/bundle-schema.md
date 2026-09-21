@@ -15,7 +15,8 @@ shape; it is parsed into runtime classes that carry behaviour.
   "manifolds": { "plane": { "numDims": 2, "dimNames": ["x", "y"], "dimWeights": [0.7, 0.3], "summary": "…" } },
   "defaultManifold": "plane",          // only needed by fields / point sets that omit `domain`
   "fields":    { "<fieldId>": FieldSpec, … },
-  "pointSets": { "<id>": { "points": [[1, 1]], "labels": ["θ*"], "ordered": false } },
+  "pointSets": { "<id>": { "points": [[1, 1]], "labels": ["θ*"] } },
+  "curves":    { "<curveId>": CurveSpec, … },  // parametrized paths, see below and curves.md
   "nets":      { "<netId>": NetSpec, … }  // small neural networks, see nets.md
 }
 ```
@@ -47,9 +48,29 @@ shape; it is parsed into runtime classes that carry behaviour.
   `AffineInjection` of a 3D frame into parameter space.
 * If no manifolds are declared, one is inferred from the first field whose
   data makes the dimension evident (a box or a dense shape).
-* **Point sets** are labelled points on a manifold; `ordered: true` draws them
-  as a path (an optimizer trajectory). A single-point set is treated by the
-  viewer as "the centre" (θ*) for legend detents.
+* **Point sets** are labelled points on a manifold (θ*, equilibria). A
+  single-point set is treated by the viewer as "the centre" (θ*) for legend
+  detents. `ordered: true` (a path through the points) is deprecated in favour
+  of curves; it is still drawn.
+* **Curves** (`schema/curves.ts`, [curves.md](curves.md)) are parametrized
+  paths γ: [t₀, t₁] → M with the field design: `data` is `symbolic` (an
+  expression of t — `coord 0` — over `interval`), `sampled` (`points [N, D]`
+  at `times` — an array, an interval sampled uniformly, or the index by
+  default — with optional exact `velocities`, `interp` linear / cubic / step,
+  `labels`, `closed`), `flow` (the integral curve of a vector field — or a
+  scalar field's gradient, `dir` ascending / descending — from `start`,
+  t = 0 there, over `interval`, RK4 with `method.step`; integrated lazily in
+  the viewer), or a `translate` / `scale` pushforward of another curve.
+  `param` says what t means for display (`name`, `unit`, a `codomain` for
+  formatting). Runtime: `Curve` (id, name, domain, `param`, `info`) with
+  `CurveData` (`kind`, `interval`, `sampleTimes`, `point(t)`, `velocity(t)`,
+  `polyline(a, b, n)`, `arcLength`); `Bundle.curve(id)` lazily with cycle
+  detection, errors under `curves.<id>`; arrays of sampled / flow curves load
+  through the handle backend; slices project sampled curves and drop the
+  others with a reason. Examples: `dynamical-systems.json` (flow orbits and
+  attractors, an exact Hopf circle, a closed sampled Van der Pol cycle, a
+  sampled separatrix), the SGD trajectories of `dense.json`,
+  `mnist-convnet-pca/` and `mnist-mlp/` (parameter `snapshot`).
 
 ## Fields
 

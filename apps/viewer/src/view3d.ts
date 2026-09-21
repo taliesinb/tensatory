@@ -6,6 +6,7 @@
 // main.ts owns the controls and the shared state and hands them over through
 // View3DContext.
 
+import type { CurveDrawable } from "./curvesPane";
 import { Box, DenseGrid, DenseScalarFieldData, DenseVectorFieldData, arrowGlyphs, boxBlur, contourField, integrateFromSeeds, isoContours, latticePoints, marchingTetrahedra, projectToLevel, sliceScalarField, smoothIsoMesh, streamlineSeeds, type GlyphStyle, type Lattice, type PointSet, type ScalarFieldData, type StreamlineMode, type StreamlinePlan, type StreamlineSeeds, type VectorFieldData } from "@tensatory/core";
 import {
   GpuRenderer3D,
@@ -126,6 +127,7 @@ export interface View3DContext {
   /** the range being dragged / shift-previewed (not committed): drawn as a dotted box only */
   cropPreview(): CropRange[] | undefined;
   pointSets(): PointSet[];
+  curves(): CurveDrawable[];
   colour(u: Use3): { map: ValueMap; lut: Lut; key: string };
   /** the S∇ field (a vector field, or a scalar's gradient) when streamlines are on and `lines` is set */
   streamVector(): VectorUse3 | undefined;
@@ -724,6 +726,13 @@ export class View3D implements MemoryUser {
         if (ps.ordered && ps.points.length > 1) lines.push({ segs: this.segs3(`ps|${ps.id}`, () => packPolylines3([ps.points.flat()])), width: 1.5, color: [1, 1, 1] });
       }
     }
+    const curves = c.curves();
+    for (const cv of curves) {
+      if (cv.points.length < 2 * cv.dimCount) continue;
+      // keyed by the shown range (the first / last vertex) and the vertex count: a slider drag re-packs, nothing else does
+      const key = `curve|${cv.id}|${cv.points.length}|${cv.points[0]}|${cv.points[cv.points.length - 1]}`;
+      lines.push({ segs: this.segs3(key, () => packPolylines3([Array.from(cv.points)])), width: 1.5, color: [1, 1, 1] });
+    }
     this.info = { n: c.resolution(), grid: this.grid(cbox).size, triangles: 0, capacity: 0, overflow: false };
     if (iv) {
       const ic = c.colourField();
@@ -742,7 +751,7 @@ export class View3D implements MemoryUser {
     if (c.gpu.takeDeferred()) return; // a kernel is still compiling: keep the previous image (see main.ts renderGpu)
     this.renderer.resize();
     this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
-    this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined);
+    this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined, curves);
   }
 
   /** world → css px on the overlay */
@@ -750,7 +759,7 @@ export class View3D implements MemoryUser {
     return project(this.renderer.viewProj, p, this.c.overlay.clientWidth, this.c.overlay.clientHeight);
   }
 
-  private overlay(box: Box, preview: Box | undefined): void {
+  private overlay(box: Box, preview: Box | undefined, curves: CurveDrawable[] = []): void {
     const cv = this.c.overlay, ctx = this.ctx2d;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = Math.max(1, Math.round(cv.clientWidth * dpr)), h = Math.max(1, Math.round(cv.clientHeight * dpr));
@@ -769,6 +778,16 @@ export class View3D implements MemoryUser {
         if (p && q) { ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); }
       }
       ctx.stroke(); ctx.setLineDash([]);
+    }
+    for (const cv of curves) {
+      const dot = (p: number[], r: number, color: string, label?: string) => {
+        if (!box.contains(p, 1e-9)) return;
+        const q = this.project(p); if (!q) return;
+        ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill();
+        if (label) { ctx.fillStyle = "#fff"; ctx.font = "11px system-ui, sans-serif"; ctx.fillText(label, q[0] + 8, q[1] - 6); }
+      };
+      for (const m of cv.markers) dot(m.p, 2.5, "#ffffff", m.label);
+      if (cv.head) dot(cv.head, 5, "#ff4d4d");
     }
     if (this.c.showPoints()) {
       for (const ps of this.c.pointSets()) {

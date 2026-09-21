@@ -19,6 +19,14 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .tick.on { color: #3b82f6; }
 .sl.disabled, .ds.disabled, .ch.disabled { pointer-events: none; opacity: .5; }
 #controlsPanel.inert .body { opacity: .45; pointer-events: none; }
+/* a curve row: name · range readout · ⓘ on one line, the interval slider on its own line beneath */
+.row.curve { flex-wrap: wrap; row-gap: 3px; margin: 6px 0; }
+.row.curve label.toggle { cursor: pointer; flex: 1; width: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e8ecf5; }
+.row.curve label.toggle:hover { color: #fff; }
+.row.curve.off label.toggle { color: #6a7690; text-decoration: line-through; }
+.row.curve.off .isl { opacity: 0.45; }
+.row.curve .val.wide { width: auto; font-size: 11px; color: #aab; }
+.row.curve .isl { flex: 1 0 100%; order: 2; }
 .row.ctl .reseed { font-size: 15px; color: #7a86a3; flex: none; }
 .row.ctl .reseed:hover { color: #e8ecf5; }
 .strip .tick { color: #3a4358; }
@@ -108,7 +116,9 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 .lrow .lname.cycle:hover { color: #e8ecf5; }
 .lrow .detent { position: absolute; top: -3px; width: 3px; height: 18px; margin-left: -1.5px; background: #f44; border-radius: 1px; box-shadow: 0 0 2px #000; }
 
-#metrics { position: absolute; left: 12px; bottom: 12px; width: 300px; box-sizing: border-box; }
+#bottomLeft { position: absolute; left: 12px; bottom: 12px; width: 300px; display: flex; flex-direction: column; gap: 8px; }
+#metrics { width: 100%; box-sizing: border-box; }
+#curvesPanel .body { padding: 4px 10px 6px; max-height: 40vh; overflow-y: auto; scrollbar-width: none; }
 #metricSvgBody { padding: 4px 8px 6px; }
 #metricSvgBody svg { display: block; margin-left: auto; font: 11.5px system-ui, sans-serif; user-select: none; }
 #tip { position: absolute; z-index: 10; max-width: 280px; background: #222a3c; color: #e6ebf5; border: 1px solid #3a4560; border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.35; pointer-events: none; display: none; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
