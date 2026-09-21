@@ -83,6 +83,7 @@ import {
   syncTicks,
   stepOnWheel,
   type ChoiceEl,
+  type SliderEl,
   type ValueControl,
 } from "./widgets";
 
@@ -101,7 +102,7 @@ for (const el of document.querySelectorAll<HTMLElement>(".ds")) makeDiscreteSlid
 for (const el of document.querySelectorAll<HTMLElement>(".isl:not(.cmap)")) makeIntervalSlider(el); // the 3D crop ranges
 
 const CHECKS = ["showPoints", "showBox", "showScalar", "smooth", "showIso", "isoAnim", "isoOutline", "isoExact", "showStream", "anim", "showVec"] as const;
-const VALUES = ["cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode", "vspace", "vglyph", "vAlpha"] as const;
+const VALUES = ["cropx", "cropy", "cropz", "isoRate", "isoValue", "split", "isoAlpha", "metric", "line", "lines", "slen", "sAlpha", "tail", "ssplit", "sdir", "smode", "vspace", "vglyph", "vAlpha", "planeAlpha"] as const;
 type CheckId = (typeof CHECKS)[number];
 type ValueId = (typeof VALUES)[number];
 const ui = {
@@ -160,7 +161,7 @@ const SLOTS = ["c", "iv", "ic", "sg", "sc", "vg", "vc"] as const;
 type Slot = (typeof SLOTS)[number];
 const SLOT_HTML: Record<Slot, string> = { c: "C", iv: "I<sub>V</sub>", ic: "I<sub>C</sub>", sg: "S<sub>∇</sub>", sc: "S<sub>C</sub>", vg: "V<sub>∇</sub>", vc: "V<sub>C</sub>" };
 const SLOT_TIP: Record<Slot, string> = {
-  c: "colorfield: the field painted as a colormapped raster",
+  c: "colorfield: the field painted as a colormapped raster (3D: on an axis-aligned plane through the volume)",
   iv: "isoline value: the field whose level sets are drawn",
   ic: "isoline colour",
   sg: "streamline direction: a vector field, or the gradient of a scalar field",
@@ -187,6 +188,10 @@ interface State {
   slice: Record<string, number[]>;
   /** per curve id: drawn or not, and the shown parameter range (null ends = the curve's own) */
   curves: Record<string, CurveOpts>;
+  /** the 3D colorfield planes (per space), one per axis: the plane `axis = value` in world units; null = no plane on
+   *  that axis; undefined = the default (the space's origin on that axis when inside the C field's box, else the
+   *  box's centre), resolved by `syncPlaneRows` once the C field is known. All three are set by default. */
+  planes: (number | null | undefined)[];
   /** bumped whenever `bundle` is rebuilt from adjustments / zooms (a frame key component: the fields are new objects) */
   revision: number;
   bundleFile: string; // the loaded document (bundle or sweep), for options storage and the URL
@@ -212,7 +217,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, curves: {}, revision: 0, bundleFile: "", sweep: undefined, member: "", signature: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, curves: {}, planes: [undefined, undefined, undefined], revision: 0, bundleFile: "", sweep: undefined, member: "", signature: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -854,29 +859,34 @@ function render(): void {
 
   // labels
   $("resv").textContent = `${grid.size.join("×")}${fused?.info.segments ? ` · ${fmtCount(fused.info.segments)} segs` : ""}${tier() === "moving" && autoRes2.moving !== autoRes2.settled ? ` · settles at ${autoRes2.resolution("settled")}` : ""}`;
-  $("isoValuev").textContent = isoField ? fmtIsoValue(isoField) : "—";
-  $("splitv").textContent = ui.split.value ?? "—";
-  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : fmtSlider(+ui.isoAlpha.value);
-  $("metricv").textContent = ui.metric.value ?? "—";
-  $("linev").textContent = ui.line.value ?? "—";
   // isoline diagnostics ("exact: N vertices, max |f − c| …" / "marching squares on …"); the #isoInfo row is commented out in index.html
   // $("isoInfo").textContent = iso?.info ?? "";
-  $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
-  $("slenv").textContent = ui.slen.value ?? "";
-  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : fmtSlider(+ui.sAlpha.value);
-  $("tailv").textContent = ui.tail.value ?? "";
-  $("ssplitv").textContent = ui.ssplit.value ?? "—";
+  isoStreamLabels(isoField);
 }
+/** a nullable control's readout: `f` of its value, or NOTHING when it is unset (no dash: an empty readout is the mark of a deselected control) */
+const fmtOpt = (v: string | null, f: (n: number) => string = String): string => (v === null ? "" : f(+v));
 /** the `value` readout: the level in the I_V field's codomain, fixed-width (with the codomain's unit) */
 const fmtIsoValue = (f: ScalarUse): string => { const s = fmtSlider(f.codomain.fromParam(+ui.isoValue.value!, ...rangeOf(f))); return f.codomain.unit ? `${s} ${f.codomain.unit}` : s; };
+/** the isolines / isosurfaces and streamlines panels' readouts (both arms) */
+function isoStreamLabels(isoField: ScalarUse | undefined): void {
+  $("isoValuev").textContent = isoField ? fmtIsoValue(isoField) : "";
+  $("splitv").textContent = fmtOpt(ui.split.value);
+  $("isoAlphav").textContent = fmtOpt(ui.isoAlpha.value, fmtSlider);
+  $("metricv").textContent = fmtOpt(ui.metric.value);
+  $("linev").textContent = fmtOpt(ui.line.value);
+  $("linesv").textContent = fmtOpt(ui.lines.value, fmtNum);
+  $("slenv").textContent = fmtOpt(ui.slen.value);
+  $("sAlphav").textContent = fmtOpt(ui.sAlpha.value, fmtSlider);
+  $("tailv").textContent = fmtOpt(ui.tail.value);
+  $("ssplitv").textContent = fmtOpt(ui.ssplit.value);
+}
 /** the vector field panel's readouts (both arms) */
 function glyphLabels(): void {
-  $("vspacev").textContent = `${ui.vspace.value ?? "—"} px`;
-  $("vAlphav").textContent = ui.vAlpha.value === null ? "—" : fmtSlider(+ui.vAlpha.value);
+  $("vspacev").textContent = fmtOpt(ui.vspace.value, (n) => `${n} px`);
+  $("vAlphav").textContent = fmtOpt(ui.vAlpha.value, fmtSlider);
   const gv = glyphVector();
-  const lv = gv && glyphLevelShown ? `level ${glyphLevelShown.level} · ${fmt3(glyphLevelShown.spacing)} apart · ${fmtCount(glyphLevelShown.points)} pts in view` : "";
-  $("vlevelv").textContent = lv || "—";
-  $("vmaxv").textContent = gv && Number.isFinite(glyphMaxShown) && glyphMaxShown > 0 ? `|${gv.name}| = ${fmt3(glyphMaxShown)}` : "—";
+  $("vlevelv").textContent = gv && glyphLevelShown ? `level ${glyphLevelShown.level} · ${fmt3(glyphLevelShown.spacing)} apart · ${fmtCount(glyphLevelShown.points)} pts in view` : "";
+  $("vmaxv").textContent = gv && Number.isFinite(glyphMaxShown) && glyphMaxShown > 0 ? `|${gv.name}| = ${fmt3(glyphMaxShown)}` : "";
 }
 
 /*******************************************************/
@@ -889,13 +899,52 @@ const cropEl = (id: (typeof CROP_IDS)[number]) => ui[id] as unknown as IntervalE
 let cropCommitted: CropRange[] = [[null, null], [null, null], [null, null]];
 const cropPreviewing = false; // the dotted-outline preview path stays available should a gesture become expensive again
 const readCrop = () => { cropCommitted = CROP_IDS.map((id) => [cropEl(id).lo, cropEl(id).hi] as CropRange); };
-const fmtCrop = (r: CropRange) => (r[0] === null && r[1] === null ? "—" : `${r[0] === null ? "" : r[0].toFixed(2)}…${r[1] === null ? "" : r[1].toFixed(2)}`);
+const fmtCrop = (r: CropRange) => (r[0] === null && r[1] === null ? "" : `${r[0] === null ? "" : r[0].toFixed(2)}…${r[1] === null ? "" : r[1].toFixed(2)}`);
 for (const id of CROP_IDS) {
   const el = cropEl(id);
   // live: the face passes are fixed-size and re-dispatched only, so every crop gesture updates the picture directly
   el.addEventListener("input", () => { readCrop(); viewLastChange = performance.now(); state.dirty = true; }); // the 3D grid follows the crop: a drag is `moving`
   el.addEventListener("change", () => { readCrop(); state.dirty = true; saveOptsSoon(); });
 }
+
+/* the colorfield planes: the C field is computed on the planes x / y / z = value and embedded in the volume. One
+   nullable slider per axis (the colorfield panel's `.d3` rows), spanning the C field's box along that axis;
+   deselected = no plane on that axis. All three start set, at the space's origin or the box's centre. */
+const PLANE_IDS = ["planex", "planey", "planez"] as const;
+const planeSliders = PLANE_IDS.map((id) => $(id) as SliderEl);
+/** a plane's default coordinate on `axis`: the space's origin when it has one inside the C field's box, else the box's centre */
+function planeDefault(cf: ScalarUse, axis: number): number {
+  const a = cf.data.box.a[axis]!, b = cf.data.box.b[axis]!;
+  const o = currentSpace()?.spec.origin?.[axis];
+  return o !== undefined && o >= a && o <= b ? o : (a + b) / 2;
+}
+/** what the sliders' ranges were last set for: the C field and its box */
+let planeKey = "";
+/** keep the rows in step with the C field: the sliders' bounds (a coordinate that is unset or outside the new bounds
+ *  becomes that axis's default; a dropped plane stays dropped) and the readouts */
+function syncPlaneRows(): void {
+  const cf = slotScalar("c");
+  if (!cf || cf.data.dimCount !== 3) { planeKey = ""; PLANE_IDS.forEach((id) => { $(`${id}v`).textContent = ""; }); return; }
+  const key = `${cf.id}|${cf.data.box.intervals.flat().join(",")}`;
+  if (key !== planeKey) {
+    planeKey = key;
+    planeSliders.forEach((sl, axis) => {
+      const a = cf.data.box.a[axis]!, b = cf.data.box.b[axis]!;
+      sl.setRange(a, b, 0); // continuous: a pixel's worth of resolution, and the origin lands exactly
+      let v = state.planes[axis];
+      if (v === undefined || (v !== null && !(v >= a && v <= b))) v = planeDefault(cf, axis);
+      state.planes[axis] = v;
+      sl.value = v === null ? null : String(v);
+    });
+  }
+  PLANE_IDS.forEach((id, axis) => { const v = state.planes[axis]; $(`${id}v`).textContent = typeof v === "number" ? fmtSlider(v) : ""; });
+}
+/** the planes in use for the 3D arm: every axis whose slider is set (none until the rows have been synced for the C field) */
+const planesInUse = (): { axis: number; depth: number }[] => state.planes.flatMap((v, axis) => (typeof v === "number" ? [{ axis, depth: v }] : []));
+planeSliders.forEach((sl, axis) => {
+  sl.addEventListener("input", () => { const v = sl.value; state.planes[axis] = v === null ? null : +v; state.dirty = true; });
+  sl.addEventListener("change", () => saveOptsSoon());
+});
 
 let view3d: View3D | undefined;
 const gradCache = new Map<string, VectorFieldData>();
@@ -909,6 +958,10 @@ function view3dOf(): View3D | undefined {
     region: viewRegion, // centred in the free part of the viewport, like the 2D arm
     isoField: () => (ui.showIso.checked ? slotScalar("iv") : undefined),
     colourField: () => slotScalar("ic"),
+    colorField: () => (ui.showScalar.checked ? slotScalar("c") : undefined),
+    planes: planesInUse,
+    smooth: () => ui.smooth.checked,
+    planeAlpha: () => num("planeAlpha") ?? 1,
     gradientOf: (u) => {
       if (u.data.kind !== "symbolic") return undefined;
       let g = gradCache.get(u.id);
@@ -952,21 +1005,13 @@ function view3dOf(): View3D | undefined {
 function render3d(): void {
   const v = view3dOf();
   if (!v) { renderEmpty(); status("3D spaces need WebGPU"); return; }
+  syncPlaneRows(); // the C field or its box may have changed: the sliders' bounds and the planes' coordinates follow
   try { v.render(); } catch (e) { showError(e); }
-  const isoField = slotScalar("iv");
-  $("isoValuev").textContent = isoField ? fmtIsoValue(isoField) : "—";
-  $("splitv").textContent = ui.split.value ?? "—";
-  $("isoAlphav").textContent = ui.isoAlpha.value === null ? "—" : fmtSlider(+ui.isoAlpha.value);
+  isoStreamLabels(slotScalar("iv"));
   const i3 = v.info;
   $("res3v").textContent = `${i3.grid.join("×")}${i3.triangles ? ` · ${fmtCount(i3.triangles)} △` : ""}${tier() === "moving" && autoRes3.moving !== autoRes3.settled ? ` · settles at ${autoRes3.resolution("settled")}` : ""}`;
-  $("metricv").textContent = ui.metric.value ?? "—";
-  $("linev").textContent = ui.line.value ?? "—";
-  $("linesv").textContent = ui.lines.value === null ? "—" : fmtNum(+ui.lines.value);
-  $("slenv").textContent = ui.slen.value ?? "";
-  $("sAlphav").textContent = ui.sAlpha.value === null ? "—" : fmtSlider(+ui.sAlpha.value);
-  $("tailv").textContent = ui.tail.value ?? "";
-  $("ssplitv").textContent = ui.ssplit.value ?? "—";
   CROP_IDS.forEach((id, d) => { $(`${id}v`).textContent = fmtCrop(cropPreviewing ? [cropEl(id).lo, cropEl(id).hi] : cropCommitted[d]!); });
+  $("planeAlphav").textContent = fmtOpt(ui.planeAlpha.value, fmtSlider);
   updateIsoNotches();
   glyphMaxShown = v.glyphMaxNorm;
   glyphLabels();
@@ -1124,8 +1169,7 @@ function centerPoint(): number[] | undefined {
 /** the colour slots currently in use, in display order */
 function colourSlots(): [Slot, ScalarUse][] {
   const out: [Slot, ScalarUse][] = [];
-  const is2 = spaceDims() === 2;
-  const c = slotScalar("c"); if (is2 && ui.showScalar.checked && c) out.push(["c", c]);
+  const c = slotScalar("c"); if (ui.showScalar.checked && c) out.push(["c", c]);
   const ic = slotScalar("ic"); if (ui.showIso.checked && ic) out.push(["ic", ic]);
   const sc = slotScalar("sc"); if (streamVector() && sc) out.push(["sc", sc]);
   const vc = slotScalar("vc"); if (glyphVector() && vc) out.push(["vc", vc]);
@@ -1267,7 +1311,7 @@ function showCursor(x: number, y: number, rested = false): void {
 const metrics = new MetricsTable({
   body: $("metricSvgBody"),
   slots: [
-    { key: "c", label: "C", tip: SLOT_TIP.c, type: "scalar", visible: () => ui.showScalar.checked, toggle: () => ui.showScalar.click(), present: () => spaceDims() === 2 },
+    { key: "c", label: "C", tip: SLOT_TIP.c, type: "scalar", visible: () => ui.showScalar.checked, toggle: () => ui.showScalar.click() },
     { key: "iv", label: "I", sub: "V", tip: SLOT_TIP.iv, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
     { key: "ic", label: "I", sub: "C", tip: SLOT_TIP.ic, type: "scalar", visible: () => ui.showIso.checked, toggle: () => ui.showIso.click() },
     { key: "sg", label: "S", sub: "∇", tip: SLOT_TIP.sg, type: "vector", visible: streamsOn, toggle: () => ui.showStream.click() },
@@ -1351,7 +1395,7 @@ let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
 const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}${state.sweep ? `#${state.signature}` : ""}` : null);
 /** where a sweep remembers its last member */
 const memberKey = () => (state.bundleFile && state.sweep ? `tensatory.member.${state.bundleFile}` : null);
-interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
+interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean }; planes?: Record<string, number | null> }
 /** a saved camera, with the orientation of one saved as yaw / pitch (before the quaternion camera) converted and a malformed `rot` dropped */
 function savedCamera(c: Partial<Camera3D> & { yaw?: number; pitch?: number }): Partial<Camera3D> {
   const { yaw, pitch, rot, ...rest } = c;
@@ -1367,6 +1411,10 @@ interface Opts { ui?: Record<string, unknown>; ui3?: Record<string, unknown>; ma
  */
 const PER_DIM_VALUES = ["sAlpha", "lines", "ssplit", "tail", "slen"] as const;
 const DEFAULTS_3D: Record<(typeof PER_DIM_VALUES)[number], string | null> = { sAlpha: "0.5", lines: "2000", ssplit: "4", tail: "5", slen: "100" };
+/** ... and the ticks that differ: the colorfield is on by default in 2D (the raster IS the picture) and off in 3D (a plane through the volume) */
+const PER_DIM_CHECKS = ["showScalar"] as const;
+const DEFAULTS_3D_CHECKS: Record<(typeof PER_DIM_CHECKS)[number], boolean> = { showScalar: false };
+const perDim = (id: string): boolean => (PER_DIM_VALUES as readonly string[]).includes(id) || (PER_DIM_CHECKS as readonly string[]).includes(id);
 function readOpts(): Opts {
   const key = optsKey(); const raw = key && localStorage.getItem(key); if (!raw) return {};
   try { const o = JSON.parse(raw) as Opts & { sel?: unknown }; return "sel" in o ? {} : o; } catch { return {}; } // "sel" at the root: pre-space format, ignored
@@ -1375,10 +1423,10 @@ function saveOpts(): void {
   const key = optsKey(); if (!key || loadingOpts) return;
   const prev = readOpts();
   const o: Opts = {
-    ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !(PER_DIM_VALUES as readonly string[]).includes(id)).map((id) => [id, ui[id].value])]) },
-    ui3: spaceDims() === 3 ? Object.fromEntries(PER_DIM_VALUES.map((id) => [id, ui[id].value])) : prev.ui3,
+    ui: { ...prev.ui, ...Object.fromEntries([...CHECKS.filter((id) => spaceDims() !== 3 || !perDim(id)).map((id) => [id, ui[id].checked]), ...VALUES.filter((id) => spaceDims() !== 3 || !perDim(id)).map((id) => [id, ui[id].value])]) },
+    ui3: spaceDims() === 3 ? Object.fromEntries([...PER_DIM_VALUES.map((id) => [id, ui[id].value]), ...PER_DIM_CHECKS.map((id) => [id, ui[id].checked])]) : prev.ui3,
     maps: state.maps, intervals: state.intervals, space: state.space, controls: state.adjust, boxZoom: state.boxZoom, slice: state.slice, curves: state.curves,
-    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}) } },
+    spaces: { ...prev.spaces, [state.space]: { sel: state.lockedSel, view: viewCustom ? renderer.view : { flipX: renderer.view.flipX, flipY: renderer.view.flipY, rot: renderer.view.rot }, dir: state.dir, res: autoRes().state(), ...(spaceDims() === 3 && view3d?.cameraCustom ? { camera: view3d.camera } : {}), ...(spaceDims() === 3 ? { planes: Object.fromEntries(state.planes.flatMap((v, axis) => (v === undefined ? [] : [[axis, v]]))) } : {}) } },
   };
   localStorage.setItem(key, JSON.stringify(o));
 }
@@ -1392,14 +1440,14 @@ function loadOpts(): boolean {
   try {
     const dim3 = spaceDims() === 3;
     for (const [id, v] of Object.entries(o.ui ?? {})) {
+      if (dim3 && perDim(id)) continue;
       if ((CHECKS as readonly string[]).includes(id)) ui[id as CheckId].checked = Boolean(v);
-      else if ((VALUES as readonly string[]).includes(id) && !(dim3 && (PER_DIM_VALUES as readonly string[]).includes(id))) ui[id as ValueId].value = v as string | null;
+      else if ((VALUES as readonly string[]).includes(id)) ui[id as ValueId].value = v as string | null;
     }
-    // the per-dimension controls: this arm's saved values, else its defaults (3D: DEFAULTS_3D; 2D: the HTML data-value)
-    for (const id of PER_DIM_VALUES) {
-      const saved = dim3 ? o.ui3 : o.ui;
-      ui[id].value = (saved && id in saved ? saved[id] : dim3 ? DEFAULTS_3D[id] : ($(id).dataset.value ?? null)) as string | null;
-    }
+    // the per-dimension controls: this arm's saved values, else its defaults (3D: DEFAULTS_3D; 2D: the HTML data-value / checked)
+    const saved = dim3 ? o.ui3 : o.ui;
+    for (const id of PER_DIM_VALUES) ui[id].value = (saved && id in saved ? saved[id] : dim3 ? DEFAULTS_3D[id] : ($(id).dataset.value ?? null)) as string | null;
+    for (const id of PER_DIM_CHECKS) ui[id].checked = saved && id in saved ? Boolean(saved[id]) : dim3 ? DEFAULTS_3D_CHECKS[id] : ui[id].defaultChecked;
     syncTicks(); syncIsoRate(); readCrop();
     if (o.maps) state.maps = { ...o.maps };
     if (o.intervals) { state.intervals = {}; for (const [id, v] of Object.entries(o.intervals)) { const s = asSelection(v); if (!isNoSelection(s)) state.intervals[id] = s; } }
@@ -1408,6 +1456,8 @@ function loadOpts(): boolean {
     // dir.stream used to be the integration sign (now the `sdir` UI value): saves without `sdir` predate that and are not playback directions
     if (so?.dir) state.dir = { iso: so.dir.iso === -1 ? -1 : 1, stream: o.ui?.sdir !== undefined && so.dir.stream === -1 ? -1 : 1 };
     if (so?.camera && view3d) { view3d.camera = { ...view3d.camera, ...savedCamera(so.camera) }; view3d.cameraCustom = true; }
+    // the colorfield planes: a saved coordinate (or null = dropped) per axis; an axis without one gets its default
+    if (so?.planes && typeof so.planes === "object") for (const axis of [0, 1, 2]) { const v = so.planes[axis]; if (v === null || (typeof v === "number" && Number.isFinite(v))) state.planes[axis] = v; }
     if (so?.res) autoRes().restore(so.res); // the last good resolutions of this space
     guardResolution(); // ... unless a costly field is selected: those start from the bottom
     syncPlayGlyphs();
@@ -1518,6 +1568,7 @@ function setSpace(id: string, fromUser: boolean): void {
   const sel: Sel = { c: first, iv: first, ic: NONE, sg: vec, sc: NONE, vg: vec, vc: NONE };
   state.sel = { ...sel }; state.lockedSel = { ...sel };
   state.dir = { iso: 1, stream: 1 }; syncPlayGlyphs();
+  state.planes = [undefined, undefined, undefined]; planeKey = ""; // the colorfield planes start at their default coordinates unless this space remembers them
   viewCustom = false;
   renderer.view = { ...renderer.view, flipX: false, flipY: false, rot: 0 };
   if (m.numDims === 2) currentViewBox(); // establishes the view box (and a default fit) before a saved view may override it
@@ -1532,12 +1583,13 @@ function setSpace(id: string, fromUser: boolean): void {
       if (m.numDims === 2 && carry.view) { if (carry.space === m.id) { renderer.view = { ...carry.view }; viewCustom = carry.viewCustom; } else { renderer.view = { ...renderer.view, flipX: carry.view.flipX, flipY: carry.view.flipY, rot: carry.view.rot }; } }
       // 3D: the same space keeps the camera; another space (pca vs random directions: other boxes, other scales) keeps the ORIENTATION and re-fits
       if (m.numDims === 3 && carry.camera && view3d) { if (carry.space === m.id) { view3d.camera = { ...carry.camera }; view3d.cameraCustom = carry.cameraCustom; } else if (carry.cameraCustom) view3d.holdOrientation(carry.camera.rot); }
+      if (m.numDims === 3 && carry.space === m.id) state.planes = [...carry.planes];
     }
   }
   carry = undefined;
   // isolines and streamlines default OFF (a costly field's first frame is then just the raster); a 3D space has no
   // raster, so on its first visit turn the isosurfaces on rather than show an empty box
-  if (m.numDims === 3 && !hadSaved && !ui.showIso.checked && !ui.showStream.checked && !ui.showVec.checked) { ui.showIso.checked = true; syncTicks(); }
+  if (m.numDims === 3 && !hadSaved && !ui.showIso.checked && !ui.showStream.checked && !ui.showVec.checked && !ui.showScalar.checked) { ui.showIso.checked = true; syncTicks(); }
   // a space with a declared `flow` is a dynamical system: its streamlines run FORWARD in time (following the field,
   // "ascending") on its first visit; the descending default is for gradients of losses. `dir` is a bundle-level
   // control, so a later choice sticks across the bundle's spaces.
@@ -1713,7 +1765,7 @@ function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void
 const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!state.paused && ui.anim.checked && num("lines") !== null && !!streamVector());
 
 /** what a member switch carries into a member whose signature has no saved options yet */
-let carry: { sel: Sel; space: string; dims: number; view: typeof renderer.view | undefined; viewCustom: boolean; camera: Camera3D | undefined; cameraCustom: boolean } | undefined;
+let carry: { sel: Sel; space: string; dims: number; view: typeof renderer.view | undefined; viewCustom: boolean; camera: Camera3D | undefined; cameraCustom: boolean; planes: State["planes"] } | undefined;
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null, member = ""): void {
   state.bundleFile = file; state.member = member; state.signature = shortHash(signatureOf(parsed.spec)); state.baseSpec = parsed.spec; state.arrays = parsed.arrays;
@@ -1795,7 +1847,7 @@ async function setMember(id: string, why?: string, wantSpace?: string | null): P
   try {
     const b = await sweep.member(id, { onProgress: (p) => status(`loading member ${id}… arrays ${p.done}/${p.total}`) });
     if (state.sweep !== sweep) return; // another document was loaded meanwhile
-    if (state.bundle) carry = { sel: { ...state.lockedSel }, space: state.space, dims: spaceDims(), view: { ...renderer.view }, viewCustom, camera: view3d ? { ...view3d.camera } : undefined, cameraCustom: view3d?.cameraCustom ?? false };
+    if (state.bundle) carry = { sel: { ...state.lockedSel }, space: state.space, dims: spaceDims(), view: { ...renderer.view }, viewCustom, camera: view3d ? { ...view3d.camera } : undefined, cameraCustom: view3d?.cameraCustom ?? false, planes: [...state.planes] };
     setBundle(b, state.bundleFile, wantSpace ?? state.space, id);
     const mk = memberKey(); if (mk) localStorage.setItem(mk, id);
     status(why ? `${b.name}: ${why}` : "");
@@ -1924,7 +1976,7 @@ $("flipx").onclick = () => { renderer.view.flipX = !renderer.view.flipX; orienta
 $("flipy").onclick = () => { renderer.view.flipY = !renderer.view.flipY; orientationChanged(); };
 $("cw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 1) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
 $("ccw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 3) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
-/** panel shortcut key → the ✓ checkbox it toggles (the colorfield panel is absent in 3D, where the key is inert) */
+/** panel shortcut key → the ✓ checkbox it toggles */
 const PANEL_KEYS: Partial<Record<string, "showScalar" | "showIso" | "showStream" | "showVec">> = { c: "showScalar", i: "showIso", s: "showStream", v: "showVec" };
 // the pickers are not focusable (their table takes the keys only while open), so space always toggles play; text
 // inputs keep their keys (the guard below)
@@ -1979,7 +2031,7 @@ let lastT = performance.now();
 let pendingFrame: (Omit<FrameReport, "ms"> & { t0: number; jsMs: number; gpuMs?: number; awaitingGpu?: boolean }) | undefined;
 let lastFrameKey = "", lastTier: Tier = "settled";
 /** what a frame recomputes when it changes: grid, levels, slots, options (CPU compute has no dispatch counter to watch) */
-const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, viewBoxKey, cropCommitted.flat().join(",")].join("|");
+const frameKey = () => [spaceDims(), state.revision, autoRes().resolution(tier()), ui.isoValue.value, ui.split.value, JSON.stringify(state.sel), ui.metric.value, ui.line.value, ui.isoExact.checked, ui.showIso.checked, ui.showScalar.checked, JSON.stringify(state.planes), viewBoxKey, cropCommitted.flat().join(",")].join("|");
 /** what the resolution is spent on: failed steps are remembered per context */
 const resCtx = () => [state.bundleFile, state.space, JSON.stringify(state.sel), ui.split.value, ui.metric.value, ui.line.value, ui.isoExact.checked, ui.isoOutline.checked, ui.showIso.checked, ui.showScalar.checked, ui.lines.value, modes.compute, modes.render].join("|");
 /** debugging hook: per-frame GPU counters (`window.__tensatory.frames` = last 60 frames of { ms, dispatches, pipelines, recomputed }) */

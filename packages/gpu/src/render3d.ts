@@ -6,10 +6,12 @@
 // The box outline, points and labels are left to a Canvas 2D overlay that
 // projects with `Camera3D`.
 
+import type { Box } from "@tensatory/core";
 import type { GpuBackend } from "./device";
 import { SEG3_FLOATS, type GpuSegments3 } from "./lines3d";
 import { VERT_WGSL, type GpuMesh } from "./mesh";
 import type { Lut, ValueMap } from "./render";
+import type { GpuGrid } from "./resident";
 import { SEG_FLOATS, type GpuSegments } from "./segments";
 
 /** unit quaternion [x, y, z, w] */
@@ -98,6 +100,27 @@ export interface GpuLineLayer3D {
   /** ignore the crop planes (the box outline itself) */
   uncropped?: boolean;
 }
+/**
+ * a colormapped raster on the axis-aligned plane `axis = depth` (the 3D colorfield): the 2D twin of the 2D
+ * renderer's raster — a resident 2D grid over the plane's two other axes (ascending order, as `GpuLineLayer3D.embed`
+ * lifts them), bilinear or nearest, through the LUT, clipped to `box` (the field's) and the crop planes. Flat
+ * (unlit: its colours must read against the legend). Opaque (the default): depth-tested and written, so shells
+ * behind it hide and translucent shells in front composite over it; with `alpha` < 1 it joins the weighted-blended
+ * OIT pass of the translucent shells and lines (depth-tested, no write).
+ */
+export interface GpuPlaneLayer3D {
+  /** opacity (default 1) */
+  alpha?: number;
+  values: GpuGrid;
+  channel?: number;
+  axis: number;
+  depth: number;
+  /** the field's box: the quad is clipped to it in the plane's two axes */
+  box: Box;
+  map: ValueMap;
+  lut: Lut;
+  smooth: boolean;
+}
 export interface GpuScene3D {
   camera: Camera3D;
   /** the world box the camera frames (near / far planes are derived from it) */
@@ -108,6 +131,8 @@ export interface GpuScene3D {
   background: [number, number, number];
   meshes: GpuMeshLayer[];
   lines?: GpuLineLayer3D[];
+  /** colorfield planes (opaque) */
+  planes?: GpuPlaneLayer3D[];
   /** fragments outside [cropMin, cropMax] are discarded (crop planes); default: none */
   cropMin?: [number, number, number];
   cropMax?: [number, number, number];
@@ -457,6 +482,75 @@ struct FOut { @location(0) color: vec4<f32>, @builtin(frag_depth) depth: f32 }
   return o;
 }`;
 
+// The colorfield plane: a quad over the field's box on the plane `axis = depth`, coloured from a resident 2D grid
+// (the plane's two other axes in ascending order) exactly as the 2D renderer's raster — bilinear or nearest, LUT,
+// alpha < ½ = masked. Flat: no lighting, so the colours read against the legend. Depth-tested and written.
+const PLANE3 = `
+struct PlaneU { viewProj: mat4x4<f32>, gridA: vec4<f32>, gridN: vec4<i32>, box: vec4<f32>, map: vec4<f32>, crop: vec4<f32>, cropLo: vec4<f32>, embed: vec4<f32>, misc: vec4<f32> }
+@group(0) @binding(0) var<uniform> u: PlaneU;
+@group(0) @binding(1) var<storage, read> vals: array<f32>;
+@group(0) @binding(2) var lut: texture_2d<f32>;
+@group(0) @binding(3) var lutSampler: sampler;
+fn isnan_(x: f32) -> bool { let b = bitcast<u32>(x); return (b & 0x7f800000u) == 0x7f800000u && (b & 0x007fffffu) != 0u; }
+fn param(value: f32, m: vec4<f32>) -> f32 {
+  let v = clamp(value, min(m.x, m.y), max(m.x, m.y));
+  var t: f32;
+  if (m.z > 0.5) { t = (log(v) - log(m.x)) / (log(m.y) - log(m.x)); } else { t = (v - m.x) / (m.y - m.x); }
+  t = clamp(t, 0.0, 1.0);
+  return select(t, 1.0 - t, m.w > 0.5);
+}
+fn lift(q: vec2<f32>) -> vec3<f32> {
+  let ax = i32(u.embed.x); let d = u.embed.y;
+  if (ax == 0) { return vec3<f32>(d, q.x, q.y); }
+  if (ax == 1) { return vec3<f32>(q.x, d, q.y); }
+  return vec3<f32>(q.x, q.y, d);
+}
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) plane: vec2<f32>, @location(1) world: vec3<f32> }
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  let a = u.box.xy; let b = u.box.zw;
+  var corners = array<vec2<f32>, 6>(a, vec2<f32>(b.x, a.y), vec2<f32>(a.x, b.y), vec2<f32>(a.x, b.y), vec2<f32>(b.x, a.y), b);
+  let q = corners[vi];
+  var o: VOut;
+  o.plane = q; o.world = lift(q);
+  o.pos = u.viewProj * vec4<f32>(o.world, 1.0);
+  return o;
+}
+fn readVal(i: i32, j: i32) -> f32 { return vals[(i * u.gridN.z + j * u.gridN.w) * i32(u.misc.y) + i32(u.misc.z)]; }
+// the colour of a fragment (shared by the opaque and the translucent entry points); discards what is not drawn
+fn planeColour(in: VOut) -> vec3<f32> {
+  if (u.crop.w > 0.5 && (any(in.world > u.crop.xyz) || any(in.world < u.cropLo.xyz))) { discard; }
+  let g = (in.plane - u.gridA.xy) / u.gridA.zw;
+  var value: f32;
+  if (u.misc.x > 0.5) {
+    let gc = clamp(g, vec2<f32>(0.0), vec2<f32>(f32(u.gridN.x - 1), f32(u.gridN.y - 1)));
+    var i0 = i32(floor(gc.x)); if (i0 >= u.gridN.x - 1) { i0 = max(0, u.gridN.x - 2); }
+    var j0 = i32(floor(gc.y)); if (j0 >= u.gridN.y - 1) { j0 = max(0, u.gridN.y - 2); }
+    let f = gc - vec2<f32>(f32(i0), f32(j0));
+    let i1 = min(i0 + 1, u.gridN.x - 1); let j1 = min(j0 + 1, u.gridN.y - 1);
+    value = (1.0 - f.x) * (1.0 - f.y) * readVal(i0, j0) + f.x * (1.0 - f.y) * readVal(i1, j0) + (1.0 - f.x) * f.y * readVal(i0, j1) + f.x * f.y * readVal(i1, j1);
+  } else {
+    let i = clamp(i32(round(g.x)), 0, u.gridN.x - 1); let j = clamp(i32(round(g.y)), 0, u.gridN.y - 1);
+    value = readVal(i, j);
+  }
+  if (isnan_(value)) { discard; }
+  let c = textureSample(lut, lutSampler, vec2<f32>(param(value, u.map), 0.5));
+  if (c.a < 0.5) { discard; } // masked by the colormap interval selection
+  return c.rgb;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> { return vec4<f32>(planeColour(in), 1.0); }
+// translucent: weighted-blended OIT like the meshes and lines (accum, reveal); misc.w = alpha
+struct FOut { @location(0) accum: vec4<f32>, @location(1) reveal: f32 }
+@fragment fn fsTrans(in: VOut) -> FOut {
+  let rgb = planeColour(in);
+  let a = u.misc.w;
+  let z = in.pos.z;
+  let w = clamp(a * 10.0 * (1.0 - z * 0.99) * (1.0 - z * 0.99), 1e-2, 3e3);
+  var o: FOut;
+  o.accum = vec4<f32>(rgb * a, a) * w;
+  o.reveal = a;
+  return o;
+}`;
+
 const OPAQUE = `${MESH_COMMON}
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> { let c = shade(in); return vec4<f32>(c.rgb, 1.0); }`;
 
@@ -503,6 +597,8 @@ export class GpuRenderer3D {
   private readonly composite: GPURenderPipeline;
   private readonly lines: GPURenderPipeline;
   private readonly cones: GPURenderPipeline;
+  private readonly planes: GPURenderPipeline;
+  private readonly planesTrans: GPURenderPipeline;
   private readonly sampler: GPUSampler;
   private readonly luts = new WeakMap<Lut, GPUTexture>();
   private readonly uniformPool: GPUBuffer[] = [];
@@ -568,6 +664,27 @@ export class GpuRenderer3D {
       fragment: { module: coneMod, entryPoint: "fs", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    const planeMod = dev.createShaderModule({ code: PLANE3 });
+    this.planes = dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: planeMod, entryPoint: "vs" },
+      fragment: { module: planeMod, entryPoint: "fs", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    this.planesTrans = dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: planeMod, entryPoint: "vs" },
+      fragment: {
+        module: planeMod, entryPoint: "fsTrans",
+        targets: [
+          { format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } },
+          { format: "r16float", blend: { color: { srcFactor: "zero", dstFactor: "one-minus-src" }, alpha: { srcFactor: "zero", dstFactor: "one-minus-src" } } },
+        ],
+      },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less" },
     });
     const compMod = dev.createShaderModule({ code: COMPOSITE });
     this.composite = dev.createRenderPipeline({
@@ -686,6 +803,31 @@ export class GpuRenderer3D {
     });
   }
 
+  /** PlaneU: viewProj, gridA (a0, a1, h0, h1), gridN (n0, n1, s0, s1), box (a0, a1, b0, b1 in the plane's axes), map, crop, cropLo, embed (axis, depth), misc (smooth, channels, channel, alpha) */
+  private bindPlane(L: GpuPlaneLayer3D, viewProj: Mat4, crop: number[], cropLo: number[], pipeline = this.planes): GPUBindGroup {
+    const f = new Float32Array(64);
+    const grid = L.values.grid;
+    const keep = [0, 1, 2].filter((d) => d !== L.axis) as [number, number];
+    f.set(viewProj, 0);
+    f.set([grid.box.a[0]!, grid.box.a[1]!, grid.spacing[0]!, grid.spacing[1]!], 16);
+    new Int32Array(f.buffer).set([grid.size[0]!, grid.size[1]!, grid.strides[0]!, grid.strides[1]!], 20);
+    f.set([L.box.a[keep[0]]!, L.box.a[keep[1]]!, L.box.b[keep[0]]!, L.box.b[keep[1]]!], 24);
+    f.set([L.map.lo, L.map.hi, L.map.log ? 1 : 0, L.map.flip ? 1 : 0], 28);
+    f.set([crop[0]!, crop[1]!, crop[2]!, 1], 32);
+    f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 36);
+    f.set([L.axis, L.depth, 0, 0], 40);
+    f.set([L.smooth ? 1 : 0, L.values.channels, L.channel ?? 0, L.alpha ?? 1], 44);
+    return this.backend.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniform(f) } },
+        { binding: 1, resource: { buffer: L.values.buffer } },
+        { binding: 2, resource: this.lutTexture(L.lut).createView() },
+        { binding: 3, resource: this.sampler },
+      ],
+    });
+  }
+
   render(scene: GpuScene3D): void {
     const dev = this.backend.device;
     this.poolIdx = 0;
@@ -697,6 +839,7 @@ export class GpuRenderer3D {
     const [r, g, b] = scene.background;
     const opaque = scene.meshes.filter((m) => m.alpha >= 0.999), trans = scene.meshes.filter((m) => m.alpha < 0.999);
     const linesOpaque = (scene.lines ?? []).filter((L) => (L.alpha ?? 1) >= 0.999 || L.kind === "triangles"), linesTrans = (scene.lines ?? []).filter((L) => (L.alpha ?? 1) < 0.999 && L.kind !== "triangles");
+    const planesOpaque = (scene.planes ?? []).filter((L) => (L.alpha ?? 1) >= 0.999), planesTrans = (scene.planes ?? []).filter((L) => (L.alpha ?? 1) < 0.999);
     const enc = dev.createCommandEncoder();
     const colour = this.ctx.getCurrentTexture().createView();
     const depth = T.depth.createView();
@@ -711,8 +854,9 @@ export class GpuRenderer3D {
       p1.drawIndirect(L.segs.indirect, 0);
     }
     for (const L of opaque) { p1.setPipeline(this.opaque); p1.setBindGroup(0, this.bind(this.opaque, L, viewProj, eye, crop, cropLo)); p1.drawIndirect(L.mesh.indirect, 0); }
+    for (const L of planesOpaque) { p1.setPipeline(this.planes); p1.setBindGroup(0, this.bindPlane(L, viewProj, crop, cropLo)); p1.draw(6); }
     p1.end();
-    if (trans.length || linesTrans.length) {
+    if (trans.length || linesTrans.length || planesTrans.length) {
       const p2 = enc.beginRenderPass({
         colorAttachments: [
           { view: T.accum.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
@@ -722,6 +866,7 @@ export class GpuRenderer3D {
       });
       for (const L of trans) { p2.setPipeline(this.transparent); p2.setBindGroup(0, this.bind(this.transparent, L, viewProj, eye, crop, cropLo)); p2.drawIndirect(L.mesh.indirect, 0); }
       for (const L of linesTrans) { p2.setPipeline(this.linesTrans); p2.setBindGroup(0, this.bindLines(L, viewProj, eye, crop, cropLo, w, h, this.linesTrans)); p2.drawIndirect(L.segs.indirect, 0); }
+      for (const L of planesTrans) { p2.setPipeline(this.planesTrans); p2.setBindGroup(0, this.bindPlane(L, viewProj, crop, cropLo, this.planesTrans)); p2.draw(6); }
       p2.end();
       const p3 = enc.beginRenderPass({ colorAttachments: [{ view: colour, loadOp: "load", storeOp: "store" }] });
       p3.setPipeline(this.composite);

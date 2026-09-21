@@ -28,7 +28,7 @@ export { VERT_FLOATS, VERT_WGSL, allocMesh, resetMesh, packMesh, uploadMesh, rea
 export type { GpuMesh, FusedIsosurface, FusedIsosurfaceOptions } from "./mesh";
 export { projection3Wgsl } from "./mesh";
 export { GpuRenderer3D, cameraMatrices, cameraEye, cameraAxes, quatMul, quatAxisAngle, quatNormalize, quatRotate, quatLook, regionAspect, project, perspective, lookAt, mul4 } from "./render3d";
-export type { Camera3D, Quat, GpuMeshLayer, GpuLineLayer3D, GpuScene3D, Mat4 } from "./render3d";
+export type { Camera3D, Quat, GpuMeshLayer, GpuLineLayer3D, GpuPlaneLayer3D, GpuScene3D, Mat4 } from "./render3d";
 export { SEG3_FLOATS, SEG3_WGSL, SEG3_APPEND_WGSL, allocSegments3, resetSegments3, uploadSegments3, readSegments3, packPolylines3, packStreamlines3, packTriangles3, boxEdges } from "./lines3d";
 export { fusedStreamlines3, packSeeds3, SEED3_FLOATS } from "./fused3d";
 export type { FusedStreamlines3 } from "./fused3d";

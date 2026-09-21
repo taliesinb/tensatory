@@ -70,7 +70,7 @@ pipelines and either draw with Canvas 2D or upload their results. See
   resolution's last decision, and `iso res` — the current grid and segment /
   triangle count, read-only), `controls` (only when the bundle asks for
   rows, see below), `2D space` (points / box flags; view: fit,
-  flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
+  flip x, flip y, cw, ccw), `colorfield` (strip tick = raster on/off; smooth; in 3D three nullable sliders `x` / `y` / `z` — the C field on the planes `axis = value`, all set by default at the space's origin or the box's centre, plus a nullable `opacity` for all of them (unset = opaque), the tick OFF by default there; [3d.md](3d.md)), `isolines` (value, split, opacity, `value sm` = box blur of the field (control id `metric`), `line sm` / `surf sm` = Taubin smoothing (id `line`),
   ▶ + rate), `streamlines` (dir: ascending / descending; mode: bi-strat /
   strat / JL / cover; lines, length, opacity, tail, split, ▶), `vector field`
   (off by default: spacing in px, glyph: arrow / head / solid triangle, opacity,
@@ -84,9 +84,8 @@ pipelines and either draw with Canvas 2D or upload their results. See
   (`.body::after`) that takes every pointer event, so nothing in them hovers,
   drags, scrolls or previews; the strip stays live. Their titles' underlined
   first letters `c` / `i` / `s` / `v` are keyboard shortcuts that toggle the
-  tick (plain keys only — ⌘C / ⌘V / ⌘S keep their meaning; `c` is inert in 3D
-  where the panel is absent) and are the panels' column letters in the
-  fields matrix.
+  tick (plain keys only — ⌘C / ⌘V / ⌘S keep their meaning) and are the
+  panels' column letters in the fields matrix.
   Locking a new I_V / S_∇ / V_∇ field while an animation plays pauses the
   animations first (`GEOMETRY_SLOTS` in `setSel`; space resumes): the new
   field's contours / integrations / lattices are recomputed — on the CPU for a
@@ -220,7 +219,7 @@ test runs every N-D bundle through a 2D and a 3D slice.
 
 ## Slots and the fields matrix
 
-Slots: **C** colorfield, **I_V** isoline value, **I_C** isoline colour,
+Slots: **C** colorfield (the raster in 2D, the planes through the volume in 3D), **I_V** isoline value, **I_C** isoline colour,
 **S_∇** streamline direction (vector), **S_C** streamline colour, **V_∇**
 glyph vector field, **V_C** glyph colour. Rows are
 every scalar *and* vector field of the bundle; a field with a `summary` /

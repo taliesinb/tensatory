@@ -335,7 +335,16 @@ profiling test.
   default: compute / render, `mem cap`, device, live memory —, `controls`
   when the bundle has rows, `2D space`,
   `colorfield`, `isolines`, `streamlines`, `vector field` — isolines and
-  streamlines OFF by default, isosurfaces on at a 3D space's first visit), a
+  streamlines OFF by default, isosurfaces on at a 3D space's first visit; the
+  colorfield panel is shared by both arms: in 3D it is OFF by default
+  (`showScalar` saved per arm) and has three NULLABLE sliders `x` / `y` /
+  `z` — the C field is computed on every plane `axis = value` that is set
+  (all three by default, at the space's `origin` on that axis if inside the
+  C field's box, else its centre) and embedded as a flat colormapped quad,
+  depth-tested, opaque unless the nullable `opacity` row is set (then in
+  the OIT pass) (`GpuPlaneLayer3D`, `View3D.planeLayer`: the face
+  outlines' plane passes re-dispatched per depth; costly fields through their
+  capped resident volume grid); `notes/3d.md`), a
   bottom-left column with the `curves` panel (when the space has curves: per
   curve a name that toggles drawing, an interval slider over [t₀, t₁] — no
   interval = the whole curve, live while dragged —, the range readout in the

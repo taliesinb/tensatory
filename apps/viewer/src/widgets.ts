@@ -127,7 +127,9 @@ export function makeSlider(el0: HTMLElement): SliderEl {
   const el = el0 as SliderEl;
   let min = +el.dataset.min!, max = +el.dataset.max!, step = +(el.dataset.step ?? 0);
   const nullable = el.dataset.nullable !== undefined;
-  let stored = +(el.dataset.value ?? min), shown = stored, isNull = el.dataset.value === "null", dragging = false, moved = false;
+  // data-value="null": starts unset (nullable sliders); the stored position then sits at min until the first click
+  let isNull = el.dataset.value === "null";
+  let stored = isNull || el.dataset.value === undefined ? min : +el.dataset.value, shown = stored, dragging = false, moved = false;
   let downV = 0, downX = 0, downT = 0, downOnHandle = false, downWasNull = false;
   let settled = false, over = false, previewing = false, lastEv: PointerEvent | null = null;
   const was = document.createElement("div"); was.className = "was"; el.appendChild(was);

@@ -1,4 +1,5 @@
 // The 3D arm of the viewer: isosurfaces of the I_V field, coloured by I_C,
+// the colorfield of the C field on an axis-aligned plane through the volume,
 // rendered by GpuRenderer3D (WebGPU only) with the box, point sets and labels
 // on the Canvas 2D overlay. Compute modes as in 2D: "gpu" samples a resident
 // grid and runs the fused marching-tetrahedra kernel into resident meshes
@@ -61,6 +62,7 @@ import {
   type GpuLineLayer3D,
   type GpuMesh,
   type GpuMeshLayer,
+  type GpuPlaneLayer3D,
   type GpuSegments,
   type GpuSegments3,
   type Lut,
@@ -102,6 +104,14 @@ export interface View3DContext {
   region?(): [number, number, number, number];
   isoField(): Use3 | undefined;
   colourField(): Use3 | undefined;
+  /** the C field when the colorfield panel is on: painted on the planes `planes()` through the volume */
+  colorField(): Use3 | undefined;
+  /** the colorfield planes in use (at most one per axis): `axis` (0 / 1 / 2) and its coordinate `depth` in world units */
+  planes(): { axis: number; depth: number }[];
+  /** bilinear (true) or nearest samples of the colorfield raster */
+  smooth(): boolean;
+  /** opacity of the colorfield planes (1 = opaque: depth-written; below 1 they join the OIT pass) */
+  planeAlpha(): number;
   /** exact gradient data of a symbolic use (for normals), undefined for sampled data */
   gradientOf(u: Use3): VectorFieldData | undefined;
   /** isosurface levels in field units */
@@ -161,6 +171,9 @@ interface Counted<S extends { capacity: number; indirect: GPUBuffer; destroy(): 
 interface Complexity { records: number; n: number; t: number }
 interface Face { values: GpuGrid; sampler: PlanePass; kernel: FusedIsolines; depth: number; sets: Counted<GpuSegments>[] }
 const destroyFace = (f: Face) => { f.values.destroy(); f.sampler.destroy(); f.kernel.destroy(); for (const s of f.sets) s.set.destroy(); };
+/** the colorfield plane's values on its 2D grid and the pass that fills them for a depth (built per field / axis / grid, dispatched per depth) */
+interface Plane { values: GpuGrid; pass: PlanePass; depth: number }
+const destroyPlane = (p: Plane) => { p.values.destroy(); p.pass.destroy(); };
 const faceBytes = (f: Face) => f.values.buffer.size + f.sets.reduce((a, s) => a + s.set.buffer.size, 0);
 const gridKey = (u: { id: string }, g: DenseGrid) => `${u.id}|${g.size.join("x")}|${g.box.intervals.flat().join(",")}`;
 const bufBytes = (o: { buffer: GPUBuffer }) => o.buffer.size;
@@ -210,6 +223,9 @@ export class View3D implements MemoryUser {
   private readonly glyphSets = new Cache<{ segs: GpuSegments3; stamp: string; pending: boolean; read: string }>(4, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly glyphCpu = new Cache<{ segs: GpuSegments3; max: number }>(8, (e) => e.segs.destroy(), (e) => e.segs.buffer.size);
   private readonly glyphSamples = new Cache<{ pts: Float64Array; vectors: Float64Array }>(4, () => {}, (e) => e.pts.byteLength + e.vectors.byteLength);
+  // the colorfield plane: GPU compute = a plane pass per (field, axis, grid) re-dispatched per depth; CPU compute = uploaded per depth
+  private readonly planes = new Cache<Plane>(6, destroyPlane, (p) => p.values.buffer.size);
+  private readonly planeCpu = new Cache<GpuGrid>(8, (g) => g.destroy(), bufBytes);
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
@@ -222,7 +238,7 @@ export class View3D implements MemoryUser {
   residentProvider(): ResidentProvider { return this.resident; }
 
   private get volumeCaches(): Cache<unknown>[] { return [this.grids, this.cpuValues, this.vgrids, this.netGrids, this.vsampled] as Cache<unknown>[]; }
-  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels, this.glyphSamples] as Cache<unknown>[]; }
+  private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels, this.glyphSamples, this.planes, this.planeCpu] as Cache<unknown>[]; }
 
   clear(): void {
     for (const c of [...this.volumeCaches, ...this.surfaceCaches]) c.clear();
@@ -235,7 +251,8 @@ export class View3D implements MemoryUser {
   redo(): void {
     for (const m of this.meshes.values()) m.stamp = "";
     for (const f of this.faces.values()) for (const s of f.sets) s.stamp = "";
-    if (this.c.compute() === "cpu") { this.cpuMeshes.clear(); this.cpuValues.clear(); }
+    for (const p of this.planes.values()) p.depth = NaN;
+    if (this.c.compute() === "cpu") { this.cpuMeshes.clear(); this.cpuValues.clear(); this.planeCpu.clear(); }
     const old = [...this.grids.takeAll(), ...this.netGrids.takeAll()];
     if (old.length) void this.c.gpu.whenIdle().then(() => old.forEach((g) => g.destroy()));
   }
@@ -250,7 +267,7 @@ export class View3D implements MemoryUser {
   trim(bytes: number): number {
     let freed = 0;
     // biggest, least essential first: CPU meshes and face lines are cheap to rebuild, value grids are not
-    for (const c of [this.cpuMeshes, this.faceCpu, this.glyphCpu, this.faces, this.meshes, this.streamSets, this.glyphSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.netGrids, this.grids]) {
+    for (const c of [this.cpuMeshes, this.faceCpu, this.glyphCpu, this.planeCpu, this.faces, this.planes, this.meshes, this.streamSets, this.glyphSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.netGrids, this.grids]) {
       if (freed >= bytes) break;
       freed += c.trim(bytes - freed);
     }
@@ -725,6 +742,53 @@ export class View3D implements MemoryUser {
     void kernel.readMaxNorm().then((m) => { e.read = stamp; if (m !== this.glyphMaxNorm) { this.glyphMaxNorm = m; this.c.invalidate(); } }).catch(() => {}).finally(() => { e.pending = false; if (e.stamp !== e.read) this.readGlyphMax(e, kernel); });
   }
 
+  /** samples per longest side of the colorfield plane: a multiple of the volume resolution (a plane costs n², not n³), capped */
+  static readonly PLANE_SCALE = 4;
+  static readonly PLANE_MAX = 1024;
+  /** ... and for a costly field sampled on the CPU */
+  static readonly PLANE_N_COSTLY = 64;
+
+  /**
+   * The colorfield: the C field on one plane `axis = depth` inside the cropped box ∩ the field's box, as a flat
+   * colormapped quad (GpuPlaneLayer3D); up to three (one per axis) are drawn. GPU compute: the plane pass of the face outlines — the field evaluated
+   * exactly on the plane's 2D grid (`planeSampler`), or for a costly (net) field the capped resident volume grid
+   * sliced trilinearly (`planeSlicer`, as `colourSource` colours vertices) — built once per (field, axis, grid) and
+   * re-dispatched per depth, so a slider drag is one small dispatch. CPU compute: sampled on a degenerate 3D grid
+   * and uploaded per depth. The plane's grid is PLANE_SCALE × the volume resolution along its longest side.
+   */
+  private planeLayer(cf: Use3, cbox: Box, axis: number, depth: number): GpuPlaneLayer3D | undefined {
+    const c = this.c;
+    const box = cf.data.box.intersect(cbox);
+    if (!box || !(axis >= 0 && axis < 3) || !Number.isFinite(depth)) return undefined;
+    const keep = [0, 1, 2].filter((d) => d !== axis) as [number, number];
+    const box2 = new Box(keep.map((d) => box.a[d]!), keep.map((d) => box.b[d]!));
+    const gpu = c.compute() === "gpu";
+    const n = !gpu && c.costly(cf.data) ? View3D.PLANE_N_COSTLY : Math.min(View3D.PLANE_MAX, View3D.PLANE_SCALE * c.resolution());
+    const mx = Math.max(...box2.size) || 1;
+    const grid2 = new DenseGrid(box2.size.map((s) => Math.max(2, Math.round((n * s) / mx) || 2)), box2);
+    const pkey = `plane|${cf.id}|${axis}|${grid2.size.join("x")}|${box2.intervals.flat().join(",")}`;
+    let values: GpuGrid;
+    if (gpu) {
+      const src = this.colourSource(cf, this.grid(cbox)); // a costly field: its capped resident volume grid
+      const p = this.planes.getOr(`${pkey}|${src.key}`, () => {
+        const values = uploadGrid(c.gpu, grid2, new Float32Array(grid2.sampleCount), 1);
+        const pass = isResidentGrid(src.src) ? planeSlicer(c.gpu, src.src, axis, grid2) : planeSampler(c.gpu, cf.data, axis, grid2);
+        return { values, pass, depth: NaN };
+      });
+      if (p.depth !== depth) { p.pass.dispatch(depth, p.values.buffer); p.depth = depth; }
+      values = p.values;
+    } else {
+      // the plane's points as a degenerate 3D grid (size 1 along the axis): what the field is sampled on
+      const size3 = [0, 0, 0], a3 = [0, 0, 0], b3 = [0, 0, 0];
+      size3[axis] = 1; a3[axis] = depth; b3[axis] = depth;
+      keep.forEach((d, i) => { size3[d] = grid2.size[i]!; a3[d] = box2.a[i]!; b3[d] = box2.b[i]!; });
+      const grid3 = new DenseGrid(size3, new Box(a3, b3));
+      values = this.planeCpu.getOr(`${pkey}|${depth}`, () => uploadGrid(c.gpu, grid2, cf.data.sampleOn(grid3), 1));
+    }
+    const colour = c.colour(cf);
+    return { values, axis, depth, box, map: colour.map, lut: colour.lut, smooth: c.smooth(), alpha: c.planeAlpha() };
+  }
+
   /** a cached uploaded 3D segment set */
   private segs3(key: string, make: () => Float32Array): GpuSegments3 {
     return this.lines3.getOr(key, () => uploadSegments3(this.c.gpu, make(), false));
@@ -733,9 +797,10 @@ export class View3D implements MemoryUser {
   render(): void {
     const c = this.c;
     const iv = c.showIso() ? c.isoField() : undefined;
+    const cf = c.colorField();
     const sv = c.streamVector();
     const gv = c.glyphVector();
-    const box = iv?.data.box ?? sv?.data.box ?? gv?.data.box ?? this.box;
+    const box = iv?.data.box ?? cf?.data.box ?? sv?.data.box ?? gv?.data.box ?? this.box;
     const key = box.intervals.flat().join(",");
     if (key !== this.boxKey) { this.boxKey = key; this.box = box; if (!this.cameraCustom) this.fit(box); }
     const cbox = this.cropped(box, c.crop());
@@ -743,6 +808,7 @@ export class View3D implements MemoryUser {
     const pbox = preview ? this.cropped(box, preview) : undefined;
     const meshes: GpuMeshLayer[] = [];
     const lines: GpuLineLayer3D[] = [];
+    const planes: GpuPlaneLayer3D[] = [];
     if (c.showBox()) lines.push({ segs: this.segs3(`box|${cbox.intervals.flat().join(",")}`, () => boxEdges(cbox.a, cbox.b)), width: 1.2, color: [0.5, 0.56, 0.72], uncropped: true });
     if (c.showPoints()) {
       for (const ps of c.pointSets()) {
@@ -769,11 +835,12 @@ export class View3D implements MemoryUser {
       for (const mesh of sets) meshes.push({ mesh, alpha, color: [0.86, 0.87, 0.9], ...(colour ? { map: colour.map, lut: colour.lut } : {}) });
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
+    if (cf) for (const { axis, depth } of c.planes()) { const layer = this.planeLayer(cf, cbox, axis, depth); if (layer) planes.push(layer); }
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, this.c.costly(sv.data) ? View3D.STREAM_N_COSTLY : View3D.STREAM_N)); if (layer) lines.push(layer); }
     if (gv) { const layer = this.glyphLayer(gv, cbox); if (layer) lines.push(layer); } else this.glyphMaxNorm = NaN;
     if (c.gpu.takeDeferred()) return; // a kernel is still compiling: keep the previous image (see main.ts renderGpu)
     this.renderer.resize();
-    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
+    this.renderer.render({ camera: this.camera, radius: Math.hypot(...box.size) / 2 || 1, region: this.region(), background: [0x0b / 255, 0x0d / 255, 0x12 / 255], meshes, lines, planes, cropMin: cbox.a as [number, number, number], cropMax: cbox.b as [number, number, number] });
     this.overlay(cbox, pbox && !pbox.equals(cbox, 1e-12) ? pbox : undefined, curves);
   }
 
