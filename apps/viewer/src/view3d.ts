@@ -789,6 +789,32 @@ export class View3D implements MemoryUser {
     return { values, axis, depth, box, map: colour.map, lut: colour.lut, smooth: c.smooth(), alpha: c.planeAlpha() };
   }
 
+  /** the depth bias (NDC) of the plane intersection lines: they lie exactly on two planes, so without it both would
+   *  fight them for the depth buffer and eat the line's width from either side */
+  static readonly INTERSECTION_BIAS = 2e-3;
+
+  /**
+   * White lines where every pair of colorfield planes on different axes meet: the segment along the third axis at
+   * (depth_i, depth_j), over the planes' common box, when both depths lie inside it (a plane cropped away has no
+   * intersection to show).
+   */
+  private planeIntersections(planes: GpuPlaneLayer3D[]): GpuLineLayer3D[] {
+    const out: GpuLineLayer3D[] = [];
+    for (let i = 0; i < planes.length; i++) for (let j = i + 1; j < planes.length; j++) {
+      const P = planes[i]!, Q = planes[j]!;
+      if (P.axis === Q.axis) continue;
+      const box = P.box.intersect(Q.box);
+      if (!box) continue;
+      const inside = (axis: number, d: number) => d >= box.a[axis]! - 1e-12 && d <= box.b[axis]! + 1e-12;
+      if (!inside(P.axis, P.depth) || !inside(Q.axis, Q.depth)) continue;
+      const k = [0, 1, 2].find((d) => d !== P.axis && d !== Q.axis)!;
+      const a = [0, 0, 0], b = [0, 0, 0];
+      a[P.axis] = b[P.axis] = P.depth; a[Q.axis] = b[Q.axis] = Q.depth; a[k] = box.a[k]!; b[k] = box.b[k]!;
+      out.push({ segs: this.segs3(`xsect|${a.join(",")}|${b.join(",")}`, () => packPolylines3([[...a, ...b]])), width: 1.5, color: [1, 1, 1], depthBias: View3D.INTERSECTION_BIAS });
+    }
+    return out;
+  }
+
   /** a cached uploaded 3D segment set */
   private segs3(key: string, make: () => Float32Array): GpuSegments3 {
     return this.lines3.getOr(key, () => uploadSegments3(this.c.gpu, make(), false));
@@ -836,6 +862,7 @@ export class View3D implements MemoryUser {
       if (c.showOutline()) lines.push(...this.faceLines(iv, grid, cbox, levels, 2));
     }
     if (cf) for (const { axis, depth } of c.planes()) { const layer = this.planeLayer(cf, cbox, axis, depth); if (layer) planes.push(layer); }
+    lines.push(...this.planeIntersections(planes));
     if (sv) { const layer = this.streamLayer(sv, box, this.grid(box, this.c.costly(sv.data) ? View3D.STREAM_N_COSTLY : View3D.STREAM_N)); if (layer) lines.push(layer); }
     if (gv) { const layer = this.glyphLayer(gv, cbox); if (layer) lines.push(layer); } else this.glyphMaxNorm = NaN;
     if (c.gpu.takeDeferred()) return; // a kernel is still compiling: keep the previous image (see main.ts renderGpu)

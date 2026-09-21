@@ -99,6 +99,9 @@ export interface GpuLineLayer3D {
   particles?: { tail: number; split: number; travel: number };
   /** ignore the crop planes (the box outline itself) */
   uncropped?: boolean;
+  /** pull the line towards the eye by this much NDC depth (default 0): for lines lying ON a surface that is also
+   *  drawn (the colorfield planes' intersections), which would otherwise fight it for the depth buffer */
+  depthBias?: number;
 }
 /**
  * a colormapped raster on the axis-aligned plane `axis = depth` (the 3D colorfield): the 2D twin of the 2D
@@ -339,7 +342,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   // keep their width and fade in opacity instead (fs)
   if (u.particles.w > 0.5 && s.len > 0.0 && u.style.y < 0.5) { w = w * max(particleBright(arc, s.len, s.phase, u.particles), 0.0); }
   let off = n * side * w;
-  o.pos = vec4<f32>(c.xy + off / (0.5 * vp) * c.w, c.zw);
+  o.pos = vec4<f32>(c.xy + off / (0.5 * vp) * c.w, c.z - u.embed.w * c.w, c.w); // embed.w: depth bias (NDC)
   o.world = select(s.a, s.b, atB);
   o.value = select(s.ca, s.cb, atB);
   o.arc = arc;
@@ -765,7 +768,7 @@ export class GpuRenderer3D {
     f.set([crop[0]!, crop[1]!, crop[2]!, L.uncropped ? 0 : 1], 32);
     const P = L.particles;
     f.set([P?.tail ?? 0, P?.split ?? 1, P?.travel ?? 0, P && L.segs.particles ? 1 : 0], 36);
-    f.set([L.embed?.axis ?? 0, L.embed?.depth ?? 0, L.embed ? 1 : 0, 0], 40);
+    f.set([L.embed?.axis ?? 0, L.embed?.depth ?? 0, L.embed ? 1 : 0, L.depthBias ?? 0], 40);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     f.set([w, h, dpr, 0], 44);
     f.set([cropLo[0]!, cropLo[1]!, cropLo[2]!, 0], 48);
