@@ -810,7 +810,7 @@ export class View3D implements MemoryUser {
       const k = [0, 1, 2].find((d) => d !== P.axis && d !== Q.axis)!;
       const a = [0, 0, 0], b = [0, 0, 0];
       a[P.axis] = b[P.axis] = P.depth; a[Q.axis] = b[Q.axis] = Q.depth; a[k] = box.a[k]!; b[k] = box.b[k]!;
-      out.push({ segs: this.segs3(`xsect|${a.join(",")}|${b.join(",")}`, () => packPolylines3([[...a, ...b]])), width: 1.5, color: [1, 1, 1], depthBias: View3D.INTERSECTION_BIAS });
+      out.push({ segs: this.segs3(`xsect|${a.join(",")}|${b.join(",")}`, () => packPolylines3([[...a, ...b]])), width: 0.75, color: [1, 1, 1], depthBias: View3D.INTERSECTION_BIAS });
     }
     return out;
   }
