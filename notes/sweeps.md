@@ -425,3 +425,67 @@ side by side in time.
 The local-storage key for member options becomes
 `tensatory.opts.<sweepFile>#<signature>`; a lone bundle keeps
 `tensatory.opts.<file>`.
+
+### Rerunning the collection: what the script should produce for a sweep
+
+`volume.py` was written for a viewer without codomains, handles or curves;
+rerunning it (cheap: MLP ~2 s / epoch, a 64³ volume ~2 min on the Apple GPU)
+is the chance to make the members first-class. In order of value:
+
+1. **Raw `loss`, not `log10_loss`.** The log was the prototype viewer's
+   substitute for a codomain; here `celoss` (log e, flipped, nats) does it as
+   a display hint, values stay exact, and the `pointwise` `10^x` field goes
+   away. Store `loss` and `accuracy` (float32).
+2. **Self-describing arrays, one per channel**: an `.npz` with `loss [nx, ny,
+   nz]`, `accuracy [nx, ny, nz]` in x-slowest order (plain numpy indexing,
+   `arr[ix, iy, iz]`), instead of the headerless interleaved `.bin` that
+   needs `shape`, `part`, `axes` and `dtype` in every handle. Then a handle
+   is `{ "type": "handle", "path": "arrays.npz/loss" }`.
+3. **Emit the Tensatory bundle from Python**, member + record, instead of
+   converting afterwards (`tools/loss-landscape/build.mjs` becomes
+   unnecessary): `bundle.json` with `summary` / `details`, the manifold
+   (`dimWeights` = explained variance for pca), the fields with codomains,
+   θ* as a point set, the trajectory as a `sampled` curve with `param.name =
+   "snapshot"`, and beside it `record.json` = `{ dataset, model, dirs, seed,
+   lr, epochs, batch_size, momentum, weight_decay, n_params, test_acc,
+   final_train_loss, eval_n, grid, explained_variance?, wall_s }` for the
+   sweep document to gather. One source of truth for the metadata.
+4. **Save the directions**, always. The `random` volumes' directions were
+   never written, so those volumes cannot be related to parameter space at
+   all; pca directions are recomputable only while the `.pt` exists. Write
+   `dirs/d0`, `dirs/d1`, `dirs/d2` (per layer, as `tools/mnist/export.py`
+   does) and `theta/*` into the member's `.npz`. With them an MLP member can
+   carry live `net` fields later (the cooperative kernel), and the affine
+   frame of roadmap 4 has its data.
+5. **Project the trajectory onto the random directions too**, and record
+   the loss / accuracy AT each snapshot (48 forward passes: nothing):
+   `traj/coords [T, 3]`, `traj/loss [T]`, `traj/acc [T]`, `traj/step [T]`.
+   That is the `along` field of curves.md ("loss along the SGD trajectory")
+   with the data already there, and `times` for the curve in real steps.
+6. **Directional gradients as a channel.** `torch.func.vmap` over
+   `grad(loss)` gives ∂L/∂a, ∂L/∂b, ∂L/∂c at every grid point for about the
+   cost of a second forward pass: store `grad [nx, ny, nz, 3]` and declare
+   it as the loss field's `exactGradient` (a `densev` field). Streamlines and
+   glyphs then follow the true gradient instead of finite differences of the
+   grid, which is what the prototype's `grad_*` channels were meant to be
+   and never were.
+7. **Seeds**: `--seed k` for k in 0..2 at least, so `training_seed` is a
+   real key and the record set is not a 2 × 2 grid. Keep the eval subset
+   FIXED across seeds and models (it already is: `randperm(60000, seed 0)`)
+   so members are comparable; consider `eval_n` = 512 for both models so a
+   signature-sharing pair also shares its sample.
+8. **One grid size per dimension for all members** (48³ is a good middle:
+   MLP 64³ was 2 MB per channel, ConvNet 40³ was compute-bound). Same box
+   convention (random: [−1.5, 1.5]³ in filter-normalized units; pca: the
+   trajectory's span padded 20 %, third axis ≥ 35 % of the longest).
+9. **Drop the separate 2D planes.** A pca plane is the z = 0 slice of the pca
+   volume (its directions are the first two of the top-3), a random plane a
+   slice of the random volume; the viewer crops. Fewer members, no
+   lost-box problem (the fmnist planes without a checkpoint).
+10. **Fill or keep the fringe deliberately.** fmnist for both models makes
+    `dataset` a real key; cifar10 (the loop's third dataset, never run) is a
+    natural "convnet only" fringe that keeps the record set non-Cartesian —
+    which the faceted UI should be seen handling.
+
+Not worth doing: storing anything the viewer computes (isolines, stats
+beyond `extrema`), or float64 volumes (f32 is what the GPU reads).
