@@ -1,9 +1,10 @@
-# External arrays and sweeps (design, not yet implemented)
+# External arrays and sweeps
 
-Two related designs for the next round of bundle-format work. Neither exists
-in code; this note records the reasoning so the implementation does not have
-to rediscover it. Status of the format today: [bundle-schema.md](bundle-schema.md);
-ordering against other work: [roadmap.md](roadmap.md).
+Two related designs for the bundle format. §1 (external arrays) is **built**
+as designed here, with one addition found on contact with the data (`axes`,
+see the end of §1); the current description is in
+[bundle-schema.md](bundle-schema.md) "External arrays". §2 (sweeps) is not
+built. Ordering against other work: [roadmap.md](roadmap.md).
 
 ## 1. External arrays (`handle` specs)
 
@@ -11,9 +12,11 @@ ordering against other work: [roadmap.md](roadmap.md).
 
 The loss-landscape prototype stores each volume as `name.json` (dims,
 channels, axes, trajectory, …) plus `name.bin`: headerless `float32`,
-`40×40×40×2`, **channel-interleaved** — `data[((x·40 + y)·40 + z)·2 + c]`,
-channels `['log10_loss', 'accuracy']`. Two things the current
-`SizedArrayHandleSpec` cannot say about it:
+`40×40×40×2`, **channel-interleaved** and **x fastest** —
+`data[((z·40 + y)·40 + x)·2 + c]` (this note first assumed x slowest; the
+prototype's `cvox = x + nx·(y + ny·z)` says otherwise), channels
+`['log10_loss', 'accuracy']`. Two things the phase-1 `SizedArrayHandleSpec`
+could not say about it:
 
 1. a raw file has no shape of its own, so the bundle must give the shape
    *before* `part` is applied (today `shape` is documented as the shape after);
@@ -101,8 +104,30 @@ document, so the same directory serves from Vite, a static host or a future
 Tensatory server.
 
 Deferred: lazy per-field loading (an async `Bundle.prepare(fieldIds)` filling
-the same resolver map — the interface already allows it), a dtype-aware
-`NdArray`, abort signals, cross-bundle byte caching.
+the same resolver map — the interface already allows it), abort signals,
+cross-bundle byte caching. (The sketch's "widened to Float64Array" did not
+survive: `ArrayData` now spans the typed arrays and loaded elements keep
+their stored type.)
+
+### As built
+
+`packages/core/src/arrays/load.ts` (readers), `arrays/spec.ts`
+(`ArrayResolver`, `applyPart`, `buildAnyArray`), `bundle/handles.ts`
+(`collectHandles`, `loadArrays`), `Bundle.load`. Differences from the sketch:
+
+* `ByteSource.bytes` returns `null` for a missing file (a zarr chunk that was
+  never written is all `fill_value`; a 404 is not an error there).
+* One addition to the schema: `axes`, a permutation of the kept axes after
+  `part` (numpy `transpose`), because the stored order of the prototype's
+  volumes is `(z, y, x, c)` and the field wants `(x, y, z)`. This is the axis
+  reordering the sketch deferred — it belongs on the handle, not on `dense`,
+  since it is a property of how the file was written.
+* zarr v3 is read as well as v2 (both are two JSON shapes over the same chunk
+  loop); blosc / zstd are refused by name until a decoder is worth its size.
+* Bare-path arrays (`bind: { "x": "val/x.npy" }`) work: `collectHandles` knows
+  which positions are arrays, and shape inference asks the resolver.
+* A failed load is remembered per path and rethrown on use, so `buildAll()`
+  attributes it to the fields concerned instead of failing the bundle.
 
 ## 2. Sweeps: many members, one document
 

@@ -48,7 +48,7 @@ import type {
   SymbolicVector,
   VectorFieldDataSpec,
 } from "@tensatory/schema";
-import { buildArray } from "../arrays/spec";
+import { buildArray, noArrays, type ArrayResolver } from "../arrays/spec";
 import { NdArray } from "../arrays/ndarray";
 import { SpecError } from "../errors";
 import { Box } from "../geometry/box";
@@ -383,6 +383,7 @@ interface Ctx {
   origin: number[];
   inliner: Inliner;
   bundle: () => Bundle;
+  arrays: ArrayResolver;
 }
 
 const sliceBox = (box: Box, dims: number[]): [number, number][] => dims.map((d) => [box.a[d]!, box.b[d]!]);
@@ -424,9 +425,7 @@ function sliceDense(arr: NdArray, box: Box, ctx: Ctx, channels: number): { data:
 function denseSource(d: ScalarData | VectorData, ctx: Ctx, vector: boolean): { arr: NdArray; box: Box } {
   switch (d.type) {
     case "dense": case "densev": {
-      const s = d.samples;
-      if (typeof s === "string" || !("shape" in s)) throw new NotSliceable("external arrays are not loaded yet");
-      const arr = buildArray(s);
+      const arr = buildArray(d.samples, [], ctx.arrays);
       if (arr.ndim !== ctx.D + (vector ? 1 : 0)) throw new NotSliceable(`dense array of rank ${arr.ndim} on a ${ctx.D}D manifold`);
       return { arr, box: boxOf(d, ctx.D) };
     }
@@ -585,7 +584,7 @@ export function sliceable(spec: BundleSpec, manifold: string): boolean {
  * order — they are sorted) through the manifold's `origin` (default 0). Fields and point sets on other manifolds
  * are untouched. Fields that cannot be sliced are left out and listed in `dropped`.
  */
-export function sliceSpec(spec: BundleSpec, manifold: string, dims: readonly number[], originOverride?: readonly number[]): SliceResult {
+export function sliceSpec(spec: BundleSpec, manifold: string, dims: readonly number[], originOverride?: readonly number[], arrays: ArrayResolver = noArrays): SliceResult {
   const m = spec.manifolds?.[manifold];
   if (!m) throw new SpecError(`unknown manifold "${manifold}"`, ["manifolds", manifold]);
   const D = m.numDims;
@@ -596,7 +595,7 @@ export function sliceSpec(spec: BundleSpec, manifold: string, dims: readonly num
   if (origin.length !== D) throw new SpecError(`origin has ${origin.length} components for ${D} dims`, ["manifolds", manifold, "origin"]);
 
   let built: Bundle | undefined;
-  const ctx: Ctx = { spec, manifold, D, dims: sorted, origin, inliner: new Inliner(spec, manifold, D), bundle: () => (built ??= new Bundle(spec)) };
+  const ctx: Ctx = { spec, manifold, D, dims: sorted, origin, inliner: new Inliner(spec, manifold, D), bundle: () => (built ??= new Bundle(spec, arrays)), arrays };
   const dropped: Record<string, string> = {};
   const fields: Record<string, FieldSpec> = {};
   for (const [id, f] of Object.entries(spec.fields)) {

@@ -1,0 +1,56 @@
+{
+  "tensatory": "0.1",
+  "name": "handles",
+  "summary": "External arrays in every position: dense samples from .bin / .npy / .npz / zarr v2 / zarr v3 with channel parts, a pullback vector from a .bin, a net bound to an .npz member, a missing file.",
+  "manifolds": { "vol": { "numDims": 3, "dimNames": ["x", "y", "z"] }, "plane": { "numDims": 2 } },
+  "fields": {
+    "bin0": {
+      "kind": "scalar",
+      "data": {
+        "type": "dense",
+        "samples": { "type": "handle", "path": "vol.bin", "shape": [4, 5, 6, 2], "part": [null, null, null, 0], "dtype": "float32" },
+        "stats": { "quantiles": "i4.npy" },
+        "box": [[0, 3], [0, 4], [0, 5]]
+      }
+    },
+    "npy1": {
+      "kind": "scalar",
+      "data": { "type": "dense", "samples": { "type": "handle", "path": "vol.npy", "shape": [4, 5, 6, 2], "part": [null, null, null, 1] }, "box": [[0, 3], [0, 4], [0, 5]] }
+    },
+    "zarr2": {
+      "kind": "scalar",
+      "data": { "type": "dense", "samples": { "type": "handle", "path": "v2.zarr/vol", "shape": [4, 5, 6, 2], "part": [null, null, null, 1] }, "box": [[0, 3], [0, 4], [0, 5]] }
+    },
+    "zarr3": {
+      "kind": "scalar",
+      "data": { "type": "dense", "samples": { "type": "handle", "path": "v3.zarr/vol", "shape": [4, 5, 6, 2], "part": [null, null, null, 0] }, "box": [[0, 3], [0, 4], [0, 5]] }
+    },
+    "slab": {
+      "kind": "scalar",
+      "domain": "plane",
+      "data": { "type": "dense", "samples": { "type": "handle", "path": "deflated.npz/a", "shape": [10, 10] }, "box": [[0, 1], [0, 1]] }
+    },
+    "shifted": {
+      "kind": "scalar",
+      "data": { "type": "translate", "arg": "bin0", "vec": { "type": "handle", "path": "vec.bin", "shape": [3], "dtype": "float64" } }
+    },
+    "lin": {
+      "kind": "scalar",
+      "data": { "type": "net", "net": "lin_b", "output": "s", "box": [[0, 3], [0, 4], [0, 5]] }
+    },
+    "broken": {
+      "kind": "scalar",
+      "data": { "type": "dense", "samples": { "type": "handle", "path": "missing.npy", "shape": [2, 2] }, "box": [[0, 1], [0, 1]] }
+    }
+  },
+  "nets": {
+    "lin": {
+      "type": "def",
+      "inputs": { "x": [3], "W": [3, 2] },
+      "nodes": { "y": { "op": "einsum", "subscripts": "i,ij->j", "vals": ["x", "W"] }, "s": { "op": "reduce", "fn": "sum", "val": "y" } },
+      "outputs": { "s": [] }
+    },
+    "lin_b": { "type": "bind", "net": "lin", "bind": { "W": "deflated.npz/w" } }
+  },
+  "defaultManifold": "vol"
+}

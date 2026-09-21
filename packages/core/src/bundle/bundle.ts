@@ -9,6 +9,9 @@ import { compileNet, evaluate, type Program, type ProgramResolver } from "../net
 import { inferNet, type NetSignature } from "../nets/shapes";
 import { NetSchema } from "../nets/spec";
 import type { NdArray } from "../arrays/ndarray";
+import type { ByteSource } from "../arrays/load";
+import { noArrays, sizedShape, type ArrayResolver } from "../arrays/spec";
+import { loadArrays, type LoadProgress } from "./handles";
 
 /*******************************************************/
 /* schema */
@@ -137,7 +140,9 @@ export class Net {
 /**
  * A parsed bundle. Fields are built lazily on first access (so a field may
  * refer to another by id regardless of declaration order); reference cycles
- * are detected.
+ * are detected. External arrays (`handle` specs) are looked up in `arrays`,
+ * which `Bundle.load` fills from the bundle's sidecar files up front; a bundle
+ * constructed without one reports every handle as an error on its field.
  */
 export class Bundle {
   readonly name: string;
@@ -152,9 +157,11 @@ export class Bundle {
   private readonly netResolver: ProgramResolver = {
     net: (id, path) => this.net(id, path).signature,
     program: (id, path) => this.net(id, path).program,
+    arrays: undefined,
   };
 
-  constructor(readonly spec: BundleSpec) {
+  constructor(readonly spec: BundleSpec, readonly arrays: ArrayResolver = noArrays) {
+    this.netResolver.arrays = arrays;
     this.name = spec.name ?? "untitled";
     const manifolds = new Map<string, Manifold>();
     for (const [id, m] of Object.entries(spec.manifolds ?? {})) manifolds.set(id, new Manifold(id, m));
@@ -172,14 +179,25 @@ export class Bundle {
     this.pointSets = pointSets;
   }
 
-  /** parse + validate a JSON value */
-  static parse(json: unknown): Bundle {
+  /** validate a JSON value against the schema */
+  static validate(json: unknown): BundleSpec {
     const r = BundleSchema.safeParse(json);
     if (!r.success) {
       const issue = r.error.issues[0]!;
       throw new SpecError(`${issue.message}${r.error.issues.length > 1 ? ` (+${r.error.issues.length - 1} more issues)` : ""}`, issue.path.map(String));
     }
-    return new Bundle(r.data);
+    return r.data;
+  }
+
+  /** parse + validate a JSON value (synchronous: external arrays must already be in `arrays`) */
+  static parse(json: unknown, arrays?: ArrayResolver): Bundle {
+    return new Bundle(Bundle.validate(json), arrays);
+  }
+
+  /** parse + validate a JSON value and load every external array it refers to through `src` (paths relative to the bundle document) */
+  static async load(json: unknown, src: ByteSource, opts: { onProgress?: (p: LoadProgress) => void } = {}): Promise<Bundle> {
+    const spec = Bundle.validate(json);
+    return new Bundle(spec, await loadArrays(spec, src, opts));
   }
 
   get info(): Info | undefined { return infoOf(this.name, this.spec); }
@@ -211,6 +229,7 @@ export class Bundle {
         scalar: (ref, p) => this.scalarField(ref, p).data,
         vector: (ref, p) => this.vectorField(ref, p).data,
         nets: this.netResolver,
+        arrays: this.arrays,
       };
       const fpath = ["fields", id, "data"];
       const field: Field =
@@ -285,8 +304,8 @@ export function inferDims(spec: BundleSpec): number {
   for (const f of Object.values(spec.fields)) {
     const d = f.data;
     if ("box" in d && d.box) return Array.isArray(d.box) ? d.box.length : d.box.a.length;
-    if (d.type === "dense" && "shape" in d.samples) return d.samples.shape.length;
-    if (d.type === "densev" && "shape" in d.samples) return d.samples.shape.length - 1;
+    if (d.type === "dense") return sizedShape(d.samples).length;
+    if (d.type === "densev") return sizedShape(d.samples).length - 1;
   }
   throw new SpecError("cannot infer the manifold dimension; declare `manifolds`");
 }

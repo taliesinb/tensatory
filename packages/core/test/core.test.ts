@@ -6,7 +6,6 @@ import {
   SymbolicScalarFieldData,
   SymbolicVectorFieldData,
   DenseGrid,
-  NotSupportedError,
   SpecError,
   buildArray,
   buildScalarFieldData,
@@ -63,7 +62,7 @@ describe("arrays", () => {
     const v = buildArray({ type: "symbolicv", shape: [2, 2, 2], expr: { op: "coordv" } });
     expect(v.toNested()).toEqual([[[0, 0], [0, 1]], [[1, 0], [1, 1]]]);
     expect(() => buildArray({ type: "symbolicv", shape: [2, 2, 3], expr: { op: "coordv" } })).toThrow(SpecError);
-    expect(() => buildArray({ type: "handle", shape: [2], path: "x" })).toThrow(NotSupportedError);
+    expect(() => buildArray({ type: "handle", shape: [2], path: "x" })).toThrow(/external array "x" was not loaded/);
   });
 });
 

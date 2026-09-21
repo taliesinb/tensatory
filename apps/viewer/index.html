@@ -23,7 +23,7 @@
 
 <div id="left">
 <div id="picker" class="panel">
-  <div class="strip"><span class="title">bundle</span><span class="ticks"><button class="tickbtn" id="resetBtn" title="wipe local storage and reload">R</button><button class="tickbtn" id="logBtn" title="show console log">L</button><button class="tickbtn" id="uploadBtn" title="open a bundle JSON from disk (not persisted)">⤒</button><input type="file" id="pickFile" accept=".json,application/json" hidden></span></div>
+  <div class="strip"><span class="title">bundle</span><span class="ticks"><button class="tickbtn" id="resetBtn" title="wipe local storage and reload">R</button><button class="tickbtn" id="logBtn" title="show console log">L</button><button class="tickbtn" id="uploadBtn" title="open a bundle JSON from disk, alone or together with its sidecar arrays (not persisted)">⤒</button><input type="file" id="pickFile" accept=".json,application/json,.bin,.npy,.npz" multiple hidden></span></div>
   <div class="body">
     <div class="prow"><label data-tip="Which Tensatory data bundle to view; scroll or use ↑/↓ while hovering to switch. Hover an alternative for its summary.">bundle</label><select id="pickBundle"></select><span class="info" id="bundleInfo" data-tip="" style="display:none">i</span></div>
     <div class="prow"><label data-tip="Which of the bundle's spaces (manifolds) to view: a 2D space gets the colorfield / isolines / streamlines panels, a 3D space the isosurface panels. Point sets and fields belong to a space. Only 2D and 3D spaces are listed. Hover an alternative for its summary. ?space=id">space</label><select id="pickSpaceSel"></select><span class="info" id="spaceInfo" data-tip="" style="display:none">i</span></div>

@@ -13,8 +13,8 @@
 
 import type { ArrayExpr, ArraySpec, DisplacedNetSpec, NetDefinitionSpec, NetSpec } from "@tensatory/schema";
 import { NdArray } from "../arrays/ndarray";
-import { buildArray } from "../arrays/spec";
-import { EvalError, NotSupportedError, SpecError } from "../errors";
+import { buildAnyArray, buildArray, sizedShape } from "../arrays/spec";
+import { EvalError, SpecError } from "../errors";
 import { SCALAR_BINARY_OPS, SCALAR_NARY_OPS, SCALAR_UNARY_OPS } from "../symbolic/spec";
 import { UNARY } from "../symbolic/functions";
 import * as ops from "./ops";
@@ -47,14 +47,14 @@ export interface ProgramResolver extends NetResolver {
 export function compileNet(spec: NetSpec, nets: ProgramResolver, path: string[] = ["net"]): Program {
   switch (spec.type) {
     case "def": return compileDef(spec, nets, path);
-    case "bind": return bindProgram(resolveProgram(spec.net, nets, [...path, "net"]), spec.bind, [...path, "bind"]);
+    case "bind": return bindProgram(resolveProgram(spec.net, nets, [...path, "net"]), spec.bind, nets, [...path, "bind"]);
     case "displace": return displaceProgram(resolveProgram(spec.net, nets, [...path, "net"]), spec, nets, path);
     case "grad": {
       let inner = resolveProgram(spec.net, nets, [...path, "net"]);
-      if (spec.bind) inner = bindProgram(inner, spec.bind, [...path, "bind"]);
+      if (spec.bind) inner = bindProgram(inner, spec.bind, nets, [...path, "bind"]);
       const requests: GradRequest[] = Object.entries(spec.outputs).map(([name, g]) => ({
         name, of: g.of, wrt: g.wrt,
-        ...(g.seed === undefined ? {} : { seed: typeof g.seed === "string" ? g.seed : buildSized(g.seed, [...path, "outputs", name, "seed"]) }),
+        ...(g.seed === undefined ? {} : { seed: typeof g.seed === "string" ? g.seed : buildAnyArray(g.seed, [...path, "outputs", name, "seed"], nets.arrays) }),
       }));
       return gradProgram(inner, requests, spec.keep ?? [], nets, path);
     }
@@ -67,7 +67,7 @@ const resolveProgram = (net: string | NetSpec, nets: ProgramResolver, path: stri
 function compileDef(spec: NetDefinitionSpec, nets: ProgramResolver, path: string[]): Program {
   const sig = inferNet(spec, nets, path); // validates names, shapes, acyclicity
   const consts: Program["consts"] = {};
-  for (const [n, a] of Object.entries(spec.arrays ?? {})) consts[n] = { arr: buildArray(a, [...path, "arrays", n]), shape: a.shape };
+  for (const [n, a] of Object.entries(spec.arrays ?? {})) consts[n] = { arr: buildArray(a, [...path, "arrays", n], nets.arrays), shape: sizedShape(a) };
   // evaluation order: depth-first over dependencies
   const nodeSpecs = spec.nodes ?? {};
   const order: Program["nodes"] = [];
@@ -83,21 +83,16 @@ function compileDef(spec: NetDefinitionSpec, nets: ProgramResolver, path: string
   return { inputs: { ...sig.inputs }, consts, nodes: order, outputs: Object.fromEntries(Object.keys(spec.outputs).map((o) => [o, o])), shapes };
 }
 
-function bindProgram(inner: Program, bind: Record<string, ArraySpec>, path: string[]): Program {
+function bindProgram(inner: Program, bind: Record<string, ArraySpec>, nets: ProgramResolver, path: string[]): Program {
   const inputs = { ...inner.inputs };
   const consts = { ...inner.consts };
   for (const [n, a] of Object.entries(bind)) {
     const shape = inputs[n];
     if (!shape) throw new SpecError(`"${n}" is not an input of the net`, [...path, n]);
-    consts[n] = { arr: buildSized(a, [...path, n]), shape };
+    consts[n] = { arr: buildAnyArray(a, [...path, n], nets.arrays), shape };
     delete inputs[n];
   }
   return { ...inner, inputs, consts };
-}
-
-function buildSized(a: ArraySpec, path: string[]): NdArray {
-  if (typeof a === "string" || !("shape" in a)) throw new NotSupportedError(`external arrays are not loaded yet`, path);
-  return buildArray(a, path);
 }
 
 const DISP = "__disp";
@@ -116,7 +111,7 @@ function displaceProgram(inner: Program, spec: DisplacedNetSpec, nets: ProgramRe
   // per direction: its arrays, built once, and the factor `norm` / `scale` apply to the direction as ONE vector
   const built = spec.directions.map((dir, k) => {
     const p = [...path, "directions", String(k)];
-    const arrays = new Map(Object.entries(dir.arrays).map(([a, d]) => [a, buildSized(d, [...p, "arrays", a])] as const));
+    const arrays = new Map(Object.entries(dir.arrays).map(([a, d]) => [a, buildAnyArray(d, [...p, "arrays", a], nets.arrays)] as const));
     let factor = dir.scale ?? 1;
     if (dir.norm !== undefined) {
       const sq = (arr: NdArray) => { let s = 0; for (const v of arr.data) s += v * v; return s; };

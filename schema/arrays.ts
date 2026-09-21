@@ -2,18 +2,28 @@ import type { IntNonNeg, Int, Real } from "./math";
 import type { ConstArgName, SymbolicScalar, SymbolicVector } from "./symbolic";
 import type { RandomWidgetSpec, ScalarDistributionSpec } from "./distribution";
 
+// A path to a stored array, relative to the bundle document (so a bundle with
+// external arrays is a directory: the JSON plus its sidecars). The FORMAT
+// FOLLOWS THE PATH:
+// - "vol.bin"            raw, headerless, row-major; needs `shape` and `dtype` (default float32)
+// - "w.npy"              numpy .npy (any version, any dtype below, C or Fortran order, either endianness)
+// - "data.npz/foo/bar"   the member "foo/bar" (or "foo/bar.npy") of the zip archive "data.npz"
+// - "vol.zarr/foo/bar"   the array node "foo/bar" of the zarr store "vol.zarr" (or the store's root array,
+//                        "vol.zarr"); zarr v2 (`.zarray`) and v3 (`zarr.json`); compressors null / zlib / gzip
+// Self-describing formats are validated against `shape` / `dtype` when given.
 export type ArrayPath = string;
-// "/" has special meaning. "foo/bar", depending on underlying storage, means:
-// - Zarr: the array node "bar" within the group node "foo"
-// - `.npz` files: the array "foo/bar"
-// - `.npy` files: the array "foo/bar.npy"
-// - `.bin` files: the raw float32 array "foo/bar.bin"
+
+// the element type of a stored array; kept as the matching JS typed array on load (64-bit integers become numbers)
+export type Dtype = "float32" | "float64" | "int8" | "uint8" | "int16" | "uint16" | "int32" | "uint32" | "int64" | "uint64" | "bool";
 
 export type AxisPos = Int; // position along an axis; negative counts from the end (python-style)
 export type AxisSize = IntNonNeg; // size of a dimension
 
 export type ArrayShape = AxisSize[]; // e.g. [40, 40, 40]
-export type ArrayPart = AxisPos[]; // leading indices to fix, e.g. [0] (first row), [-1] (last row), [0, -1]
+// per axis: an integer FIXES that axis at the position and drops it, `null` KEEPS it; trailing nulls may be omitted.
+// [0] = first row; [-1] = last row; [null, null, null, 0] = channel 0 of a channel-interleaved (X, Y, Z, C) volume;
+// a part fixing every axis is one cell.
+export type ArrayPart = (AxisPos | null)[];
 
 /*******************************************************/
 // a SizedArraySpec fully determines an array (shape known without loading)
@@ -76,12 +86,19 @@ export type SymbolicVectorArraySpec = {
   consts?: Record<ConstArgName, Real>;
 };
 
-// data stored externally (npz / npy / zarr / bin); not supported in phase 1
+// a permutation of the KEPT axes (after `part`), numpy `transpose` semantics: result axis i is kept axis `axes[i]`.
+// [2, 1, 0] turns a volume stored (z, y, x) into (x, y, z).
+export type ArrayAxes = IntNonNeg[];
+
+// data stored externally (see ArrayPath). `shape` is the STORED shape (what the file holds, before `part`):
+// required knowledge for .bin, validation for self-describing formats. The result has the kept axes, permuted by `axes`.
 export type SizedArrayHandleSpec = {
   type: "handle";
-  shape: ArrayShape; // the size of the resulting array, must match what is loaded after `part` is applied
+  shape: ArrayShape;
   path: ArrayPath;
   part?: ArrayPart;
+  axes?: ArrayAxes;
+  dtype?: Dtype; // .bin: the stored element type (defaults to float32); other formats: validated
 };
 
 export type SymbolicRandomArraySpec = SymbolicRandomScalarArraySpec;
@@ -105,13 +122,6 @@ export type ArrayHandleSpec = {
   type: "handle";
   path: ArrayPath;
   part?: ArrayPart;
-};
-
-/*******************************************************/
-
-// a description of a single cell in an array
-export type CellSpec = {
-  type: "cell";
-  path: ArrayPath;
-  part: ArrayPart; // must index all axes
+  axes?: ArrayAxes;
+  dtype?: Dtype;
 };

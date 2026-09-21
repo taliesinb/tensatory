@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArrayExpr, BundleSpec, NetDefinitionSpec, NetSpec } from "@tensatory/schema";
-import { Bundle, DenseGrid, NdArray, NetSchema, NotSupportedError, inferExpr, inferNet, type Shape } from "../src";
+import { Bundle, DenseGrid, NdArray, NetSchema, inferExpr, inferNet, type Shape } from "../src";
 
 // the MLP of schema/nets.ts
 const mlp: NetDefinitionSpec = {
@@ -193,7 +193,7 @@ describe("bind", () => {
     expect(() => bundle({ mlp, v: { type: "bind", net: "mlp", bind: { x: constant([50, 784]), y: constant([49]) } } }).net("v")).toThrow(/axis "N" is 50 elsewhere but 49 here/);
     expect(() => bundle({ mlp, v: { type: "bind", net: "mlp", bind: { z: constant([1]) } } }).net("v")).toThrow(/"z" is not an input/);
     expect(() => bundle({ mlp, v: { type: "bind", net: "mlp", bind: { b1: constant([]) } } }).net("v")).toThrow(/at least rank 1/);
-    expect(() => bundle({ mlp, v: { type: "bind", net: "mlp", bind: { x: "val/x" } } }).net("v")).toThrow(NotSupportedError);
+    expect(() => bundle({ mlp, v: { type: "bind", net: "mlp", bind: { x: "val/x.npy" } } }).net("v")).toThrow(/external array "val\/x.npy" was not loaded/);
   });
 
   it("binding a bound net; unknown nets; cycles", () => {

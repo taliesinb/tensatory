@@ -38,5 +38,10 @@
     "file": "symbolic-nd.json",
     "name": "symbolic N-D",
     "summary": "Symbolic fields on 4D and 5D spaces — Gaussians, quadratic forms, Rosenbrock, waves — viewed through 2D / 3D slices (the slice row of the bundle panel)."
+  },
+  {
+    "file": "mnist-convnet-pca/bundle.json",
+    "name": "convnet on mnist: pca landscape",
+    "summary": "Loss and accuracy of a trained convnet (56,394 parameters) around θ* in the top-3 PCA subspace of its optimizer trajectory: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it."
   }
 ]

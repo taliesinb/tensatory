@@ -84,7 +84,61 @@ and move the sample points along. Details in [field-data.md](field-data.md).
 `data`), `constant`, `oneHot` / `manyHot`, `symbolic` / `symbolicv` (each cell
 is an expression of its integer grid position relative to `origin`), `random`
 (each cell an independent draw from a `dist`, `schema/distribution.ts`), and
-`handle` (external `path` into npz / npy / zarr / bin — **not implemented**).
+`handle` (an external array stored beside the bundle, see below). Where the
+schema says `ArraySpec` (net `bind` / `displace` arrays, sparse points,
+pullback vectors, stats) an array may also be a bare path string or a `handle`
+without `shape`: the shape is then read from the file.
+
+### External arrays (`handle`)
+
+```jsonc
+{ "type": "handle", "path": "vol.bin", "shape": [40, 40, 40, 2], "part": [null, null, null, 0], "axes": [2, 1, 0], "dtype": "float32" }
+```
+
+`path` is relative to the bundle document, so a bundle with external arrays
+is a **directory** (`bundles/<name>/bundle.json` + sidecars; `index.json`
+points at the JSON). The **format follows the path**
+(`packages/core/src/arrays/load.ts`):
+
+| path | reader |
+|---|---|
+| `vol.bin` | raw, headerless, row-major; `shape` required, `dtype` default `float32` |
+| `w.npy` | numpy v1/v2/v3 header; any real / integer / bool dtype, either endianness, C or Fortran order |
+| `data.npz/foo/bar` | member `foo/bar` (or `foo/bar.npy`) of the zip archive; stored or deflated |
+| `vol.zarr/g/arr` | the array node of a zarr store (or the store's root array): v2 `.zarray` or v3 `zarr.json`; compressors none / zlib / gzip; edge chunks, `fill_value`, F-order chunks, `dimension_separator` |
+
+blosc / zstd (zarr-python's defaults) are refused by name: write with
+`compressors=None`, `numcodecs.Zlib` / `GZip` (v2) or `GzipCodec` (v3).
+
+`shape` is the **stored** shape (validated against self-describing formats).
+`part` selects, per axis, an index (fix and drop; negative from the end) or
+`null` (keep; trailing nulls optional) — `[null, null, null, 0]` is channel 0
+of a channel-interleaved volume, a part fixing every axis is one cell.
+`axes` then permutes the kept axes (numpy `transpose`): the loss-landscape
+prototype stores volumes x-fastest, i.e. `(z, y, x, c)`, and `[2, 1, 0]` puts
+x first. `dtype` is required knowledge for `.bin` and a check elsewhere.
+Elements keep their stored type (`ArrayData` in `ndarray.ts`: a float32
+volume is a `Float32Array`, a uint8 dataset a `Uint8Array`; 64-bit integers
+become numbers in a `Float64Array`, bool a `Uint8Array`); reading a cell
+always yields a number, computation writes fresh `Float64Array`s, and the GPU
+packs a stored `Float32Array` as is.
+
+Runtime: bytes come from the environment through a `ByteSource`
+(`bytes(path) → ArrayBuffer | null`; the viewer's is `fetch` relative to the
+document URL, tests use `readFile`, `mapSource` wraps a map), and the build
+stays synchronous: `Bundle.load(json, src)` validates, walks the spec for
+every handle (`collectHandles`, typed per spec kind, merging `shape` /
+`dtype` hints and rejecting conflicts), loads them all (`loadArrays`, six at
+a time, with progress), and constructs the `Bundle` with an `ArrayResolver`
+that `buildArray` consults for `handle` specs. An array that fails to load
+does not fail the bundle: its error resurfaces on every field that uses it in
+`buildAll()`. `Bundle.parse(json)` (no sidecars) still works — handle-backed
+fields report "was not loaded". Rebuilds from a rewritten spec (adjust /
+slice / zoom) reuse the resolver (`new Bundle(spec, arrays)`). Example:
+`apps/viewer/public/bundles/mnist-convnet-pca/` built by
+`tools/loss-landscape/build.mjs` from the prototype's volumes; the loader
+fixtures under `packages/core/test/fixtures/handles/` are written by numpy /
+zarr-python (`make.py`).
 
 Random arrays: every distribution carries `seed: RandomSeed` (`null` = the
 runtime picks one, int, or a hashed string). Cell *i* is a pure function of
@@ -126,7 +180,8 @@ bare name, or `{ "op": …, … }`; e.g. `x² + y²` is
 
 ## From spec to runtime
 
-`Bundle.parse(json)` validates, then builds fields **lazily** on first access
+`Bundle.parse(json)` (or `await Bundle.load(json, byteSource)` when the bundle
+has external arrays) validates, then builds fields **lazily** on first access
 (so fields may reference each other by id in any order) with cycle detection;
 `buildAll()` reports per-field errors without failing the whole bundle, and
 the viewer lists them in the bundle panel. Nets are built the same way

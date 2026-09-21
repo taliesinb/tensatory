@@ -17,7 +17,7 @@ This would involve:
 
 ## Phases
 
-To begin with, we could implement only the simplest subset of functionality, avoiding the `.npz`/`.np`/`.zar` data backends and supporting only inline JSON-embedded or symbolic arrays; fields backed by these; and fields defined by mathematical expressions.
+Phase 1 implemented the simplest subset: inline JSON-embedded or symbolic arrays, fields backed by these, and fields defined by mathematical expressions. The external array backends (`.bin` / `.npy` / `.npz` / zarr, `handle` specs) came next; sparse supports, charts and sweeps are still to come (`notes/roadmap.md`).
 
 ## Data Bundle Schema
 
@@ -30,9 +30,17 @@ cannot drift from the types.
 It defines manifolds, fields on them (scalar / vector) whose data is
 symbolically defined, pointwise-derived from other fields, pulled back
 (translate / scale), or backed by arrays that are themselves inline, constant,
-one-hot, symbolic, or (later) stored via npz / npy / zarr / bin; and small
+one-hot, symbolic, random, or stored beside the bundle (`handle`: a `path`
+whose format follows its extension — raw `.bin`, `.npy`, a member of an
+`.npz`, a zarr v2 / v3 array node — with the STORED `shape`, a `part`
+selecting / keeping axes, an `axes` permutation and a `dtype`; a bundle with
+external arrays is a directory, `bundles/<name>/bundle.json` + sidecars,
+loaded by `Bundle.load(json, byteSource)` up front so the build stays
+synchronous; `notes/bundle-schema.md`); and small
 neural networks (`nets`, `schema/nets.ts`, `notes/nets.md`) whose outputs can
-back fields (`net` / `netv` field data).
+back fields (`net` / `netv` field data). `tools/loss-landscape/build.mjs`
+turns a volume of the original prototype into such a directory
+(`bundles/mnist-convnet-pca/`).
 
 ## Repository layout
 

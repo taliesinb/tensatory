@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import type {
+  ArraySpec,
   BoxSpec,
   FieldSpec,
   NetScalarFieldDataSpec,
@@ -13,7 +14,7 @@ import type {
   VectorFieldSpec,
   VectorSpec,
 } from "@tensatory/schema";
-import { ArraySchema, SizedArraySchema, buildArray } from "../arrays/spec";
+import { ArraySchema, SizedArraySchema, anyShape, buildAnyArray, buildArray, type ArrayResolver } from "../arrays/spec";
 import { NotSupportedError, SpecError } from "../errors";
 import { Box } from "../geometry/box";
 import { DenseGrid } from "../geometry/grid";
@@ -123,11 +124,12 @@ export const FieldSchema: z.ZodType<FieldSpec> = z.discriminatedUnion("kind", [S
 /*******************************************************/
 /* builders */
 
-/** resolves field ids (and net ids) referenced from within field data specs */
+/** resolves field ids (and net ids) referenced from within field data specs, and the bundle's loaded external arrays */
 export interface FieldResolver {
   scalar(id: string, path: string[]): ScalarFieldData;
   vector(id: string, path: string[]): VectorFieldData;
   nets?: ProgramResolver;
+  arrays?: ArrayResolver | undefined;
 }
 
 export const noNets: ProgramResolver = {
@@ -142,25 +144,23 @@ export const noResolver: FieldResolver = {
 
 /** shape-check a net-backed field spec and fold it into one single-input program */
 function netField(spec: NetScalarFieldDataSpec | NetVectorFieldDataSpec, dimCount: number, resolver: FieldResolver, path: string[]): NetField {
-  const nets = resolver.nets ?? noNets;
+  const nets: ProgramResolver = resolver.nets ?? { ...noNets, arrays: resolver.arrays };
   inferNetField(spec, dimCount, nets, path);
   const base = typeof spec.net === "string" ? nets.program(spec.net, [...path, "net"]) : compileNet(spec.net, nets, [...path, "net"]);
   const arrays = new Map<string, Val>();
   for (const [n, a] of Object.entries(spec.arrays ?? {})) {
-    if (typeof a === "string" || !("shape" in a)) throw new NotSupportedError(`external arrays are not loaded yet`, [...path, "arrays", n]);
-    arrays.set(n, { arr: buildArray(a, [...path, "arrays", n]), rank: a.shape.length });
+    const p = [...path, "arrays", n];
+    arrays.set(n, { arr: buildAnyArray(a, p, resolver.arrays), rank: anyShape(a, p, resolver.arrays).length });
   }
   return { program: fieldProgram(base, spec.inputs, arrays, dimCount, path), output: spec.output, nets };
 }
 
-function resolvePoint(spec: PointSpec, dimCount: number, path: string[]): number[] {
+function resolvePoint(spec: PointSpec, dimCount: number, resolver: FieldResolver, path: string[]): number[] {
   if (Array.isArray(spec) && spec.every((x) => typeof x === "number")) {
     if (spec.length !== dimCount) throw new SpecError(`expected ${dimCount} components, got ${spec.length}`, path);
     return spec as number[];
   }
-  if (typeof spec === "string" || (typeof spec === "object" && spec !== null && "type" in spec && spec.type === "handle"))
-    throw new NotSupportedError(`array-backed points are not supported yet`, path);
-  const arr = buildArray(spec as Parameters<typeof buildArray>[0], path);
+  const arr = buildAnyArray(spec as ArraySpec, path, resolver.arrays);
   if (arr.ndim !== 1 || arr.size !== dimCount) throw new SpecError(`expected a vector of ${dimCount} components, got shape [${arr.shape}]`, path);
   return Array.from(arr.data);
 }
@@ -191,7 +191,7 @@ function buildArgs(
 export function buildScalarFieldData(spec: ScalarFieldDataSpec, dimCount: number, resolver: FieldResolver = noResolver, path: string[] = ["data"]): ScalarFieldData {
   switch (spec.type) {
     case "dense": {
-      const arr = buildArray(spec.samples, [...path, "samples"]);
+      const arr = buildArray(spec.samples, [...path, "samples"], resolver.arrays);
       if (arr.ndim !== dimCount) throw new SpecError(`samples have ${arr.ndim} axes but the field has ${dimCount} dims`, path);
       return new DenseScalarFieldData(new DenseGrid([...arr.shape], boxOrUnit(spec.box, dimCount, [...path, "box"])), arr.data, spec.stats);
     }
@@ -199,11 +199,11 @@ export function buildScalarFieldData(spec: ScalarFieldDataSpec, dimCount: number
       throw new NotSupportedError("sparse sampled fields are not supported yet", path);
     case "translate": {
       const inner = typeof spec.arg === "string" ? resolver.scalar(spec.arg, [...path, "arg"]) : buildScalarFieldData(spec.arg, dimCount, resolver, [...path, "arg"]);
-      return translateField(inner, resolvePoint(spec.vec, dimCount, [...path, "vec"]));
+      return translateField(inner, resolvePoint(spec.vec, dimCount, resolver, [...path, "vec"]));
     }
     case "scale": {
       const inner = typeof spec.arg === "string" ? resolver.scalar(spec.arg, [...path, "arg"]) : buildScalarFieldData(spec.arg, dimCount, resolver, [...path, "arg"]);
-      return scaleField(inner, spec.origin === undefined ? undefined : resolvePoint(spec.origin, dimCount, [...path, "origin"]), spec.scale);
+      return scaleField(inner, spec.origin === undefined ? undefined : resolvePoint(spec.origin, dimCount, resolver, [...path, "origin"]), spec.scale);
     }
     case "pointwise": {
       const { env, args } = buildArgs(spec, dimCount, resolver, path);
@@ -221,7 +221,7 @@ export function buildScalarFieldData(spec: ScalarFieldDataSpec, dimCount: number
 export function buildVectorFieldData(spec: VectorFieldDataSpec, dimCount: number, resolver: FieldResolver = noResolver, path: string[] = ["data"]): VectorFieldData {
   switch (spec.type) {
     case "densev": {
-      const arr = buildArray(spec.samples, [...path, "samples"]);
+      const arr = buildArray(spec.samples, [...path, "samples"], resolver.arrays);
       if (arr.ndim !== dimCount + 1 || arr.shape[dimCount] !== dimCount)
         throw new SpecError(`vector samples must have shape [S_0..S_${dimCount - 1}, ${dimCount}], got [${arr.shape}]`, path);
       return new DenseVectorFieldData(new DenseGrid(arr.shape.slice(0, dimCount), boxOrUnit(spec.box, dimCount, [...path, "box"])), arr.data);
@@ -230,11 +230,11 @@ export function buildVectorFieldData(spec: VectorFieldDataSpec, dimCount: number
       throw new NotSupportedError("sparse sampled fields are not supported yet", path);
     case "translate": {
       const inner = typeof spec.arg === "string" ? resolver.vector(spec.arg, [...path, "arg"]) : buildVectorFieldData(spec.arg, dimCount, resolver, [...path, "arg"]);
-      return translateField(inner, resolvePoint(spec.vec, dimCount, [...path, "vec"]));
+      return translateField(inner, resolvePoint(spec.vec, dimCount, resolver, [...path, "vec"]));
     }
     case "scale": {
       const inner = typeof spec.arg === "string" ? resolver.vector(spec.arg, [...path, "arg"]) : buildVectorFieldData(spec.arg, dimCount, resolver, [...path, "arg"]);
-      return scaleField(inner, spec.origin === undefined ? undefined : resolvePoint(spec.origin, dimCount, [...path, "origin"]), spec.scale);
+      return scaleField(inner, spec.origin === undefined ? undefined : resolvePoint(spec.origin, dimCount, resolver, [...path, "origin"]), spec.scale);
     }
     case "pointwisev": {
       const { env, args } = buildArgs(spec, dimCount, resolver, path);

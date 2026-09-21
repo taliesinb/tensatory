@@ -29,7 +29,10 @@ import {
   planStreamlines,
   streamlineSeeds,
   taubinSmooth,
+  noArrays,
   type Adjustments,
+  type ArrayResolver,
+  type ByteSource,
   type ContourResult,
   type GlyphStyle,
   type Lattice,
@@ -164,6 +167,8 @@ interface State {
   bundle: Bundle | undefined;
   /** the parsed bundle's spec, as loaded */
   baseSpec: BundleSpec | undefined;
+  /** the bundle's external arrays, loaded once with it (adjust / slice / zoom rebuilds keep them) */
+  arrays: ArrayResolver;
   /** Controls-pane adjustments (per bundle option): reseed salts and scale multipliers by row id */
   adjust: Adjustments;
   /** box zoom exponent per space (the symbolic fields' boxes scaled by BOX_ZOOM^k around their centres; `-` / `=`) */
@@ -190,7 +195,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, adjust: {}, boxZoom: {}, slice: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1474,19 +1479,19 @@ function adjustedBundle(parsed: Bundle): Bundle {
   sliceDropped = new Map();
   for (const m of parsed.manifolds.keys()) {
     if (!sliceable(spec, m)) continue;
-    const r = sliceSpec(spec, m, sliceOf(parsed.spec, m));
+    const r = sliceSpec(spec, m, sliceOf(parsed.spec, m), undefined, parsed.arrays);
     for (const [id, why] of Object.entries(r.dropped)) sliceDropped.set(id, why);
     spec = r.spec;
   }
   for (const [m, k] of Object.entries(state.boxZoom)) spec = zoomBoxes(spec, m, Math.pow(BOX_ZOOM, k));
-  return spec === parsed.spec ? parsed : new Bundle(spec);
+  return spec === parsed.spec ? parsed : new Bundle(spec, parsed.arrays);
 }
 
 /** rebuild the bundle from the base spec with the current adjustments / slices / zooms; everything keyed by field id stays */
 function rebuildBundle(): void {
   if (!state.baseSpec) return;
   try {
-    state.bundle = adjustedBundle(new Bundle(state.baseSpec));
+    state.bundle = adjustedBundle(new Bundle(state.baseSpec, state.arrays));
     buildErrors = state.bundle.buildAll();
     showBuildErrors();
     state.revision++;
@@ -1587,7 +1592,7 @@ function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void
 const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!state.paused && ui.anim.checked && num("lines") !== null && !!streamVector());
 
 function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
-  state.bundleFile = file; state.baseSpec = parsed.spec;
+  state.bundleFile = file; state.baseSpec = parsed.spec; state.arrays = parsed.arrays;
   const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {}; state.slice = opts0.slice ?? {};
   let bundle: Bundle;
   try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; state.slice = {}; try { bundle = adjustedBundle(parsed); } catch { bundle = parsed; } } // stale adjustments (the bundle changed): drop them
@@ -1609,15 +1614,30 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): voi
   status("");
 }
 
+/** the sidecar files of a bundle document at `url`: `path` is relative to the document; a 404 is `null` (a missing zarr chunk) */
+function fetchSource(url: URL): ByteSource {
+  return {
+    bytes: async (path) => {
+      const res = await fetch(new URL(path, url), { cache: "no-cache" });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${path}`);
+      return res.arrayBuffer();
+    },
+  };
+}
+
 async function loadBundle(file: string, wantSpace?: string | null): Promise<void> {
   status(`loading ${file}…`);
   const t0 = performance.now();
   try {
-    const res = await fetch(`bundles/${file}`, { cache: "no-cache" });
+    const url = new URL(`bundles/${file}`, location.href);
+    const res = await fetch(url, { cache: "no-cache" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText} for bundles/${file}`);
     const json = await res.json();
     console.log(`bundle ${file}: fetched in ${(performance.now() - t0).toFixed(0)} ms`);
-    setBundle(Bundle.parse(json), file, wantSpace);
+    // external arrays (`handle` specs) live beside the document; they are loaded now so the build stays synchronous
+    const parsed = await Bundle.load(json, fetchSource(url), { onProgress: (p) => status(`loading ${file}… arrays ${p.done}/${p.total}`) });
+    setBundle(parsed, file, wantSpace);
     console.log(`bundle ${file}: ready in ${(performance.now() - t0).toFixed(0)} ms (space ${state.space})`);
   } catch (e) {
     console.error(e);
@@ -1647,10 +1667,18 @@ function stepOnWheel(sel: HTMLSelectElement, step: (dir: number) => void): void 
   window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); } });
 }
 $("uploadBtn").onclick = () => $<HTMLInputElement>("pickFile").click();
+/* local bundles: pick the JSON alone, or together with its sidecar files (.bin / .npy / .npz beside it; a zarr store
+   cannot be picked as flat files, so handles into one fail on their fields with a clear message) */
 $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
-  const file = (ev.target as HTMLInputElement).files?.[0]; if (!file) return;
-  try { setBundle(Bundle.parse(JSON.parse(await file.text())), `local:${file.name}`); status(`${file.name} (local)`); }
-  catch (e) { console.error(e); status(e instanceof Error ? e.message : String(e)); }
+  const files = [...((ev.target as HTMLInputElement).files ?? [])]; if (!files.length) return;
+  const doc = files.find((f) => /\.json$/i.test(f.name)) ?? files[0]!;
+  const sidecars = files.filter((f) => f !== doc);
+  const src: ByteSource = { bytes: async (path) => sidecars.find((f) => f.name === path || (f as File & { webkitRelativePath?: string }).webkitRelativePath === path)?.arrayBuffer() ?? null };
+  try {
+    const parsed = await Bundle.load(JSON.parse(await doc.text()), src);
+    setBundle(parsed, `local:${doc.name}`);
+    status(`${doc.name} (local${sidecars.length ? `, ${sidecars.length} sidecar file${sidecars.length === 1 ? "" : "s"}` : ""})`);
+  } catch (e) { console.error(e); status(e instanceof Error ? e.message : String(e)); }
 });
 
 /*******************************************************/

@@ -23,7 +23,8 @@ import type {
   NetSpec,
   NetVectorFieldDataSpec,
 } from "@tensatory/schema";
-import { NotSupportedError, SpecError } from "../errors";
+import { anyShape, sizedShape, type ArrayResolver } from "../arrays/spec";
+import { SpecError } from "../errors";
 import { SCALAR_BINARY_OPS, SCALAR_NARY_OPS, SCALAR_UNARY_OPS } from "../symbolic/spec";
 import { ARRAY_COMPARE_OPS } from "./spec";
 
@@ -41,9 +42,10 @@ export interface NetSignature {
   readonly batch: Shape;
 }
 
-/** resolves net ids referenced from specs (by id) */
+/** resolves net ids referenced from specs (by id), and the bundle's external arrays (absent: none were loaded) */
 export interface NetResolver {
   net(id: string, path: string[]): NetSignature;
+  arrays?: ArrayResolver | undefined;
 }
 
 export const noNetResolver: NetResolver = {
@@ -113,12 +115,8 @@ const applySubst = (shape: Shape, subst: Subst): Dim[] => shape.map((d) => (type
 const mapShapes = (rec: Readonly<Record<string, Shape>>, f: (s: Shape) => Shape): Record<string, Shape> =>
   Object.fromEntries(Object.entries(rec).map(([k, s]) => [k, f(s)]));
 
-/** the shape of an array spec, when it is known without loading */
-function arraySpecShape(spec: ArraySpec, path: string[]): Shape {
-  if (typeof spec === "string") throw new NotSupportedError(`array "${spec}" has no declared shape; external arrays are not loaded yet`, path);
-  if (!("shape" in spec)) throw new NotSupportedError(`array handle "${spec.path}" has no declared shape; external arrays are not loaded yet`, path);
-  return spec.shape;
-}
+/** the shape of an array spec: declared, or (bare paths / unsized handles) that of the loaded stored array */
+const arraySpecShape = (spec: ArraySpec, nets: NetResolver, path: string[]): Shape => anyShape(spec, path, nets.arrays);
 
 /*******************************************************/
 /* array expressions */
@@ -376,7 +374,7 @@ function inferDisplace(spec: DisplacedNetSpec, nets: NetResolver, path: string[]
       const p = [...path, "directions", String(k), "arrays", n];
       const target = sig.inputs[n] ?? sig.nodes[n];
       if (!target) throw new SpecError(`"${n}" is neither an input nor an internal array of the net`, p);
-      const s = arraySpecShape(a, p);
+      const s = arraySpecShape(a, nets, p);
       if (s.length !== target.length || s.some((d, i) => !dimEq(d, target[i]!)))
         throw new SpecError(`direction ${k} of "${n}" has shape ${fmtShape(s)}, "${n}" has ${fmtShape(target)}`, p);
     }
@@ -398,7 +396,7 @@ function inferDef(spec: NetDefinitionSpec, nets: NetResolver, path: string[]): N
     names.set(n, s);
     for (const d of s) if (typeof d === "string") axisNames.add(d);
   }
-  for (const [n, a] of Object.entries(spec.arrays ?? {})) { claim(n, "arrays"); names.set(n, a.shape); }
+  for (const [n, a] of Object.entries(spec.arrays ?? {})) { claim(n, "arrays"); names.set(n, sizedShape(a, [...path, "arrays", n])); }
   const nodes = spec.nodes ?? {};
   for (const n of Object.keys(nodes)) claim(n, "nodes");
 
@@ -419,7 +417,7 @@ function inferDef(spec: NetDefinitionSpec, nets: NetResolver, path: string[]): N
     return s;
   };
   const nodeShapes: Record<string, Shape> = {};
-  for (const [n, a] of Object.entries(spec.arrays ?? {})) nodeShapes[n] = a.shape; // constants are internal arrays too
+  for (const n of Object.keys(spec.arrays ?? {})) nodeShapes[n] = names.get(n)!; // constants are internal arrays too
   for (const n of Object.keys(nodes)) nodeShapes[n] = visit(n);
 
   const outputs: Record<string, Shape> = {};
@@ -452,8 +450,8 @@ export function exprNames(e: ArrayExpr, out = new Set<string>()): Set<string> {
 }
 
 /** bind arrays to inputs of a signature */
-function bindSignature(sig: NetSignature, bind: Record<string, ArraySpec>, path: string[]): NetSignature {
-  const shapes = Object.fromEntries(Object.entries(bind).map(([k, a]) => [k, arraySpecShape(a, [...path, k])]));
+function bindSignature(sig: NetSignature, bind: Record<string, ArraySpec>, nets: NetResolver, path: string[]): NetSignature {
+  const shapes = Object.fromEntries(Object.entries(bind).map(([k, a]) => [k, arraySpecShape(a, nets, [...path, k])]));
   const { batch, subst } = applyInputs(sig, shapes, path, "bind");
   const inputs = Object.fromEntries(Object.entries(sig.inputs).filter(([k]) => !(k in bind)));
   // a bound input becomes an internal array (still a valid `wrt`: the gradient at fixed weights)
@@ -470,12 +468,12 @@ const resolve = (net: string | NetSpec, nets: NetResolver, path: string[]): NetS
   typeof net === "string" ? nets.net(net, path) : inferNet(net, nets, path);
 
 function inferBind(spec: BoundNetSpec, nets: NetResolver, path: string[]): NetSignature {
-  return bindSignature(resolve(spec.net, nets, [...path, "net"]), spec.bind, [...path, "bind"]);
+  return bindSignature(resolve(spec.net, nets, [...path, "net"]), spec.bind, nets, [...path, "bind"]);
 }
 
 function inferGrad(spec: GradNetSpec, nets: NetResolver, path: string[]): NetSignature {
   let sig = resolve(spec.net, nets, [...path, "net"]);
-  if (spec.bind) sig = bindSignature(sig, spec.bind, [...path, "bind"]);
+  if (spec.bind) sig = bindSignature(sig, spec.bind, nets, [...path, "bind"]);
   const inputs: Record<string, Shape> = { ...sig.inputs };
   const outputs: Record<string, Shape> = {};
   const subst: Subst = new Map();
@@ -499,7 +497,7 @@ function inferGrad(spec: GradNetSpec, nets: NetResolver, path: string[]): NetSig
         inputs[g.seed] = of; // a new input of the gradient net
       }
     } else {
-      const { batch, example } = splitBatch(of, arraySpecShape(g.seed, [...p, "seed"]), [...p, "seed"], `seed for "${g.of}"`);
+      const { batch, example } = splitBatch(of, arraySpecShape(g.seed, nets, [...p, "seed"]), [...p, "seed"], `seed for "${g.of}"`);
       unifyShape(of, example, subst, [...p, "seed"], `seed for "${g.of}"`);
       batches.push(batch);
     }
@@ -539,7 +537,7 @@ export function inferNetField(
   const sig = resolve(spec.net, nets, [...path, "net"]);
   if (sig.batch.length) throw new SpecError(`the net's bound arrays add batch axes ${fmtShape(sig.batch)}; a field needs one value per point — reduce over a declared axis inside the net`, [...path, "net"]);
   const arrays = new Map<string, Shape>();
-  for (const [n, a] of Object.entries(spec.arrays ?? {})) arrays.set(n, arraySpecShape(a, [...path, "arrays", n]));
+  for (const [n, a] of Object.entries(spec.arrays ?? {})) arrays.set(n, arraySpecShape(a, nets, [...path, "arrays", n]));
   const env: ArrayEnv = { names: arrays, axisNames: new Set(), coordDims: dimCount, nets };
   const given: Record<string, Shape> = {};
   for (const [n, e] of Object.entries(spec.inputs ?? {})) given[n] = inferExpr(e, env, [...path, "inputs", n]);

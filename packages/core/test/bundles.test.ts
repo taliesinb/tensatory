@@ -1,15 +1,29 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Bundle, DenseGrid, infoOf, isoContours } from "../src";
+import { Bundle, DenseGrid, infoOf, isoContours, type ByteSource } from "../src";
 
 const dir = join(__dirname, "../../../apps/viewer/public/bundles");
-const files = readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "index.json");
+/** every bundle document: a top-level `<name>.json`, or a directory's `bundle.json` (a bundle with sidecar arrays) */
+const files = readdirSync(dir).flatMap((f) => {
+  if (f.endsWith(".json")) return f === "index.json" ? [] : [f];
+  return statSync(join(dir, f)).isDirectory() && existsSync(join(dir, f, "bundle.json")) ? [`${f}/bundle.json`] : [];
+});
+
+/** the sidecar files beside a document, as the viewer would fetch them */
+const sourceFor = (file: string): ByteSource => ({
+  bytes: async (path) => {
+    try { const b = await readFile(join(dir, dirname(file), path)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
+  },
+});
+const load = (file: string) => Bundle.load(JSON.parse(readFileSync(join(dir, file), "utf8")), sourceFor(file));
 
 describe("example bundles", () => {
   for (const f of files) {
-    it(`${f} parses, builds every field, samples and contours`, () => {
-      const b = Bundle.parse(JSON.parse(readFileSync(join(dir, f), "utf8")));
+    it(`${f} parses, builds every field, samples and contours`, async () => {
+      const b = await load(f);
       const errors = b.buildAll();
       expect([...errors.entries()].map(([id, e]) => `${id}: ${e.message}`)).toEqual([]);
       for (const id of b.scalarFieldIds) {
@@ -49,11 +63,11 @@ describe("example bundles", () => {
     expect(cyc.points[0]).toEqual(cyc.points[cyc.points.length - 1]);
   });
 
-  it("summary / details: `info` of bundles, spaces and fields, and index.json mirrors every bundle's name and summary", () => {
+  it("summary / details: `info` of bundles, spaces and fields, and index.json mirrors every bundle's name and summary", async () => {
     const index = JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as { file: string; name?: string; summary?: string }[];
     expect(index.map((e) => e.file).sort()).toEqual([...files].sort());
     for (const e of index) {
-      const b = Bundle.parse(JSON.parse(readFileSync(join(dir, e.file), "utf8")));
+      const b = await load(e.file);
       expect(e.name, `${e.file} name`).toBe(b.name);
       expect(e.summary, `${e.file} summary`).toBe(b.spec.summary);
       expect(b.info?.summary, `${e.file} has a summary`).toBeDefined();

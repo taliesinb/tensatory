@@ -1,32 +1,35 @@
 # Roadmap
 
 Rough order; each item is independent enough to be picked up alone. Where the
-bundle format is concerned, the state of play is: `schema/` still describes
-the full phase‑1 design and the runtime implements exactly its inline subset
-(see [bundle-schema.md](bundle-schema.md)); `handle`, `sparse` / `sparsev`,
-array-backed points and `mappings.ts` parse (or are commented out) but build
-to `NotSupportedError`. Nothing outside JSON has ever been loaded.
+bundle format is concerned, the state of play is: `schema/` describes the
+full design; the runtime implements the inline arrays, the `handle` array
+backend (`.bin` / `.npy` / `.npz` / zarr v2 + v3, see
+[bundle-schema.md](bundle-schema.md) "External arrays"), array-backed points
+and vectors; `sparse` / `sparsev` and `mappings.ts` parse (or are commented
+out) but build to `NotSupportedError`.
 
 ## Bundle format
 
-1. **Raw `.bin` array backend** (`handle` specs) — the first real storage
-   backend and the first edit to `schema/arrays.ts` since phase 1. Design in
-   [sweeps.md §1](sweeps.md): `part` gains `null` ("keep this axis") so a
-   handle can address a channel of the loss-landscape's channel-interleaved
-   `(N, C)` arrays, `shape` becomes the stored shape, `dtype` is added;
-   bytes come from an environment-provided `ByteSource`, formats are decoded
-   in core, arrays are prefetched so the build stays synchronous (a bundle
-   becomes a JSON + sidecar directory). Then the existing loss-landscape
-   volumes (`~/projects/loss-landscape/viewer/data/*.json + .bin`) become real
-   bundles: manifold `params` (n_params) + manifold `pca` (3D, `dimWeights` =
-   explained variance), `log10_loss` / `accuracy` dense fields with `celoss` /
-   `fraction` codomains, `grad_*` as the `exactGradient`, the trajectory and
-   θ* as point sets (the affine injection between the manifolds waits for 4).
-2. **npz / npy / zarr backends** (same `handle` vocabulary and `ByteSource`;
-   `path` semantics per store are already sketched in `schema/arrays.ts`),
-   **sparse supports** (`sparse` / `sparsev`; needs a sampled-data
-   representation that is not a grid). Array-backed `PointSpec` /
-   `VectorSpec` fall out of 1.
+1. ~~Raw `.bin` array backend~~ and ~~npz / npy / zarr backends~~ — done
+   ([sweeps.md §1](sweeps.md) as designed, plus `axes`: the prototype's
+   volumes turned out to be stored x-fastest, `(z, y, x, c)`, so a handle
+   also permutes its kept axes). `apps/viewer/public/bundles/mnist-convnet-pca/`
+   (`tools/loss-landscape/build.mjs`) is the first bundle directory: manifold
+   `pca` (3D, `dimWeights` = explained variance), `log10_loss` / `accuracy`
+   as channel handles into the prototype's own `.bin`, a pointwise `loss`
+   (`celoss`), trajectory and θ* point sets. Left from the original plan: the
+   `params` manifold and the affine injection into it (waits for 4); the
+   other three volumes (`node tools/loss-landscape/build.mjs mnist_mlp_pca`
+   etc. — 2 MB each, not committed). Loader follow-ups: blosc / zstd codecs
+   (zarr-python's defaults; a WASM decoder or a `zarr.js`-style dependency),
+   lazy per-field loading (`Bundle.prepare(fieldIds)` filling the same
+   resolver), abort signals, cross-bundle byte caching, zip64. (Stored
+   element types are kept — `ArrayData` covers the JS typed arrays — so no
+   widening on load; the CPU compute type stays f64 on purpose: it is the
+   reference the f32 GPU is tested against.)
+2. **Sparse supports** (`sparse` / `sparsev`; needs a sampled-data
+   representation that is not a grid). Their `points` / `samples` arrays
+   already load.
 3. **Sweeps** ([sweeps.md §2](sweeps.md)): a `SweepSpec` root holding
    members (each a `BundleSpec`, inline or by path) with flat metadata
    records and a merged `common` partial; faceted navigation over the
@@ -41,16 +44,18 @@ to `NotSupportedError`. Nothing outside JSON has ever been loaded.
    example checked against PyTorch, CPU / GPU agreement. Next: streaming the
    dataset axis in the transpiler so nets larger than function-scope memory
    run on the GPU, elementwise fusion in the emitter, and an MLP-on-MNIST
-   bundle (needs 1 for the weights and validation set).
+   bundle (the weights and validation set as `.npz` members — `bind` takes a
+   bare path — now that 1 is done).
 6. **Server-side computation**: a Tensatory server that materializes fields on
    demand (e.g. a Torch script sampling a new grid), with the same
    `FieldDataSpec` vocabulary; and client-side computation via third-party JS
    (WebGPU training).
-7. **Schema housekeeping** when 1 lands: drop `CellSpec` (a `part` fixing
-   every axis is a cell), drop or use `VectorStatistics` and the phantom
+7. **Schema housekeeping**: `CellSpec` is gone (a `part` fixing every axis
+   is a cell); still open: drop or use `VectorStatistics` and the phantom
    `ArraySpec<_N>` parameter, decide whether `stats.quantiles` / `histogram`
-   (parsed, never read) stay. The `part` change is backward compatible, so
-   no version bump; the sweep root is `"0.2"`.
+   (parsed and, as handles, loaded — but never read) stay. The `part` /
+   `axes` / `dtype` additions were backward compatible, so no version bump;
+   the sweep root is `"0.2"`.
 
 ## Geometry and rendering
 

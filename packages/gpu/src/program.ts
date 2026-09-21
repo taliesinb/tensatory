@@ -73,7 +73,7 @@ export class ProgramBuilder {
 
   /** pack an array into the shared data buffer; returns its element offset */
   private upload(data: ArrayLike<number>): number {
-    const chunk = Float32Array.from(data as ArrayLike<number>);
+    const chunk = data instanceof Float32Array ? data : Float32Array.from(data as ArrayLike<number>); // a stored-f32 array is packed as is
     const offset = this.dataLength;
     this.chunks.push(chunk);
     this.dataLength += chunk.length;

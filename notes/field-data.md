@@ -67,7 +67,8 @@ cached, and carry an id (`norm:<id>`, `grad:<id>`), a display name
 
 ## Limitations / next
 
-* Sparse supports and external array handles are declared but not built.
+* Sparse supports are declared but not built. External array handles are
+  loaded up front by `Bundle.load` (bundle-schema.md, "External arrays").
 * Vector fields are plain ℝⁿ-valued functions; 1-forms are not distinguished,
   so `scale` pullbacks do not transform vector values.
 * Fields on different manifolds are never combined; the viewer only shows 2D
