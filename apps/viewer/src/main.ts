@@ -1434,6 +1434,15 @@ function setCurveOpts(id: string, o: CurveOpts): void {
   saveOptsSoon();
 }
 const spaceSel = $<HTMLSelectElement>("pickSpaceSel");
+/** a picker with a single alternative is shown as a plain label (its ⓘ stays); with several, as the select */
+function syncPickers(): void {
+  for (const [sel, only] of [[pickSel, $("pickBundleOnly")], [spaceSel, $("pickSpaceOnly")]] as const) {
+    const single = sel.options.length < 2;
+    sel.style.display = single ? "none" : "";
+    only.style.display = single ? "" : "none";
+    only.textContent = sel.selectedOptions[0]?.textContent ?? "";
+  }
+}
 spaceSel.onchange = () => setSpace(spaceSel.value, true);
 
 /** switch to a space of the current bundle: fields, defaults, saved options and view */
@@ -1443,6 +1452,7 @@ function setSpace(id: string, fromUser: boolean): void {
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
   spaceSel.value = m.id;
+  syncPickers();
   bindInfoIcon($("spaceInfo"), m.info);
   syncSliceRow();
   // a fresh space (or bundle) starts PAUSED whatever the saved ▶ ticks say: its first frames build everything from
@@ -1663,7 +1673,7 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): voi
   showBuildErrors();
   const spaces = spaceList();
   spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name, title: optionText(m.info) })));
-  spaceSel.disabled = spaces.length < 2;
+  syncPickers();
   const saved = readOpts().space;
   const pick = [wantSpace, saved, spaces.find((m) => m.numDims === 2)?.id, spaces[0]?.id].find((id) => id && spaces.some((m) => m.id === id));
   if (!pick) { usable = { scalars: [], vectors: [] }; state.space = ""; buildMetrics(); updateInfo(); status("no 2D or 3D space with fields"); state.dirty = true; return; }
@@ -1963,6 +1973,7 @@ const RECOLOUR_REFRESH = 4;
   const want = params.get("bundle");
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
   pickSel.value = file;
+  syncPickers();
   bootPhase(`bundle ${file}`);
   await loadBundle(file, params.get("space"));
   bootPhase(undefined);

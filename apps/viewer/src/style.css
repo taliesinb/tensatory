@@ -94,6 +94,8 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #picker .body, #system .body { padding: 6px 12px 8px; }
 #picker .prow, #system .prow { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 #picker .prow label, #system .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
+/* a picker with a single alternative is a plain label (clicking a one-option select shows nothing) */
+#picker .only { flex: 1; min-width: 0; color: #e8ecf5; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #picker .pval, #system .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 #pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }

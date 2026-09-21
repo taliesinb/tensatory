@@ -36,7 +36,10 @@ pipelines and either draw with Canvas 2D or upload their results. See
 ## Layout
 
 * **Left super-stack** (one rounded container; strips are coloured rows):
-  `bundle` (picker and space picker, both with wheel/arrow switching; each
+  `bundle` (picker and space picker, both with wheel/arrow switching; a
+  picker with a single alternative is shown as a plain label instead of a
+  select — clicking a one-option select shows nothing — its ⓘ stays
+  (`syncPickers`); each
   gets a ⓘ to its right when the selected bundle / space has a `summary` or
   `details` — hover = summary else details (the shared 0.25 s tooltip,
   `cursor: help` like the panel keys), click = details else summary in a
