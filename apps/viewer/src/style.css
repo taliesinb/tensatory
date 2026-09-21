@@ -86,10 +86,11 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 #sliceBar .seg.committed:not(.on) { background: #1e3a6e; color: #9fb3d9; }
 #sliceBar .seg.committed:not(.on):hover { background: #26467f; color: #c4d2ee; }
 #sliceBar .seg { padding: 0 6px; min-width: 8px; }
-/* the record rows (sweeps): `.on` = this member's value, `.direct` = a switch that changes only this key (tinted, as
-   the committed slice), plain = the value exists but reaching it changes other keys too, `.disabled` = no member has it */
-.ch.record .seg.direct:not(.on) { background: #1e3a6e; color: #9fb3d9; }
-.ch.record .seg.direct:not(.on):hover { background: #26467f; color: #c4d2ee; }
+/* the key flippers (sweeps): `.on` = this member's value, plain grey = a switch that changes only this key (like any
+   toggler's alternatives), `.indirect` = the value exists but reaching it changes other keys too (dimmer text, still
+   clickable), `.disabled` = no member has it */
+.ch.record .seg.indirect:not(.on) { color: #363d4e; }
+.ch.record .seg.indirect:not(.on):hover { color: #6b7488; }
 .ch.record .seg { padding: 0 6px; min-width: 8px; }
 .ch.record { flex-wrap: wrap; height: auto; row-gap: 3px; }
 /* the KEY lines under the member picker: an inline label ("model") and the flipper, left-aligned under the member's

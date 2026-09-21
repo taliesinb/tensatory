@@ -167,7 +167,7 @@ profiling test.
   member's whole RECORD as a key / value table (`info.ts` `kvTable`, also
   the tooltip's `data-tip-rows`), and under it one indented KEY LINE per
   varying non-attribute key — an inline label and a flipper (blue = this
-  member, tinted = a direct switch that changes only this key, plain =
+  member, grey = a direct switch that changes only this key, dim =
   jumps to the nearest member and changes others too — the status line says
   which, disabled = no member has it). Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
   same-shaped members share everything; into a new signature the usable

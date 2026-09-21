@@ -523,8 +523,8 @@ beyond `extrema`), or float64 volumes (f32 is what the GPU reads).
 * **Faceting is relative to the current member, and every existing value is
   reachable.** A value is `direct` when some member carrying it agrees with
   the current member on every other (non-attribute) key they share; it is
-  shown tinted. A value no member differs only in is still clickable, shown
-  plain, and jumps to the NEAREST member (`nearestMember`: the fewest other
+  shown grey like any toggler's alternatives. A value no member differs only
+  in is still clickable, shown dim, and jumps to the NEAREST member (`nearestMember`: the fewest other
   keys changed, then the most shared keys, then sweep order) with the status
   line saying what else changed (`dirs → random, model → convnet`). A value
   listed in `keys.values` that no member has is disabled. Keys absent from

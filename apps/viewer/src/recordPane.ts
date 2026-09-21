@@ -2,9 +2,9 @@
 // between the `bundle` and `space` pickers shows which member is on view and moves through the sweep:
 //
 //   member    mlp · pca                         ⌃⌄  ⓘ    a table picker over the members (their keys as columns) + ⓘ
-//             model  [mlp]  convnet                       one line per VARYING key: an inline label and a flipper —
-//             dirs   [pca]  random                        blue = this member's value, tinted = a DIRECT switch (only
-//                                                         this key changes), plain = other keys change too
+//             model: [mlp]  convnet                       one line per VARYING key: an inline label and a flipper —
+//             dirs:  [pca]  random                        blue = this member's value, grey = a DIRECT switch (only
+//                                                         this key changes), dim = other keys change too
 //
 // The ⓘ opens the member's summary / details with its whole RECORD as a table below (keys the flippers show, the
 // ones that do not vary, and the member's attributes). Nothing here knows what a key means: core's `facets`
@@ -103,7 +103,7 @@ export class RecordPane {
       const row = document.createElement("div"); row.className = "prow keyline";
       const spacer = document.createElement("label"); spacer.textContent = "·"; // keeps the key column's width; hidden
       const inl = document.createElement("div"); inl.className = "inl";
-      const klabel = document.createElement("span"); klabel.className = "klabel"; klabel.textContent = f.name;
+      const klabel = document.createElement("span"); klabel.className = "klabel"; klabel.textContent = `${f.name}:`;
       klabel.dataset.tip = `${f.spec?.summary ?? `the sweep key "${f.key}"`} — ${f.kind}, ${f.values.filter((v) => v.members.length).length} values across the members. Click a value to switch to the member with it that changes the fewest other keys.`;
       const bar = document.createElement("div"); bar.className = "ch record"; bar.dataset.justify = "left";
       for (const v of f.values) {
@@ -112,7 +112,7 @@ export class RecordPane {
         const target = isCurrent ? undefined : sweep.nearest(current, f.key, v.value);
         seg.classList.toggle("on", isCurrent);
         seg.classList.toggle("disabled", !v.members.length);
-        seg.classList.toggle("direct", !isCurrent && v.direct);
+        seg.classList.toggle("indirect", !isCurrent && !v.direct && v.members.length > 0);
         if (!v.members.length) seg.dataset.tip = `${f.name} = ${fmtOf(f.key)(v.value)}: no member of the sweep has this value`;
         else if (isCurrent) seg.dataset.tip = `${f.name} = ${fmtOf(f.key)(v.value)}: this member's value (${v.members.length} member${v.members.length === 1 ? "" : "s"} share it)`;
         else if (target) {

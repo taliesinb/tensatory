@@ -171,8 +171,8 @@ below, its whole RECORD as a key / value table (`info.ts` `kvTable`; the
 same table the shared tooltip renders for `data-tip-rows`). Under the row,
 one indented KEY LINE per key that varies across the members and is not an
 attribute: an inline label and a flipper — blue = this member's value,
-tinted = a DIRECT switch (a member exists that differs in this key alone),
-plain = the value exists but reaching it changes other keys too (the tooltip
+grey = a DIRECT switch (a member exists that differs in this key alone),
+dim = the value exists but reaching it changes other keys too (the tooltip
 says which; the status line repeats it after the jump), disabled = listed in
 `keys.values` but no member has it. A click loads that member (`Sweep.member`: fetched
 once with its sidecars, relative to its own document) and `setBundle`s it in
