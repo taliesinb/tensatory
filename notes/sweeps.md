@@ -258,3 +258,86 @@ directory), `signatureOf(bundle)`, `facets(...)`. Viewer: the record row,
 options keyed by `sweep + signature + space`, slot resolution on member
 switch. The dependent-type problem never appears in code: the exporter emits
 terms and the viewer unifies them.
+
+### Implementation pointers (for whoever builds §2)
+
+Where the seams are today, so the work does not start by rediscovering them:
+
+**Schema / core**
+
+* `BundleSchema` pins `tensatory: z.literal(BUNDLE_VERSION)` (`"0.1"`), so a
+  sweep root with `"0.2"` needs its own zod root (`SweepSchema`) and a
+  dispatcher that reads the version first; `Bundle.validate(json)` is the
+  reusable half. Members that are inline `BundleSpec`s validate with
+  `BundleSchema` as they are.
+* Loading is `Bundle.load(json, src, { onProgress })` =
+  `Bundle.validate` → `loadArrays(spec, src)` → `new Bundle(spec, arrays)`.
+  A member by path is `fetch(json)` + `Bundle.load(json,
+  rebaseSource(src, dirname(memberPath)))` — `rebaseSource(src, dir)`
+  (`core/src/arrays/load.ts`) already exists for exactly this. `ByteSource.bytes`
+  returns `null` for a missing file (not an error).
+* `common` merging is per top-level record and per id (member wins):
+  `manifolds`, `fields`, `pointSets`, `curves`, `nets`, and the scalar
+  `name` / `summary` / `details`. Merge BEFORE `collectHandles` /
+  `loadArrays`, since `common` may carry handles too (paths then resolve
+  relative to the SWEEP document, not the member's directory — decide and
+  document; the simplest rule is "a `common` handle path is relative to the
+  sweep document" and a rebased source per member for the rest).
+* `collectHandles` (`core/src/bundle/handles.ts`) is a typed walk with one
+  `switch` per spec kind (fields, nets, curves); it does not need to know
+  about sweeps if members are merged into plain `BundleSpec`s first.
+* The viewer's rebuild chain is `adjustedBundle(parsed)`: `adjustSpec` →
+  `sliceSpec(spec, m, dims, undefined, parsed.arrays)` → `zoomBoxes` →
+  `new Bundle(spec, parsed.arrays)`. A member `Bundle` flows through it
+  unchanged; the resolver is carried on `Bundle.arrays`.
+
+**Viewer (`apps/viewer/src/main.ts`)**
+
+* `bundleList` is `bundles/index.json` (`{ file, name?, summary? }[]`),
+  populated at boot into `pickSel` (`#pickBundle`); `chooseBundle(i)` and
+  `pickSel.onchange` call `loadBundle(file)`, which fetches `bundles/<file>`,
+  `Bundle.load`s it with `fetchSource(url)` (paths relative to the document
+  URL, 404 → null) and calls `setBundle(parsed, file, wantSpace)`.
+  `?bundle=<file>` picks at boot. A sweep root should become another kind of
+  index entry (or be detected by its version) and `loadBundle` grow a branch;
+  member switching is a second `setBundle` with the member's `Bundle`.
+* `setBundle` sets `state.bundleFile` / `baseSpec` / `arrays`, reads the
+  per-bundle options (`readOpts()` under `optsKey()` =
+  `tensatory.opts.<bundleFile>`), rebuilds, `buildAll()`s into
+  `buildErrors`, builds the Controls pane (`controls.build(controlRows(...))`),
+  binds the bundle ⓘ (`bindInfoIcon($("bundleInfo"), bundle.info)`),
+  fills the space picker and calls `setSpace`. `setSpace` builds the curves
+  pane, computes `usable` (fields on the space that built), applies
+  `loadOpts()` and the slot defaults. Options keyed by STRUCTURAL SIGNATURE
+  (the design's point) means replacing `optsKey()`'s `bundleFile` with
+  `sweep + signatureOf(bundle)` for members — `Opts` is one JSON object per
+  key with `ui` / `ui3` / `maps` / `intervals` / `space` / `spaces[space]`
+  (sel, view, dir, res, camera) / `controls` / `boxZoom` / `slice` / `curves`.
+* `syncPickers()` turns a one-option picker into a plain label; a record row
+  (one discrete control per varying key) belongs in the `bundle` panel
+  (`#picker`, rows are `.prow`), above the `space` row; the slice row
+  (`#sliceRow`, a `.ch.multi` flipper bar) is the closest existing widget.
+  Picker alternatives show `optionText(info)` as their `title`.
+* Slot resolution on a member switch: `state.lockedSel` / `state.sel` are
+  keyed by slot (`SLOTS`), values are field ids or `NONE`; `isUsable(id)`
+  says whether an id exists on the current space. `SlotDef.present` hides
+  columns absent in a space.
+* Local upload (`#pickFile`, `multiple`) builds a `ByteSource` over the picked
+  files by name / `webkitRelativePath`; a sweep picked locally would need its
+  member documents among them.
+
+**Tests**
+
+* `core/test/bundles.test.ts` discovers every `bundles/*.json` and every
+  `bundles/<dir>/bundle.json`, `Bundle.load`s each with a readFile
+  `ByteSource`, builds and samples every field (the `HEAVY` set is built but
+  not sampled), and asserts `index.json` mirrors exactly the non-heavy
+  documents' `file` / `name` / `summary`. A sweep document in `bundles/`
+  will trip both unless the test learns the `"0.2"` root.
+* The readFile `ByteSource` (`dirSource`) is copied in `bundles.test.ts`,
+  `handles.test.ts`, `mnist.test.ts` and `gpu/test/mnist.test.ts`; a fifth
+  copy is the moment to move it into a shared test helper.
+* Bundle directories with sidecars: `mnist-convnet-pca/` (512 KB) is a good
+  small member; `mnist-mlp/` is heavy and unindexed. A sweep fixture wants
+  2–3 tiny members with a shared `common` and a non-Cartesian record set (one
+  key absent on some members) so `facets` is exercised.
