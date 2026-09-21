@@ -17,7 +17,7 @@ This would involve:
 
 ## Phases
 
-Phase 1 implemented the simplest subset: inline JSON-embedded or symbolic arrays, fields backed by these, and fields defined by mathematical expressions. The external array backends (`.bin` / `.npy` / `.npz` / zarr, `handle` specs) came next; sparse supports, charts and sweeps are still to come (`notes/roadmap.md`).
+Phase 1 implemented the simplest subset: inline JSON-embedded or symbolic arrays, fields backed by these, and fields defined by mathematical expressions. The external array backends (`.bin` / `.npy` / `.npz` / zarr, `handle` specs) came next, then curves and sweeps; sparse supports and charts are still to come (`notes/roadmap.md`).
 
 ## Data Bundle Schema
 
@@ -46,9 +46,18 @@ scalar field's gradient with `dir`, from `start` = t 0, RK4 with
 `param` names the parameter for display; `pointSets.ordered` is deprecated
 (still drawn); and small
 neural networks (`nets`, `schema/nets.ts`, `notes/nets.md`) whose outputs can
-back fields (`net` / `netv` field data). `tools/loss-landscape/build.mjs`
-turns a volume of the original prototype into such a directory
-(`bundles/mnist-convnet-pca/`).
+back fields (`net` / `netv` field data). A `"0.2"` root is a SWEEP
+(`schema/sweep.ts`, `notes/sweeps.md` §2): many bundles (MEMBERS, inline or
+by path, fetched with their sidecars only when selected) with flat metadata
+RECORDS and a `common` partial merged into each (per id, member wins; no
+`handle`s in it); `keys` describe the record columns (nominal / ordinal,
+`values` order, `codomain`, `attribute` = a per-member measurement, not a
+coordinate). Structure is discovered, never declared: core `facets` /
+`nearestMember` over the records, `signatureOf(spec)` (spaces + fields) for
+what a member IS. `tools/loss-landscape/build.mjs` turns the prototype's
+volumes into the sweep `bundles/loss-landscape/` (the ConvNet pair
+committed, the 2 MB MLP volumes and `sweep-all.json` local / gitignored);
+`tools/sweep-demo/build.mjs` writes a six-member symbolic sweep.
 
 ## Repository layout
 
@@ -150,6 +159,18 @@ profiling test.
   `samplePoints`. Pointwise-derived data is sampled iff any argument is; all
   sampled arguments must have IDENTICAL sample points (error otherwise).
   Pullbacks keep the kind and move the support along.
+* Sweeps in the viewer (`notes/viewer.md` "Sweeps"): `loadBundle` dispatches
+  on `rootKind`; the bundle panel gains RECORD ROWS (`recordPane.ts`): the
+  member's name + ⓘ, one flipper per varying non-attribute key (blue = this
+  member, tinted = a direct switch that changes only this key, plain = jumps
+  to the nearest member and changes others too — the status line says
+  which, disabled = no member has it), the fixed keys and attributes as
+  text. Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
+  same-shaped members share everything; into a new signature the usable
+  slots, the view / camera (same space) or the camera's orientation only
+  (another 3D space, refit to its box: `View3D.holdOrientation`) carry.
+  `?member=`, last member in `tensatory.member.<file>`; an unindexed
+  `?bundle=` joins the picker for the session.
 * Symbolic expressions: constants are leaves (`2`, `{op:"const",name}`), not
   parameter slots. Names come from three namespaces (`consts`, `scalars`,
   `vectors`) that must not overlap within a scope; a bare string resolves by

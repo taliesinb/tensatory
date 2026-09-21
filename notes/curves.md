@@ -162,7 +162,7 @@ Lorenz / Rössler attractors are `flow` curves (the build tool lost its
 exact expression (cos φ, sin φ), the Van der Pol cycle a closed sampled curve
 and the competition separatrix a sampled one (both still integrated by the
 tool: a limit cycle's period and a stable manifold's two backward branches
-are not one flow). The SGD trajectories of `dense.json`, `mnist-convnet-pca/`
+are not one flow). The SGD trajectories of `dense.json`, `loss-landscape/mnist-convnet-pca/`
 and `mnist-mlp/` are sampled curves with `param.name = "snapshot"`; the
 mixture `centres` of the symbolic bundles were never paths and are plain
 labelled points now.

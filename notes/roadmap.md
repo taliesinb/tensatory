@@ -13,14 +13,14 @@ out) but build to `NotSupportedError`.
 1. ~~Raw `.bin` array backend~~ and ~~npz / npy / zarr backends~~ — done
    ([sweeps.md §1](sweeps.md) as designed, plus `axes`: the prototype's
    volumes turned out to be stored x-fastest, `(z, y, x, c)`, so a handle
-   also permutes its kept axes). `apps/viewer/public/bundles/mnist-convnet-pca/`
-   (`tools/loss-landscape/build.mjs`) is the first bundle directory: manifold
-   `pca` (3D, `dimWeights` = explained variance), `log10_loss` / `accuracy`
-   as channel handles into the prototype's own `.bin`, a pointwise `loss`
-   (`celoss`), trajectory and θ* point sets. Left from the original plan: the
-   `params` manifold and the affine injection into it (waits for 4); the
-   other three volumes (`node tools/loss-landscape/build.mjs mnist_mlp_pca`
-   etc. — 2 MB each, not committed). Loader follow-ups: blosc / zstd codecs
+   also permutes its kept axes). `apps/viewer/public/bundles/loss-landscape/mnist-convnet-pca/`
+   (`tools/loss-landscape/build.mjs`, now a sweep member) is the first bundle
+   directory: manifold `pca` (3D, `dimWeights` = explained variance),
+   `log10_loss` / `accuracy` as channel handles into the prototype's own
+   `.bin`, the sweep's common pointwise `loss` (`celoss`), trajectory curve
+   and θ*. Left from the original plan: the `params` manifold and the affine
+   injection into it (waits for 4); the MLP volumes (2 MB each) are built
+   into the sweep but not committed. Loader follow-ups: blosc / zstd codecs
    (zarr-python's defaults; a WASM decoder or a `zarr.js`-style dependency),
    lazy per-field loading (`Bundle.prepare(fieldIds)` filling the same
    resolver), abort signals, cross-bundle byte caching, zip64. (Stored
@@ -37,11 +37,18 @@ out) but build to `NotSupportedError`.
    curve's parameter interval (loss along the SGD trajectory, ⟨∇f, γ'⟩),
    slicing of non-sampled curves, adaptive stepping for `flow`, a t
    scrubber with the cursor pane reading the fields at γ(t), a 1-D arm.
-3. **Sweeps** ([sweeps.md §2](sweeps.md)): a `SweepSpec` root holding
-   members (each a `BundleSpec`, inline or by path) with flat metadata
-   records and a merged `common` partial; faceted navigation over the
-   records in the bundle panel, options keyed by structural signature so a
-   view survives switching seeds. Depends on 1 for lazily fetched members.
+3. ~~Sweeps~~ — built ([sweeps.md §2](sweeps.md) "As built"): the `"0.2"`
+   root with members (inline or by path, fetched on selection) and flat
+   records, `common` merged per id (no handles in it), `keys` with
+   `attribute` for per-member measurements; the viewer's record rows
+   (faceting relative to the current member, nearest-member jumps), options
+   keyed by sweep + structural signature, slots / view / camera orientation
+   carried across a switch. `bundles/loss-landscape/` (the prototype's
+   volumes; the MLP pair local only) and `bundles/sweep-demo/`. Left: a
+   varying key as an animation axis / small multiples, cross-member fields
+   (difference maps, seed averages), conditional `common`, a sparse field
+   over the record space from the attributes, the collection-script rerun
+   (sweeps.md "Rerunning the collection").
 4. **Charts / affine frames** (`schema/mappings.ts`, currently commented
    out): fields on a low-dimensional frame inside a high-dimensional
    parameter manifold; 1-forms vs vectors under pullback.
@@ -67,7 +74,7 @@ out) but build to `NotSupportedError`.
    `ArraySpec<_N>` parameter, decide whether `stats.quantiles` / `histogram`
    (parsed and, as handles, loaded — but never read) stay. The `part` /
    `axes` / `dtype` additions were backward compatible, so no version bump;
-   the sweep root is `"0.2"`.
+   the sweep root is `"0.2"` (built).
 
 ## Geometry and rendering
 

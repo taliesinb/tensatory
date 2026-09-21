@@ -3,8 +3,9 @@
 Two related designs for the bundle format. §1 (external arrays) is **built**
 as designed here, with one addition found on contact with the data (`axes`,
 see the end of §1); the current description is in
-[bundle-schema.md](bundle-schema.md) "External arrays". §2 (sweeps) is not
-built. Ordering against other work: [roadmap.md](roadmap.md).
+[bundle-schema.md](bundle-schema.md) "External arrays". §2 (sweeps) is
+**built** as designed, with the differences recorded in "As built" at the end
+of §2. Ordering against other work: [roadmap.md](roadmap.md).
 
 ## 1. External arrays (`handle` specs)
 
@@ -495,3 +496,67 @@ is the chance to make the members first-class. In order of value:
 
 Not worth doing: storing anything the viewer computes (isolines, stats
 beyond `extrema`), or float64 volumes (f32 is what the GPU reads).
+
+### As built
+
+`schema/sweep.ts` (`SweepSpec`, `MemberSpec`, `KeySpec`, `CommonSpec`,
+`SWEEP_VERSION = "0.2"`, `RootSpec = BundleSpec | SweepSpec`);
+`packages/core/src/bundle/sweep.ts` (`SweepSchema`, `rootKind`,
+`mergeCommon`, `facets` / `nearestMember` / `membersWhere`, `signatureOf` /
+`shortHash`, class `Sweep`); `apps/viewer/src/recordPane.ts` and the
+`loadBundle` / `setMember` / `setBundle` chain in `main.ts`;
+`tools/loss-landscape/build.mjs` (the trial dataset) and
+`tools/sweep-demo/build.mjs` (a six-member symbolic sweep for the UI);
+`packages/core/test/sweeps.test.ts`. Differences from the design above:
+
+* **No handles in `common`** — `Sweep.validate` refuses them (`SpecError`
+  under `common`), so the "relative to which document" question never
+  arises. Members by path resolve their sidecars relative to THEIR document
+  (`rebaseSource`); inline members relative to the sweep document.
+* **`keys.<k>.attribute`**: a key can be a per-member MEASUREMENT (test
+  accuracy, parameter count, evaluation-set size) rather than a coordinate of
+  the sweep. Attributes are shown with the record, never become a flipper and
+  never count when records are compared — without this, `model → mlp` would
+  never be a "direct" switch because `n_params` differs too. This is the
+  "sparse field on the record space" of the design, as metadata for now.
+* **Faceting is relative to the current member, and every existing value is
+  reachable.** A value is `direct` when some member carrying it agrees with
+  the current member on every other (non-attribute) key they share; it is
+  shown tinted. A value no member differs only in is still clickable, shown
+  plain, and jumps to the NEAREST member (`nearestMember`: the fewest other
+  keys changed, then the most shared keys, then sweep order) with the status
+  line saying what else changed (`dirs → random, model → convnet`). A value
+  listed in `keys.values` that no member has is disabled. Keys absent from
+  the current member's record are hidden (the convnet has no `num_layers`).
+  Ordinal keys (declared, or every value a number) are sorted; nominal keys
+  keep `keys.values` order then discovery order.
+* **The structural signature is read off the spec**, not the built bundle:
+  sorted `space <id>:<dims>` + `<kind> <fieldId>:<dims>`; curves and point
+  sets are excluded on purpose (a trajectory present in one member only must
+  not reset the camera). Options live under
+  `tensatory.opts.<sweepFile>#<shortHash(signature)>`; the last member under
+  `tensatory.member.<sweepFile>`; `?member=<id>` in the URL. Note the
+  signature INCLUDES space ids, so `pca` and `random` members of the trial
+  dataset do NOT share it (their manifolds differ, as do their boxes and
+  scales); what carries across a member switch into a signature with no
+  saved options for the space is the CARRY: slot ids that exist in the new
+  member keep their slot, the 2D view / 3D camera carry over for the same
+  space, and into a different 3D space the camera holds its ORIENTATION and
+  re-fits its distance to the new box (`View3D.holdOrientation`) — "the same
+  minimum in two frames" without a 40× box mismatch.
+* `Sweep.single(bundle)` wraps a lone bundle as a one-member sweep
+  (`SINGLE_MEMBER`); the viewer does not use it yet (a lone bundle keeps
+  `tensatory.opts.<file>` and no record rows), it is there for the day the
+  viewer holds one document type.
+* zod's union errors are descended (`specErrorOf` in `core/src/errors.ts`),
+  so an inline member missing `fields` says so instead of "Invalid input".
+* The trial dataset: `bundles/loss-landscape/sweep.json` (indexed) lists the
+  two ConvNet members (512 KB each, committed); `sweep-all.json` (gitignored,
+  with the `mnist-mlp-*/` directories, 2 MB volumes) lists all four and loads
+  through `?bundle=loss-landscape/sweep-all.json` — an unindexed `?bundle=`
+  joins the picker for the session. `mnist-convnet-pca/` moved into the
+  sweep. `record.json` sits beside each member's `bundle.json` as the
+  collection script of the wishlist above would write it.
+* `bundles.test.ts` discovers `<dir>/sweep.json` roots and builds every
+  member; the members' own `bundle.json`s in subdirectories are not
+  discovered as documents. `dirSource` lives in `test/helpers.ts`.

@@ -8,6 +8,11 @@ shape; it is parsed into runtime classes that carry behaviour.
 
 ## Root
 
+A document's `tensatory` version says what it is: `"0.1"` a **bundle** (below),
+`"0.2"` a **sweep** — many bundles (members, inline or by path) with flat
+metadata records and a `common` partial merged into each; `schema/sweep.ts`,
+[sweeps.md](sweeps.md) §2. Core's `rootKind(json)` tells them apart.
+
 ```jsonc
 {
   "tensatory": "0.1",
@@ -70,7 +75,7 @@ shape; it is parsed into runtime classes that carry behaviour.
   others with a reason. Examples: `dynamical-systems.json` (flow orbits and
   attractors, an exact Hopf circle, a closed sampled Van der Pol cycle, a
   sampled separatrix), the SGD trajectories of `dense.json`,
-  `mnist-convnet-pca/` and `mnist-mlp/` (parameter `snapshot`).
+  `loss-landscape/mnist-convnet-pca/` and `mnist-mlp/` (parameter `snapshot`).
 
 ## Fields
 
@@ -156,8 +161,9 @@ does not fail the bundle: its error resurfaces on every field that uses it in
 `buildAll()`. `Bundle.parse(json)` (no sidecars) still works — handle-backed
 fields report "was not loaded". Rebuilds from a rewritten spec (adjust /
 slice / zoom) reuse the resolver (`new Bundle(spec, arrays)`). Example:
-`apps/viewer/public/bundles/mnist-convnet-pca/` built by
-`tools/loss-landscape/build.mjs` from the prototype's volumes; the loader
+`apps/viewer/public/bundles/loss-landscape/mnist-convnet-pca/` (a sweep
+member) built by `tools/loss-landscape/build.mjs` from the prototype's
+volumes; the loader
 fixtures under `packages/core/test/fixtures/handles/` are written by numpy /
 zarr-python (`make.py`).
 

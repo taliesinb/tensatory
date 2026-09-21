@@ -140,6 +140,28 @@ ranges); adjustments commit on release, the rows are inert while an
 animation plays. Rows are per bundle, not per space (iris shows d₂ in the 2D
 space, where it does nothing). Live dragging is the planned follow-up.
 
+## Sweeps: the record rows
+
+When the loaded document is a sweep ([sweeps.md](sweeps.md) §2), the bundle
+panel gains rows between the `bundle` picker (the sweep, its ⓘ) and the
+`space` picker (`apps/viewer/src/recordPane.ts`): `member` — the member's
+name and ⓘ; one flipper per key that varies across the members and is not an
+attribute — blue = this member's value, tinted = a DIRECT switch (a member
+exists that differs in this key alone), plain = the value exists but reaching
+it changes other keys too (the tooltip says which; the status line repeats it
+after the jump), disabled = listed in `keys.values` but no member has it; and
+`record` — the keys that do not vary plus the member's attributes (`params`,
+`test acc`, …) as text. A click loads that member (`Sweep.member`: fetched
+once with its sidecars, relative to its own document) and `setBundle`s it in
+the same space when it has one. Options are keyed by the sweep file AND the
+member's structural signature (`tensatory.opts.<file>#<hash>`), so members
+with the same spaces and fields share slots, levels, colormaps, view and
+camera; into a signature without saved options the current slots (where the
+field exists), the 2D view / 3D camera (same space) or just the camera's
+orientation (another 3D space: the distance re-fits to the new box) are
+carried. `?member=<id>`; the last member is remembered per sweep
+(`tensatory.member.<file>`).
+
 ## Slices: N-D spaces
 
 A manifold with 3 < D ≤ 8 dimensions (core `sliceable`) is shown as an
@@ -335,14 +357,18 @@ rebuilt from that state (widgets are re-created on each `updateInfo`).
 
 ## Persistence and URLs
 
-Per bundle in `localStorage["tensatory.opts.<file>"]`: every control, locked
+Per bundle in `localStorage["tensatory.opts.<file>"]` (a sweep member:
+`tensatory.opts.<sweepFile>#<signature hash>`, see "Sweeps"): every control, locked
 slot selections, colormaps, colormap interval selections, animation
 directions, Controls-pane adjustments (`controls`: `{ rowId: { seed?, scale? } }`), curve visibility and
 ranges (`curves`), and the view — but a
 *fitted* view is never saved (only flips/rotation), so it always re-fits to
 the current layout; only user-panned/zoomed views are restored. Collapsed
 panels are global. Query parameters override anything after load:
-`?bundle=dense.json&iv=loss&sg=lossGrad&split=3&showScalar=0`.
+`?bundle=dense.json&iv=loss&sg=lossGrad&split=3&showScalar=0`; `?bundle=`
+may name a document that is not in `index.json` (`mnist-mlp/bundle.json`,
+`loss-landscape/sweep-all.json`) — it joins the picker for the session;
+`?member=` picks a sweep member.
 
 ## Fitting
 
