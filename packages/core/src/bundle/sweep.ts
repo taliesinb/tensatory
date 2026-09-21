@@ -9,13 +9,13 @@
 import { z } from "zod";
 import type { BundleSpec, CommonSpec, KeySpec, MemberSpec, RecordSpec, RecordValue, SweepSpec } from "@tensatory/schema";
 import { BUNDLE_VERSION, SWEEP_VERSION } from "@tensatory/schema";
-import { SpecError, TensatoryError, specErrorOf } from "../errors";
+import { SpecError, specErrorOf } from "../errors";
 import { rebaseSource, type ByteSource } from "../arrays/load";
 import { CodomainSchema } from "../fields/codomain";
 import { CurveSchema } from "../curves/spec";
 import { FieldSchema } from "../fields/spec";
 import { NetSchema } from "../nets/spec";
-import { Bundle, BundleSchema, ManifoldDefinitionSchema, PointSetSchema, infoOf, type Info } from "./bundle";
+import { Bundle, BundleSchema, ManifoldDefinitionSchema, PointSetSchema, infoOf, inferDims, type Info } from "./bundle";
 import { collectHandles, loadArrays, type LoadProgress } from "./handles";
 
 /*******************************************************/
@@ -189,15 +189,16 @@ export function membersWhere(spec: SweepSpec, selection: RecordSpec): string[] {
  * What a member IS, for the purpose of remembering how it was viewed: its spaces (id, dimension) and its fields (id,
  * kind, dimension), sorted — two seeds of one architecture share it, so slots, levels, camera and colormaps carry
  * over. Curves and point sets are deliberately left out (a trajectory that exists in one member and not another
- * should not reset the camera). Fields that failed to build do not count.
+ * should not reset the camera). Read off the spec, so it needs no build and does not depend on adjustments.
  */
-export function signatureOf(bundle: Bundle): string {
+export function signatureOf(spec: BundleSpec): string {
+  let manifolds = spec.manifolds ?? {};
+  if (!Object.keys(manifolds).length) { let d: number | string; try { d = inferDims(spec); } catch { d = "?"; } manifolds = { default: { numDims: d as number } }; }
+  const dflt = spec.defaultManifold ?? (Object.keys(manifolds).length === 1 ? Object.keys(manifolds)[0] : undefined);
+  const dims = (id: string | undefined): number | string => (id !== undefined && manifolds[id] ? manifolds[id]!.numDims : "?");
   const parts: string[] = [];
-  for (const m of bundle.manifolds.values()) parts.push(`space ${m.id}:${m.numDims}`);
-  for (const id of bundle.fieldIds) {
-    try { const f = bundle.field(id); parts.push(`${f.kind} ${id}:${f.domain.numDims}`); }
-    catch (e) { if (!(e instanceof TensatoryError)) throw e; }
-  }
+  for (const [id, m] of Object.entries(manifolds)) parts.push(`space ${id}:${m.numDims}`);
+  for (const [id, f] of Object.entries(spec.fields)) parts.push(`${f.kind} ${id}:${dims(f.domain ?? dflt)}`);
   return parts.sort().join(";");
 }
 

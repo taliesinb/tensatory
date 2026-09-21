@@ -202,15 +202,14 @@ describe("members", () => {
 describe("structural signature", () => {
   it("is shared by members with the same spaces and fields, regardless of values, curves or point sets", async () => {
     const s = demo();
-    const sig = async (id: string) => signatureOf(await s.member(id));
+    const sig = async (id: string) => signatureOf((await s.member(id)).spec);
     expect(await sig("bowl-k1")).toBe(await sig("saddle-k4"));
     expect(await sig("bowl-k1")).not.toBe(await sig("bowl-k1-3d"));
     expect(await sig("bowl-k1")).toBe("scalar f:2;scalar gradNorm:2;space plane:2;space volume:3");
-    const withCurve = Bundle.parse({ ...plane(1), curves: { c: { data: { type: "symbolic", interval: [0, 1], expr: { op: "compv", coeffs: [{ op: "coord", index: 0 }, 0] } } } }, pointSets: { p: { points: [[0, 0]] } } });
-    expect(signatureOf(withCurve)).toBe(signatureOf(Bundle.parse(plane(1))));
-    // a field that does not build is not part of it
-    const broken = Bundle.parse({ ...plane(1), fields: { ...plane(1).fields, bad: { kind: "scalar", data: { type: "pointwise", expr: "q", scalars: { q: "nope" } } } } });
-    expect(signatureOf(broken)).toBe(signatureOf(Bundle.parse(plane(1))));
+    const withCurve: BundleSpec = { ...plane(1), curves: { c: { data: { type: "symbolic", interval: [0, 1], expr: { op: "compv", coeffs: [{ op: "coord", index: 0 }, 0] } } } }, pointSets: { p: { points: [[0, 0]] } } };
+    expect(signatureOf(withCurve)).toBe(signatureOf(plane(1)));
+    expect(signatureOf(plane(1))).toBe("scalar f:2;space default:2"); // the implicit manifold, its dimension inferred from the box
+    expect(signatureOf({ tensatory: "0.1", fields: { g: { kind: "vector", data: { type: "symbolicv", expr: { op: "coordv" } } } } })).toBe("space default:?;vector g:?");
   });
 
   it("shortHash is stable and short", () => {

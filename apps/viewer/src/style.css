@@ -86,6 +86,12 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 #sliceBar .seg.committed:not(.on) { background: #1e3a6e; color: #9fb3d9; }
 #sliceBar .seg.committed:not(.on):hover { background: #26467f; color: #c4d2ee; }
 #sliceBar .seg { padding: 0 6px; min-width: 8px; }
+/* the record rows (sweeps): `.on` = this member's value, `.direct` = a switch that changes only this key (tinted, as
+   the committed slice), plain = the value exists but reaching it changes other keys too, `.disabled` = no member has it */
+.ch.record .seg.direct:not(.on) { background: #1e3a6e; color: #9fb3d9; }
+.ch.record .seg.direct:not(.on):hover { background: #26467f; color: #c4d2ee; }
+.ch.record .seg { padding: 0 6px; min-width: 8px; }
+.ch.record { flex-wrap: wrap; height: auto; row-gap: 3px; }
 .commit { color: #3b82f6; font-size: 14px; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; padding: 0 4px; flex: none; }
 .commit:hover { color: #93c5fd; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }

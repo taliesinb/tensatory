@@ -5,6 +5,10 @@ import {
   Box,
   Bundle,
   Codomain,
+  Sweep,
+  rootKind,
+  shortHash,
+  signatureOf,
   DenseGrid,
   DenseVectorFieldData,
   computeStats,
@@ -61,6 +65,7 @@ import { Cache, uidOf, type MemoryUser } from "./cache";
 import { Recolour } from "./recolour";
 import { ControlsPane } from "./controls";
 import { CurvesPane, curveOn, curveRange, type CurveDrawable, type CurveOpts } from "./curvesPane";
+import { RecordPane } from "./recordPane";
 import { bindInfoIcon, installInfoModal, optionText } from "./info";
 import { GpuRenderer, type Camera3D, type Quat, quatLook, quatNormalize, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
@@ -181,7 +186,13 @@ interface State {
   curves: Record<string, CurveOpts>;
   /** bumped whenever `bundle` is rebuilt from adjustments / zooms (a frame key component: the fields are new objects) */
   revision: number;
-  bundleFile: string; // for options storage
+  bundleFile: string; // the loaded document (bundle or sweep), for options storage and the URL
+  /** the loaded SWEEP (notes/sweeps.md §2), when the document is one; its members are bundles with metadata records */
+  sweep: Sweep | undefined;
+  /** the sweep member on view (its id), "" for a lone bundle */
+  member: string;
+  /** the structural signature (hashed) of the bundle on view: spaces + fields; a sweep's options are keyed by it */
+  signature: string;
   /** the selected space (manifold id) of the bundle; fields, point sets and the view belong to it */
   space: string;
   sel: Sel; // shown (may be a hover preview)
@@ -198,7 +209,7 @@ interface State {
   dir: { iso: 1 | -1; stream: 1 | -1 };
 }
 const emptySel = (): Sel => Object.fromEntries(SLOTS.map((k) => [k, NONE]));
-const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, curves: {}, revision: 0, bundleFile: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
+const state: State = { bundle: undefined, baseSpec: undefined, arrays: noArrays, adjust: {}, boxZoom: {}, slice: {}, curves: {}, revision: 0, bundleFile: "", sweep: undefined, member: "", signature: "", space: "", sel: emptySel(), lockedSel: emptySel(), maps: {}, intervals: {}, dirty: true, paused: true, animClock: 0, dir: { iso: 1, stream: 1 } };
 const canvas = $<HTMLCanvasElement>("gl");
 const renderer = new Renderer2D(canvas);
 const sampler = new Sampler(() => { state.dirty = true; });
@@ -1312,7 +1323,14 @@ installCollapsiblePanels("tensatory.collapsed", fitLeftColumn);
 /* options persistence (per bundle) */
 
 let loadingOpts = false, saveTimer: ReturnType<typeof setTimeout> | undefined;
-const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}` : null);
+/**
+ * where a bundle's options live: `tensatory.opts.<file>`; for a sweep member `tensatory.opts.<sweepFile>#<signature>`,
+ * so two members with the same spaces and fields (two seeds, pca vs random directions) share slots, levels, camera
+ * and colormaps, and a different architecture has its own
+ */
+const optsKey = () => (state.bundleFile ? `tensatory.opts.${state.bundleFile}${state.sweep ? `#${state.signature}` : ""}` : null);
+/** where a sweep remembers its last member */
+const memberKey = () => (state.bundleFile && state.sweep ? `tensatory.member.${state.bundleFile}` : null);
 interface SpaceOpts { sel?: Sel; view?: Partial<typeof renderer.view>; dir?: State["dir"]; camera?: Camera3D; res?: { moving: number; settled: number; measured?: boolean } }
 /** a saved camera, with the orientation of one saved as yaw / pitch (before the quaternion camera) converted and a malformed `rot` dropped */
 function savedCamera(c: Partial<Camera3D> & { yaw?: number; pitch?: number }): Partial<Camera3D> {
@@ -1486,6 +1504,16 @@ function setSpace(id: string, fromUser: boolean): void {
   if (m.numDims === 3) { const v = view3dOf(); if (v) { v.clear(); v.cameraCustom = false; } }
   autoRes().restore({ moving: 0, settled: 0 }); // ramp from the bottom unless this space remembers better
   const hadSaved = loadOpts();
+  // a member switch to a signature without saved options for this space: keep what can be kept — the slots whose
+  // fields exist here (others fall back to the defaults above), and the view / camera when it is the same space
+  if (carry && !hadSaved) {
+    for (const k of SLOTS) { const id = carry.sel[k]; if (id === NONE || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id; }
+    if (carry.space === m.id && carry.dims === m.numDims) {
+      if (m.numDims === 2 && carry.view) { renderer.view = { ...carry.view }; viewCustom = carry.viewCustom; }
+      if (m.numDims === 3 && carry.camera && view3d) { view3d.camera = { ...carry.camera }; view3d.cameraCustom = carry.cameraCustom; }
+    }
+  }
+  carry = undefined;
   // isolines and streamlines default OFF (a costly field's first frame is then just the raster); a 3D space has no
   // raster, so on its first visit turn the isosurfaces on rather than show an empty box
   if (m.numDims === 3 && !hadSaved && !ui.showIso.checked && !ui.showStream.checked && !ui.showVec.checked) { ui.showIso.checked = true; syncTicks(); }
@@ -1500,6 +1528,7 @@ function setSpace(id: string, fromUser: boolean): void {
   $("flipx").classList.toggle("active", renderer.view.flipX);
   $("flipy").classList.toggle("active", renderer.view.flipY);
   const params = new URLSearchParams(location.search); params.set("space", m.id); if (!state.bundleFile.startsWith("local:")) params.set("bundle", state.bundleFile);
+  if (state.sweep) params.set("member", state.member); else params.delete("member");
   history.replaceState(null, "", `?${params}`);
   if (fromUser) saveOpts();
   state.dirty = true;
@@ -1510,6 +1539,7 @@ function setSpace(id: string, fromUser: boolean): void {
 /* controls: adjustments (reseed / scale) of the bundle's random directions and arrays */
 
 const controls = new ControlsPane($("controlsPanel"));
+const recordPane = new RecordPane($("recordRows"));
 
 // the left stack scrolls within the height the bottom-left column (curves, fields) leaves it
 {
@@ -1658,8 +1688,11 @@ function applyAdjustment(id: string, a: { seed?: number; scale?: number }): void
 /** whether an animation is playing: the Controls rows are inert then (a rebuild would stutter it) */
 const animating = (): boolean => (isoAnimating() && !!slotScalar("iv")) || (!state.paused && ui.anim.checked && num("lines") !== null && !!streamVector());
 
-function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): void {
-  state.bundleFile = file; state.baseSpec = parsed.spec; state.arrays = parsed.arrays;
+/** what a member switch carries into a member whose signature has no saved options yet */
+let carry: { sel: Sel; space: string; dims: number; view: typeof renderer.view | undefined; viewCustom: boolean; camera: Camera3D | undefined; cameraCustom: boolean } | undefined;
+
+function setBundle(parsed: Bundle, file: string, wantSpace?: string | null, member = ""): void {
+  state.bundleFile = file; state.member = member; state.signature = shortHash(signatureOf(parsed.spec)); state.baseSpec = parsed.spec; state.arrays = parsed.arrays;
   const opts0 = readOpts(); state.adjust = opts0.controls ?? {}; state.boxZoom = opts0.boxZoom ?? {}; state.slice = opts0.slice ?? {}; state.curves = opts0.curves ?? {};
   let bundle: Bundle;
   try { bundle = adjustedBundle(parsed); } catch (e) { showError(e); state.adjust = {}; state.boxZoom = {}; state.slice = {}; try { bundle = adjustedBundle(parsed); } catch { bundle = parsed; } } // stale adjustments (the bundle changed): drop them
@@ -1667,9 +1700,12 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null): voi
   clearFieldCaches(); state.maps = {}; state.intervals = {};
   buildErrors = bundle.buildAll();
   controls.build(controlRows(parsed.spec), () => state.adjust, applyAdjustment);
-  // the bundle's ⓘ (summary / details); the loaded bundle knows more than its index entry, so its option's hover follows
-  bindInfoIcon($("bundleInfo"), bundle.info);
-  const opt = [...pickSel.options].find((o) => o.value === file); if (opt) opt.title = optionText(bundle.info);
+  // the bundle's ⓘ (summary / details); the loaded bundle knows more than its index entry, so its option's hover follows.
+  // For a sweep the `bundle` row is the sweep (its ⓘ); the member and its ⓘ are the record pane's first row.
+  const docInfo = state.sweep ? state.sweep.info : bundle.info;
+  bindInfoIcon($("bundleInfo"), docInfo);
+  const opt = [...pickSel.options].find((o) => o.value === file); if (opt) opt.title = optionText(docInfo);
+  recordPane.build(state.sweep, member, bundle.info, (id, why) => void setMember(id, why));
   showBuildErrors();
   const spaces = spaceList();
   spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name, title: optionText(m.info) })));
@@ -1693,7 +1729,7 @@ function fetchSource(url: URL): ByteSource {
   };
 }
 
-async function loadBundle(file: string, wantSpace?: string | null): Promise<void> {
+async function loadBundle(file: string, wantSpace?: string | null, wantMember?: string | null): Promise<void> {
   status(`loading ${file}…`);
   const t0 = performance.now();
   try {
@@ -1702,12 +1738,47 @@ async function loadBundle(file: string, wantSpace?: string | null): Promise<void
     if (!res.ok) throw new Error(`${res.status} ${res.statusText} for bundles/${file}`);
     const json = await res.json();
     console.log(`bundle ${file}: fetched in ${(performance.now() - t0).toFixed(0)} ms`);
+    if (rootKind(json) === "sweep") {
+      // a sweep: its members are fetched (with their sidecars) only when selected; ?member=, else the last one viewed, else the first
+      const sweep = Sweep.parse(json, fetchSource(url));
+      if (!sweep.memberIds.length) throw new TensatoryError("the sweep has no members");
+      state.sweep = sweep; state.bundleFile = file;
+      const saved = localStorage.getItem(memberKey()!) ?? undefined;
+      const member = [wantMember ?? undefined, saved, sweep.memberIds[0]].find((id): id is string => id !== undefined && sweep.spec.members[id] !== undefined)!;
+      await setMember(member, undefined, wantSpace);
+      console.log(`sweep ${file}: ready in ${(performance.now() - t0).toFixed(0)} ms (member ${member}, space ${state.space})`);
+      return;
+    }
+    state.sweep = undefined;
     // external arrays (`handle` specs) live beside the document; they are loaded now so the build stays synchronous
     const parsed = await Bundle.load(json, fetchSource(url), { onProgress: (p) => status(`loading ${file}… arrays ${p.done}/${p.total}`) });
     setBundle(parsed, file, wantSpace);
     console.log(`bundle ${file}: ready in ${(performance.now() - t0).toFixed(0)} ms (space ${state.space})`);
   } catch (e) {
     console.error(e);
+    status(e instanceof TensatoryError || e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * Switch the loaded sweep to member `id`: the current options are saved under the current signature first (so a
+ * member sharing it finds them), the member's bundle is fetched once (`Sweep.member` caches), then shown like any
+ * bundle — the same space when the member has it. `why` is the record pane's account of the switch, for the status line.
+ */
+async function setMember(id: string, why?: string, wantSpace?: string | null): Promise<void> {
+  const sweep = state.sweep; if (!sweep) return;
+  if (state.bundle) saveOpts();
+  status(`loading member ${id}…`);
+  try {
+    const b = await sweep.member(id, { onProgress: (p) => status(`loading member ${id}… arrays ${p.done}/${p.total}`) });
+    if (state.sweep !== sweep) return; // another document was loaded meanwhile
+    if (state.bundle) carry = { sel: { ...state.lockedSel }, space: state.space, dims: spaceDims(), view: { ...renderer.view }, viewCustom, camera: view3d ? { ...view3d.camera } : undefined, cameraCustom: view3d?.cameraCustom ?? false };
+    setBundle(b, state.bundleFile, wantSpace ?? state.space, id);
+    const mk = memberKey(); if (mk) localStorage.setItem(mk, id);
+    status(why ? `${b.name}: ${why}` : "");
+  } catch (e) {
+    console.error(e);
+    carry = undefined;
     status(e instanceof TensatoryError || e instanceof Error ? e.message : String(e));
   }
 }
@@ -1742,7 +1813,17 @@ $<HTMLInputElement>("pickFile").addEventListener("change", async (ev) => {
   const sidecars = files.filter((f) => f !== doc);
   const src: ByteSource = { bytes: async (path) => sidecars.find((f) => f.name === path || (f as File & { webkitRelativePath?: string }).webkitRelativePath === path)?.arrayBuffer() ?? null };
   try {
-    const parsed = await Bundle.load(JSON.parse(await doc.text()), src);
+    const json = JSON.parse(await doc.text()) as unknown;
+    if (rootKind(json) === "sweep") {
+      // a sweep picked locally: inline members work; members by path need their documents among the picked files (flat names only)
+      const sweep = Sweep.parse(json, src);
+      if (!sweep.memberIds.length) throw new TensatoryError("the sweep has no members");
+      state.sweep = sweep; state.bundleFile = `local:${doc.name}`;
+      await setMember(sweep.memberIds[0]!);
+      return;
+    }
+    state.sweep = undefined;
+    const parsed = await Bundle.load(json, src);
     setBundle(parsed, `local:${doc.name}`);
     status(`${doc.name} (local${sidecars.length ? `, ${sidecars.length} sidecar file${sidecars.length === 1 ? "" : "s"}` : ""})`);
   } catch (e) { console.error(e); status(e instanceof Error ? e.message : String(e)); }
@@ -1975,7 +2056,7 @@ const RECOLOUR_REFRESH = 4;
   pickSel.value = file;
   syncPickers();
   bootPhase(`bundle ${file}`);
-  await loadBundle(file, params.get("space"));
+  await loadBundle(file, params.get("space"), params.get("member"));
   bootPhase(undefined);
   // UI overrides from the URL, e.g. &showIso=0&split=3&iv=loss&sg=lossGrad
   for (const [k, v] of params) {
