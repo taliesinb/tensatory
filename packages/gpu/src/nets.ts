@@ -44,6 +44,18 @@ import { f32, vecType } from "./wgsl";
 export const NET_MAX_FLOATS = 2000;
 
 /**
+ * Most WORK (multiply-adds, roughly) one thread may do per point. A net field is evaluated by ONE lane per grid point
+ * as a serial chain of storage reads, latency-bound at ~10⁷ MAC/s regardless of how many points run alongside; the
+ * MNIST MLP (256 examples × 269k weights = 7·10⁷ per point) takes ~10 s per dispatch at ANY grid size, which would
+ * trip the GPU watchdog. Beyond this budget the field is left to the CPU path (`costly`); the right home for such
+ * nets is a cooperative kernel (a workgroup per point), see notes/nets.md.
+ */
+export const NET_MAX_WORK = 4_000_000;
+let WORK_LIMIT = NET_MAX_WORK;
+/** override the work budget (diagnostics / benchmarks; Infinity lets any net through) */
+export function setNetMaxWork(n: number): void { WORK_LIMIT = n; sizeCache = new WeakMap(); }
+
+/**
  * Whether loop bounds are emitted through an opaque function (`nb_`) so the backend shader compiler cannot unroll
  * the loop nests. WGSL has no roll / unroll attribute (gpuweb#4110) and Tint's MSL printer emits plain loops, so the
  * runtime bound is the only lever; measured with apps/viewer/public/nettiming.html. Default on; a switch so the
@@ -61,6 +73,8 @@ export interface NetEmitContext {
   readonly D: number;
   /** override of NET_MAX_FLOATS (diagnostics) */
   readonly maxFloats?: number;
+  /** override of NET_MAX_WORK (diagnostics) */
+  readonly maxWork?: number;
   /** stream the dataset axis (see NetEmitter.streamed): auto = when the batched emission exceeds the limit (default) */
   readonly stream?: "auto" | "always" | "never";
   /** pack an array into the shared `data` buffer; returns its element offset */
@@ -90,9 +104,13 @@ const NARY = new Set(["add", "mul", "min", "max", "mean", "rms"]);
 interface Arr {
   readonly shape: readonly number[];
   /** priv: function-scope array `base[i]`; data: storage `data[base + i]`; lit: a scalar expression (uniform over
-   *  the shape); point: the point `p` ([D]); view: one example of a batched priv / data array (streaming) */
-  readonly kind: "priv" | "data" | "lit" | "point" | "view";
+   *  the shape); point: the point `p` ([D]); view: one example of a batched priv / data array (streaming);
+   *  expr: a LAZY array — element `idx` is the expression `fn(idx)`, recomputed at every read, so nothing is stored
+   *  (a displaced 784×256 weight `W + Σ tₖ Dₖ` reads straight from the storage buffer inside the matmul) */
+  readonly kind: "priv" | "data" | "lit" | "point" | "view" | "expr";
   readonly base: string;
+  /** expr: the element expression */
+  readonly fn?: (idx: readonly string[]) => string;
   /** view: the full array's shape, the streamed axis and the loop variable indexing it, where the array lives */
   readonly full?: readonly number[];
   readonly sAxis?: number;
@@ -104,12 +122,26 @@ interface Arr {
 export class StreamError extends Error {}
 
 const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1);
+
+/**
+ * Arrays at least this large whose operands are all STABLE (storage data, literals, the point, other lazy arrays —
+ * never a function-scope array, whose buffer liveness reuses, nor a streamed view, whose loop variable is local) are
+ * emitted lazily (Arr kind "expr") instead of being materialized. Below it, materializing is cheaper: a contraction
+ * re-reads each element once per example, and recomputing a small array costs more than holding it.
+ */
+export const LAZY_MIN_FLOATS = 512;
+const stable = (a: Arr): boolean => a.kind === "data" || a.kind === "lit" || a.kind === "point" || a.kind === "expr";
+/** most summed elements an einsum unrolls into a lazy element expression (a displacement sums K ≤ 8 directions) */
+const LAZY_MAX_SUMMED = 8;
 const strides = (shape: readonly number[]): number[] => { const s = new Array<number>(shape.length); for (let d = shape.length - 1, acc = 1; d >= 0; d--) { s[d] = acc; acc *= shape[d]!; } return s; };
 const dims = (shape: Shape, what: string): number[] => shape.map((d) => { if (typeof d !== "number") throw new Error(`${what}: unresolved symbolic size "${d}"`); return d; });
 
 class NetEmitter {
   readonly lines: string[] = [];
   floats = 0;
+  /** estimated per-point work: elements written by fills plus multiply-adds of contractions, times the streamed N */
+  work = 0;
+  private scale = 1;
   private n = 0;
 
   constructor(private readonly ctx: NetEmitContext, private readonly nets: ProgramResolver) {}
@@ -168,6 +200,7 @@ class NetEmitter {
       case "point": return this.ctx.D === 1 ? "p" : `p[${idx[0]}]`;
       case "priv": return `${a.base}[${this.flat(a.shape, idx)}]`;
       case "data": return `data[${a.base} + ${this.flat(a.shape, idx)}]`;
+      case "expr": return a.fn!(idx);
       case "view": {
         const fullIdx = [...idx]; fullIdx.splice(a.sAxis!, 0, a.sVar!);
         const f = this.flat(a.full!, fullIdx);
@@ -199,6 +232,7 @@ class NetEmitter {
 
   /** write `expr(idx)` into every element of a new array of `shape` */
   private fill(shape: readonly number[], expr: (idx: string[]) => string): Arr {
+    this.work += this.scale * size(shape);
     const out = this.alloc(shape);
     this.loops(shape, (idx) => this.lines.push(`  ${this.read(out, idx)} = ${expr(idx)};`));
     return out;
@@ -380,6 +414,7 @@ class NetEmitter {
       // the loop over examples: every array carrying S is read through a one-example view
       const sVar = this.fresh("n");
       this.lines.push(`  for (var ${sVar}: i32 = 0; ${sVar} < ${this.bound(n)}; ${sVar}++) {`);
+      const outerScale = this.scale; this.scale *= n;
       const declared = new Set(this.sizes.keys());
       const loopEnv = new Map<string, Arr>();
       for (const [k, a] of env) { const p = sPos(names.get(k) ?? []); loopEnv.set(k, p === undefined ? a : this.view(a, p, sVar)); }
@@ -402,6 +437,7 @@ class NetEmitter {
         return a.acc;
       });
       this.lines.push(`  }`);
+      this.scale = outerScale;
       // loop-scoped arrays are gone
       for (const [sz, pool] of this.free) this.free.set(sz, pool.filter((b) => declared.has(b)));
       for (const base of [...this.owners.keys()]) if (!declared.has(base)) this.owners.delete(base);
@@ -422,6 +458,7 @@ class NetEmitter {
     const shape = a.shape.filter((_, i) => i !== sAxis);
     if (a.kind === "lit") return { ...a, shape };
     if (a.kind === "priv" || a.kind === "data") return { kind: "view", base: a.base, shape, full: a.shape, sAxis, sVar, store: a.kind };
+    if (a.kind === "expr") return { kind: "expr", base: a.base, shape, fn: (idx) => { const full = [...idx]; full.splice(sAxis, 0, sVar); return a.fn!(full); } };
     throw new StreamError(`cannot view a ${a.kind} array per example`);
   }
 
@@ -719,10 +756,23 @@ class NetEmitter {
       leaves.set(x, this.expr(x, env, sizeOf, path));
     };
     prepare(e);
+    // names are resolved now (a lazy result may be read after `env` has grown)
+    const names = new Map<string, Arr>();
+    const nameOf = (x: string): Arr => { let a = names.get(x); if (!a) { a = lookup(x, env, path); names.set(x, a); } return a; };
+    // (a name absent from env sits inside a folded `mul(x, 0)` — streaming's shapeHints — and is never read)
+    const collect = (x: ArrayExpr): void => {
+      if (typeof x === "string") { if (env.has(x)) nameOf(x); return; }
+      if (typeof x !== "object") return;
+      if (x.op === "arg") { if (env.has(x.name)) nameOf(x.name); return; }
+      if (!isElementwise(x)) return;
+      for (const k of ["val", "vals", "min", "max", "cond"] as const) { const v = (x as unknown as Record<string, ArrayExpr | ArrayExpr[]>)[k]; if (v === undefined) continue; if (Array.isArray(v)) v.forEach(collect); else collect(v); }
+    };
+    collect(e);
     // fold literal idioms of autodiff (mul by 0, add / mul of a unit)
-    const scalar = (x: ArrayExpr, idx: string[]): string => {
+    const scalar = (x: ArrayExpr, idx: readonly string[]): string => {
       if (typeof x === "number") return f32(x);
-      if (typeof x === "string") return this.readB(lookup(x, env, path), idx);
+      if (typeof x === "string") return this.readB(nameOf(x), idx);
+      if (x.op === "arg") return this.readB(nameOf(x.name), idx);
       if (!isElementwise(x)) return this.readB(leaves.get(x)!, idx);
       const op = x.op;
       if (op === "clamp") return `clamp(${scalar(x.val, idx)}, ${scalar(x.min, idx)}, ${scalar(x.max, idx)})`;
@@ -758,6 +808,9 @@ class NetEmitter {
       const rest = (e as { vals: ArrayExpr[] }).vals.filter((v) => v !== unit);
       if (rest.length === 1 && typeof rest[0] === "string") { const r = lookup(rest[0], env, path); if (r.shape.length === shape.length && r.shape.every((d, i) => d === shape[i])) return r; }
     }
+    // a large tree over stable operands stays an expression: consumers read `scalar(e, idx)` in place
+    if (size(shape) >= LAZY_MIN_FLOATS && [...names.values(), ...leaves.values()].every(stable))
+      return { shape, kind: "expr", base: this.fresh("lz"), fn: (idx) => scalar(e, idx) };
     return this.fill(shape, (idx) => scalar(e, idx));
   }
 
@@ -766,10 +819,27 @@ class NetEmitter {
     const sizes = new Map<string, number>();
     terms.forEach((t, k) => [...t].forEach((l, d) => { const s = vals[k]!.shape[d]!; const prev = sizes.get(l); if (prev === undefined || prev === 1) sizes.set(l, s); }));
     const summed = [...new Set(terms.join(""))].filter((l) => !out.includes(l));
-    const res = this.alloc(shape);
     const outLetters = [...out];
     const distinct = [...new Set(outLetters)];
     const diagonal = distinct.length !== outLetters.length;
+    // a large result over stable operands with a short contraction (a displacement's Σ_k t[k] D[k, …]) stays an
+    // expression: the sum is unrolled into the element expression, nothing is stored
+    const summedSize = summed.reduce((n, l) => n * sizes.get(l)!, 1);
+    if (!diagonal && size(shape) >= LAZY_MIN_FLOATS && summedSize <= LAZY_MAX_SUMMED && vals.every(stable)) {
+      const fn = (oi: readonly string[]): string => {
+        const pos = new Map<string, string>(outLetters.map((l, d) => [l, oi[d]!]));
+        const products: string[] = [];
+        const inner = (d: number) => {
+          if (d === summed.length) { products.push(vals.map((v, k) => this.read(v, [...terms[k]!].map((l, i) => (v.shape[i] === 1 ? "0" : pos.get(l)!)))).join(" * ")); return; }
+          for (let i = 0; i < sizes.get(summed[d]!)!; i++) { pos.set(summed[d]!, String(i)); inner(d + 1); }
+        };
+        inner(0);
+        return `(${products.join(" + ")})`;
+      };
+      return { shape, kind: "expr", base: this.fresh("lz"), fn };
+    }
+    this.work += this.scale * size(shape) * summedSize;
+    const res = this.alloc(shape);
     // a letter repeated in the output writes the diagonal only: zero the array, then iterate each letter once
     if (diagonal) this.loops(shape, (oi) => this.lines.push(`  ${this.read(res, oi)} = 0.0;`));
     this.loops(distinct.map((l) => sizes.get(l)!), (di) => {
@@ -933,6 +1003,8 @@ export interface NetFunction {
   code: string;
   /** function-scope floats used */
   floats: number;
+  /** estimated work per point (see NET_MAX_WORK) */
+  work: number;
   /** the dataset axis was streamed */
   streamed: boolean;
 }
@@ -961,7 +1033,7 @@ export function emitNetField(name: string, field: NetField, ctx: NetEmitContext,
   if (mode !== "never" && (r === undefined || r.em.floats > max)) {
     try { const s = attempt(true); if (r === undefined || s.em.floats < r.em.floats) r = s; } catch (e) { if (!(e instanceof StreamError)) throw e; }
   }
-  if (r === undefined || r.em.floats > max) return undefined;
+  if (r === undefined || r.em.floats > max || r.em.work > (ctx.maxWork ?? WORK_LIMIT)) return undefined;
   const { em, outs } = r;
   // the outputs' elements concatenated: a scalar, a vecD, or (value + gradient) a vec(D+1)
   const comps: string[] = [];
@@ -974,31 +1046,34 @@ export function emitNetField(name: string, field: NetField, ctx: NetEmitContext,
   if (comps.length > 4) throw new Error(`net field function would return ${comps.length} components (max 4)`);
   const type = comps.length === 1 ? "f32" : vecType(comps.length);
   const ret = comps.length === 1 ? comps[0]! : `${type}(${comps.join(", ")})`;
-  return { code: `fn ${name}(p: ${vecType(D)}, pos: i32) -> ${type} {\n${em.lines.join("\n")}\n  return ${ret};\n}`, floats: em.floats, streamed: r.streamed };
+  return { code: `fn ${name}(p: ${vecType(D)}, pos: i32) -> ${type} {\n${em.lines.join("\n")}\n  return ${ret};\n}`, floats: em.floats, work: em.work, streamed: r.streamed };
 }
 
-/** function-scope floats a net field needs (a dry emission), cached per program */
-let sizeCache = new WeakMap<Program, number>();
-export function netFieldFloats(fd: NetScalarFieldData | NetVectorFieldData): number {
+/** function-scope floats and per-point work a net field needs (a dry emission), cached per program */
+let sizeCache = new WeakMap<Program, { floats: number; work: number }>();
+function netFieldSize(fd: NetScalarFieldData | NetVectorFieldData): { floats: number; work: number } {
   let n = sizeCache.get(fd.field.program);
   if (n === undefined) {
     try {
       const r = emitNetField("dry", fd.field, { D: fd.dimCount, upload: () => 0 });
-      n = r ? r.floats : Infinity;
-    } catch { n = Infinity; }
+      n = r ? { floats: r.floats, work: r.work } : { floats: Infinity, work: Infinity };
+    } catch { n = { floats: Infinity, work: Infinity }; }
     sizeCache.set(fd.field.program, n);
   }
   return n;
 }
+export const netFieldFloats = (fd: NetScalarFieldData | NetVectorFieldData): number => netFieldSize(fd).floats;
+export const netFieldWork = (fd: NetScalarFieldData | NetVectorFieldData): number => netFieldSize(fd).work;
 
 /**
  * Whether the GPU program can evaluate `fd` without sampling it on the CPU:
  * cheap data always; net fields (and whatever is derived from them) when the
- * net fits in function-scope memory.
+ * net fits in function-scope memory AND one lane can evaluate it in bounded
+ * time (NET_MAX_WORK).
  */
 export function gpuTranspilable(fd: FieldData): boolean {
   if (!fd.costly) return true;
-  if (fd instanceof NetScalarFieldData || fd instanceof NetVectorFieldData) return netFieldFloats(fd) <= NET_MAX_FLOATS;
+  if (fd instanceof NetScalarFieldData || fd instanceof NetVectorFieldData) { const s = netFieldSize(fd); return s.floats <= NET_MAX_FLOATS && s.work <= WORK_LIMIT; }
   if (fd instanceof SymbolicScalarFieldData || fd instanceof SymbolicVectorFieldData)
     return [...Object.values(fd.args.scalars), ...Object.values(fd.args.vectors)].every(gpuTranspilable);
   if (fd instanceof PulledBackScalarFieldData || fd instanceof PulledBackVectorFieldData) return gpuTranspilable(fd.inner);

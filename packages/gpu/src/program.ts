@@ -26,7 +26,7 @@ import {
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
-import { NET_MAX_FLOATS, emitNetField, netFieldFloats } from "./nets";
+import { emitNetField, gpuTranspilable } from "./nets";
 import { FunctionEmitter, GRID_FLOATS, OPAQUE_BOUND_WGSL, PRELUDE, bakedGrid, expandGrad, f32, gridWgsl, packGrid, vecType, type ArgBindings, type GridRef } from "./wgsl";
 
 export interface GpuProgram {
@@ -244,7 +244,7 @@ export class ProgramBuilder {
   valueGradient(fd: ScalarFieldData): string {
     return this.memo(fd, "vg", () => {
       const D = this.D, T = vecType(D + 1);
-      if (fd instanceof NetScalarFieldData && netFieldFloats(fd.gradient()) <= NET_MAX_FLOATS) {
+      if (fd instanceof NetScalarFieldData && gpuTranspilable(fd.gradient())) {
         const nm = this.name("nvg");
         this.fns.push(emitNetField(nm, fd.gradient().field, { D, upload: (d) => this.upload(d) }, [GRADIENT_VALUE_OUTPUT, fd.gradient().field.output])!.code);
         return nm;
@@ -258,7 +258,7 @@ export class ProgramBuilder {
 
   /** the transpiled net of a net-backed field, or undefined when it does not fit (the caller falls back) */
   private net(fd: NetScalarFieldData | NetVectorFieldData): string | undefined {
-    if (netFieldFloats(fd) > NET_MAX_FLOATS) return undefined;
+    if (!gpuTranspilable(fd)) return undefined;
     return this.memo(fd, "net", () => {
       const nm = this.name("nf");
       this.fns.push(emitNetField(nm, fd.field, { D: this.D, upload: (d) => this.upload(d) })!.code);

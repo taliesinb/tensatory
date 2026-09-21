@@ -233,7 +233,18 @@ profiling test.
   `core/test/iris.test.ts` checks every output against PyTorch to 1e-9,
   `core/test/autodiff.test.ts` every op's gradient against finite
   differences, `gpu/test/nets.test.ts` CPU vs GPU per op and for iris (value,
-  gradient, second derivative).
+  gradient, second derivative). LAZY ARRAYS (`Arr` kind `expr`): a large
+  elementwise tree or short contraction over STABLE operands (storage data,
+  literals, the point) is never materialized — reads inline its expression
+  — so a displaced 784×256 weight `W + Σ tₖ Dₖ` costs no function memory.
+  WORK BUDGET (`NET_MAX_WORK`, 4·10⁶ MAC per point): one lane evaluates the
+  whole net per point, latency-bound at ~10⁷ MAC/s, so the MNIST MLP
+  (`bundles/mnist-mlp/`, `tools/mnist/export.py`: 269k weights + eval set
+  as `.npz`, CPU-checked against PyTorch to 1e-6) takes ~10 s per dispatch
+  at ANY grid size and is refused by `gpuTranspilable` (→ `costly`, CPU
+  ~110 ms/point); it is NOT in `index.json` until the cooperative kernel
+  (a workgroup per point) exists — `notes/nets.md` "the MNIST MLP
+  experiment".
 * Vector fields are plain vector-valued functions: pullbacks reparametrize the
   domain only (no pushforward). 1-forms are not distinguished yet.
 * `exactGradient` on a scalar field names a vector field holding gradients

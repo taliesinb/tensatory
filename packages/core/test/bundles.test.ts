@@ -20,12 +20,16 @@ const sourceFor = (file: string): ByteSource => ({
 });
 const load = (file: string) => Bundle.load(JSON.parse(readFileSync(join(dir, file), "utf8")), sourceFor(file));
 
+/** bundles whose live fields cost ~0.1 s per point on the CPU (the MNIST MLP): built here, sampled in their own test */
+const HEAVY = new Set(["mnist-mlp/bundle.json"]);
+
 describe("example bundles", () => {
   for (const f of files) {
-    it(`${f} parses, builds every field, samples and contours`, async () => {
+    it(`${f} parses, builds every field${HEAVY.has(f) ? "" : ", samples and contours"}`, async () => {
       const b = await load(f);
       const errors = b.buildAll();
       expect([...errors.entries()].map(([id, e]) => `${id}: ${e.message}`)).toEqual([]);
+      if (HEAVY.has(f)) return;
       for (const id of b.scalarFieldIds) {
         const fd = b.scalarField(id).data;
         const D = fd.box.dimCount;
@@ -65,7 +69,8 @@ describe("example bundles", () => {
 
   it("summary / details: `info` of bundles, spaces and fields, and index.json mirrors every bundle's name and summary", async () => {
     const index = JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as { file: string; name?: string; summary?: string }[];
-    expect(index.map((e) => e.file).sort()).toEqual([...files].sort());
+    // every indexed bundle exists; the heavy ones are deliberately unindexed (the viewer cannot show them yet)
+    expect(index.map((e) => e.file).sort()).toEqual(files.filter((f) => !HEAVY.has(f)).sort());
     for (const e of index) {
       const b = await load(e.file);
       expect(e.name, `${e.file} name`).toBe(b.name);

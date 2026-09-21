@@ -50,11 +50,16 @@ out) but build to `NotSupportedError`.
 5. **Nets** ([nets.md](nets.md)): the schema is implemented end to end —
    shape inference, CPU reference evaluator, WebGPU transpiler, autodiff
    (`grad` as a program rewrite; exact derivatives of net fields), the iris
-   example checked against PyTorch, CPU / GPU agreement. Next: streaming the
-   dataset axis in the transpiler so nets larger than function-scope memory
-   run on the GPU, elementwise fusion in the emitter, and an MLP-on-MNIST
-   bundle (the weights and validation set as `.npz` members — `bind` takes a
-   bare path — now that 1 is done).
+   example checked against PyTorch, CPU / GPU agreement; streaming of the
+   dataset axis, elementwise fusion and lazy arrays in the emitter. The
+   **MNIST MLP bundle** exists (`bundles/mnist-mlp/`, `tools/mnist/export.py`:
+   269k weights and the eval set as `.npz` members, CPU-checked against
+   PyTorch) but is not indexed: one GPU lane per point takes ~10 s per
+   dispatch at any grid size (nets.md "the MNIST MLP experiment"), so the
+   work budget leaves it to the CPU path, which is two minutes per rung.
+   Next: a **cooperative kernel** — a workgroup per grid point splitting the
+   matmuls, writing a resident values grid — then hoisting the
+   point-independent first layer, then index the bundle.
 6. **Server-side computation**: a Tensatory server that materializes fields on
    demand (e.g. a Torch script sampling a new grid), with the same
    `FieldDataSpec` vocabulary; and client-side computation via third-party JS

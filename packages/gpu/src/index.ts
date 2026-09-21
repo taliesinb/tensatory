@@ -34,7 +34,7 @@ export type { FusedStreamlines3 } from "./fused3d";
 export type { GpuSegments3 } from "./lines3d";
 export { fusedGlyphs, packLattice } from "./glyphs";
 export type { FusedGlyphs, GlyphDispatch } from "./glyphs";
-export { emitNetField, gpuTranspilable, netFieldFloats, setOpaqueLoopBounds, setEmitStream, StreamError, NET_MAX_FLOATS } from "./nets";
+export { emitNetField, gpuTranspilable, netFieldFloats, netFieldWork, setOpaqueLoopBounds, setEmitStream, setNetMaxWork, StreamError, NET_MAX_FLOATS, NET_MAX_WORK, LAZY_MIN_FLOATS } from "./nets";
 export type { NetFunction, NetEmitContext } from "./nets";
 export { colourCode, isResidentGrid } from "./colour";
 export type { ColourSource } from "./colour";

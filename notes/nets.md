@@ -382,6 +382,61 @@ and that grid sampling equals per-point evaluation. Weights are the exact
 float32 values as decimals, so both sides compute the same function in
 double precision.
 
+### Lazy arrays and the work budget: the MNIST MLP experiment
+
+`apps/viewer/public/bundles/mnist-mlp/` (`tools/mnist/export.py`) is the
+loss-landscape prototype's trained 784-256-256-10 MLP (269 322 parameters)
+as a live bundle: θ*, the three PCA directions of its SGD trajectory and the
+1 024-example eval set (uint8 pixels, normalized in the net) are `.npz`
+members; `bind(data, θ*) → displace → field`, exactly the iris pattern at
+real size; the prototype's own 64³ PyTorch volume rides along (32³, `vol.npy`)
+in the same box as a sampled reference. `core/test/mnist.test.ts` checks the
+CPU evaluator against PyTorch at displaced points to 1e-6 (~0.1 s per point
+for 256 examples). Two things it forced:
+
+* **Lazy arrays** (`Arr` kind `"expr"` in `gpu/src/nets.ts`). A displaced
+  weight is a node `W + einsum("k,k…->…", t, D)`; materialized, `W1t__disp`
+  is 200 960 function-scope floats. Now an elementwise tree or a short
+  contraction (≤ `LAZY_MAX_SUMMED` summed elements — the K directions) whose
+  result is ≥ `LAZY_MIN_FLOATS` and whose operands are all STABLE (storage
+  data, literals, the point, other lazy arrays — never a function-scope
+  array, whose buffer is reused, nor a streamed view, whose loop variable is
+  local) is not emitted at all: it becomes an index → expression function
+  that every `read` inlines, so the matmul reads
+  `data[W + i] + (p[0] * data[D0 + i] + …)` straight from the storage buffer.
+  The MNIST fields then fit: 1 584 floats, N streamed, 3 kB of WGSL, and the
+  GPU agrees with the CPU (`gpu/test/mnist.test.ts`, `PERF=1`).
+* **The work budget** (`NET_MAX_WORK`). Fitting is not enough: ONE lane
+  evaluates the whole net for its point as a serial chain of storage reads,
+  latency-bound at roughly 10⁷ multiply-adds per second, and more points
+  only run alongside. Measured (Apple GPU, Dawn): 256 examples × 269k
+  weights = 7·10⁷ MAC per point → **10 s per dispatch at any grid size**
+  (2×2 and 32² alike); 1 024 examples → 40 s; without the displacement reads
+  in layers 1–2 still 8.5 s, so the lazy reads cost ~17% and the base matmul
+  chain is the problem — hoisting the point-independent first layer (75% of
+  the MACs, a `t`-linear precomputation) would buy at most 4×, not the 100×
+  needed. Such a dispatch would trip the GPU watchdog, so the emitter now
+  estimates the per-point work (fills plus contraction multiply-adds, times
+  the streamed N) and `gpuTranspilable` refuses fields beyond 4·10⁶
+  (`setNetMaxWork` overrides for benchmarks); iris is ~10⁵. The MNIST fields
+  are therefore `costly` in the viewer, i.e. CPU-sampled — ~110 ms per point,
+  two minutes for the first 32² rung — which is why the bundle is NOT in
+  `bundles/index.json` (it loads via `?bundle=mnist-mlp/bundle.json`; expect
+  that freeze).
+
+What would make it interactive is not a better per-thread program but a
+different mapping: a **cooperative kernel** — one workgroup per grid point (or
+per few points), its threads splitting each matmul's output units with the
+activations in workgroup memory, the example loop outside — writing a
+resident values grid that the fused kernels then read, the way `costly`
+fields already are consumed. That is a second emitter over the same
+`Program` (the ops are the same; only the loop-to-thread mapping changes) and
+the natural first customer of the resident-grid path for nets; the
+per-thread function stays for small nets, where it is optimal (no barriers,
+usable at isoline vertices). Expected: 7·10⁷ MAC spread over 256 lanes ≈
+3·10⁵ per lane ≈ tens of ms per point-batch, so a 64² grid in well under a
+second even before hoisting the first layer. Roadmap 5.
+
 ## Implementation (`packages/core/src/nets/`)
 
 * `spec.ts` — zod: `ArrayExprSchema`, `NetSchema` (mutually recursive via
@@ -411,15 +466,14 @@ MLP forward pass by hand, net-backed field checks and values);
 
 ## Next
 
-1. **Larger nets on the GPU**: the transpiler keeps every per-example
-   intermediate in function-scope memory, which caps the dataset size (iris:
-   ~1k floats; MNIST's 10k × 128 hidden would not fit). The way out is to
-   stream the declared dataset axis: every array carrying `"N"` is consumed
-   only by reductions over it, so a loop over examples can wrap the
-   per-example body with small intermediates and accumulate the reductions.
-   With autodiff, the same transformation gives the gradient in one pass.
-2. Storage: real weights and datasets (MNIST) need the handle backend
-   (roadmap §1) — the first real driver for it.
+1. **Big nets on the GPU: the cooperative kernel** (above). Streaming and
+   lazy arrays solved memory; the per-lane serial chain is what remains. Then
+   hoisting of point-independent linear parts (`x·W₁`, `x·D₁ₖ` once per
+   bundle load) as a program rewrite in `displaceProgram`, and the MNIST
+   bundle goes into `index.json`.
+2. The gradient of the MNIST fields does not fit either way (its adjoints
+   are weight-shaped arrays); with the cooperative kernel they become
+   ordinary workgroup-wide contractions.
 3. Emitter: call-site batching (a loop over the extra axes around the inlined
    callee); fusing multi-use elementwise producers (recompute vs store);
    second derivatives of nets within Safari's limit (stream the dataset axis).
