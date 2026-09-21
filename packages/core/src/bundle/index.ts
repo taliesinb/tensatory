@@ -7,3 +7,5 @@ export type { ControlRow, RowAdjustment, Adjustments } from "./controls";
 export { zoomBoxes, zoomable, domainOf } from "./zoom";
 export { sliceSpec, sliceable, SLICE_MAX_DIMS, astToScalarSpec, astToVectorSpec } from "./slice";
 export type { SliceResult } from "./slice";
+export { Sweep, SweepSchema, KeySchema, CommonSchema, MemberSchema, SINGLE_MEMBER, rootKind, mergeCommon, facets, keyOrder, nearestMember, membersWhere, signatureOf, shortHash } from "./sweep";
+export type { Facet, FacetValue } from "./sweep";

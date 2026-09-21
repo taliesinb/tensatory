@@ -1,0 +1,371 @@
+{
+ "tensatory": "0.2",
+ "name": "sweep demo",
+ "summary": "A toy sweep: bowls and saddles k·(x² ± y²) of sharpness k ∈ {1, 2, 4}, one of them in 3D — for the record row, faceting and options that survive a member switch.",
+ "details": "Six symbolic members with flat metadata records over three keys. `shape` and `k` vary independently except that there is no saddle at k = 2, and only the k = 1 bowl exists in 3D — so the record set is not a grid, which is what the greyed values in the record row show: a greyed value exists in the sweep, but switching to it changes another key as well.\n\nThe 2D members share one structural signature (space `plane`, fields `f` and `gradNorm`), so slot selections, levels and the view carry over when flipping `shape` or `k`; the 3D member has its own.\n\n`saddle k = 4` is a member by path (saddle-k4/bundle.json); the others are inline. `common` contributes the manifolds and |∇f|.",
+ "keys": {
+  "shape": {
+   "kind": "nominal",
+   "values": [
+    "bowl",
+    "saddle"
+   ],
+   "summary": "bowl: x² + y², saddle: x² − y²"
+  },
+  "k": {
+   "name": "sharpness",
+   "kind": "ordinal",
+   "codomain": "log",
+   "summary": "the factor in front: f = k·(x² ± y²)"
+  },
+  "dims": {
+   "kind": "ordinal",
+   "summary": "the dimension of the space the member lives in"
+  }
+ },
+ "common": {
+  "manifolds": {
+   "plane": {
+    "name": "plane",
+    "numDims": 2,
+    "dimNames": [
+     "x",
+     "y"
+    ],
+    "summary": "the 2D members' space"
+   },
+   "volume": {
+    "name": "volume",
+    "numDims": 3,
+    "dimNames": [
+     "x",
+     "y",
+     "z"
+    ],
+    "summary": "the 3D member's space"
+   }
+  },
+  "fields": {
+   "gradNorm": {
+    "kind": "scalar",
+    "name": "|∇f|",
+    "codomain": "norm",
+    "summary": "the gradient norm of f, derived symbolically (from `common`)",
+    "data": {
+     "type": "pointwise",
+     "expr": {
+      "op": "norm",
+      "vec": {
+       "op": "grad",
+       "val": "f"
+      }
+     },
+     "scalars": {
+      "f": "f"
+     }
+    }
+   }
+  }
+ },
+ "members": {
+  "bowl-k1": {
+   "record": {
+    "shape": "bowl",
+    "k": 1,
+    "dims": 2
+   },
+   "bundle": {
+    "tensatory": "0.1",
+    "name": "bowl k = 1",
+    "summary": "f = (x² + y²): a bowl of sharpness 1",
+    "fields": {
+     "f": {
+      "kind": "scalar",
+      "name": "f",
+      "domain": "plane",
+      "summary": "(x² + y²)",
+      "data": {
+       "type": "symbolic",
+       "box": [
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ]
+       ],
+       "expr": {
+        "op": "add",
+        "vals": [
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 0
+          }
+         },
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 1
+          }
+         }
+        ]
+       }
+      }
+     }
+    },
+    "defaultManifold": "plane"
+   }
+  },
+  "bowl-k2": {
+   "record": {
+    "shape": "bowl",
+    "k": 2,
+    "dims": 2
+   },
+   "bundle": {
+    "tensatory": "0.1",
+    "name": "bowl k = 2",
+    "summary": "f = 2·(x² + y²): a bowl of sharpness 2",
+    "fields": {
+     "f": {
+      "kind": "scalar",
+      "name": "f",
+      "domain": "plane",
+      "summary": "2·(x² + y²)",
+      "data": {
+       "type": "symbolic",
+       "box": [
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ]
+       ],
+       "expr": {
+        "op": "mul",
+        "vals": [
+         2,
+         {
+          "op": "add",
+          "vals": [
+           {
+            "op": "square",
+            "val": {
+             "op": "coord",
+             "index": 0
+            }
+           },
+           {
+            "op": "square",
+            "val": {
+             "op": "coord",
+             "index": 1
+            }
+           }
+          ]
+         }
+        ]
+       }
+      }
+     }
+    },
+    "defaultManifold": "plane"
+   }
+  },
+  "bowl-k4": {
+   "record": {
+    "shape": "bowl",
+    "k": 4,
+    "dims": 2
+   },
+   "bundle": {
+    "tensatory": "0.1",
+    "name": "bowl k = 4",
+    "summary": "f = 4·(x² + y²): a bowl of sharpness 4",
+    "fields": {
+     "f": {
+      "kind": "scalar",
+      "name": "f",
+      "domain": "plane",
+      "summary": "4·(x² + y²)",
+      "data": {
+       "type": "symbolic",
+       "box": [
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ]
+       ],
+       "expr": {
+        "op": "mul",
+        "vals": [
+         4,
+         {
+          "op": "add",
+          "vals": [
+           {
+            "op": "square",
+            "val": {
+             "op": "coord",
+             "index": 0
+            }
+           },
+           {
+            "op": "square",
+            "val": {
+             "op": "coord",
+             "index": 1
+            }
+           }
+          ]
+         }
+        ]
+       }
+      }
+     }
+    },
+    "defaultManifold": "plane"
+   }
+  },
+  "saddle-k1": {
+   "record": {
+    "shape": "saddle",
+    "k": 1,
+    "dims": 2
+   },
+   "bundle": {
+    "tensatory": "0.1",
+    "name": "saddle k = 1",
+    "summary": "f = (x² − y²): a saddle of sharpness 1",
+    "fields": {
+     "f": {
+      "kind": "scalar",
+      "name": "f",
+      "domain": "plane",
+      "summary": "(x² − y²)",
+      "data": {
+       "type": "symbolic",
+       "box": [
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ]
+       ],
+       "expr": {
+        "op": "add",
+        "vals": [
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 0
+          }
+         },
+         {
+          "op": "negate",
+          "val": {
+           "op": "square",
+           "val": {
+            "op": "coord",
+            "index": 1
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    },
+    "defaultManifold": "plane"
+   }
+  },
+  "saddle-k4": {
+   "record": {
+    "shape": "saddle",
+    "k": 4,
+    "dims": 2
+   },
+   "bundle": "saddle-k4/bundle.json"
+  },
+  "bowl-k1-3d": {
+   "record": {
+    "shape": "bowl",
+    "k": 1,
+    "dims": 3
+   },
+   "bundle": {
+    "tensatory": "0.1",
+    "name": "bowl k = 1 (3D)",
+    "summary": "f = (x² + y² + z²): a bowl of sharpness 1 in three dimensions",
+    "fields": {
+     "f": {
+      "kind": "scalar",
+      "name": "f",
+      "domain": "volume",
+      "summary": "(x² + y² + z²)",
+      "data": {
+       "type": "symbolic",
+       "box": [
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ],
+        [
+         -2,
+         2
+        ]
+       ],
+       "expr": {
+        "op": "add",
+        "vals": [
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 0
+          }
+         },
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 1
+          }
+         },
+         {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 2
+          }
+         }
+        ]
+       }
+      }
+     }
+    },
+    "defaultManifold": "volume"
+   }
+  }
+ }
+}

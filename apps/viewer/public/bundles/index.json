@@ -43,5 +43,10 @@
     "file": "mnist-convnet-pca/bundle.json",
     "name": "convnet on mnist: pca landscape",
     "summary": "Loss and accuracy of a trained convnet (56,394 parameters) around θ* in the top-3 PCA subspace of its optimizer trajectory: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it."
+  },
+  {
+    "file": "sweep-demo/sweep.json",
+    "name": "sweep demo",
+    "summary": "A toy sweep: bowls and saddles k·(x² ± y²) of sharpness k ∈ {1, 2, 4}, one of them in 3D — for the record row, faceting and options that survive a member switch."
   }
 ]

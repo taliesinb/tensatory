@@ -1,0 +1,55 @@
+{
+ "tensatory": "0.1",
+ "name": "saddle k = 4",
+ "summary": "f = 4·(x² − y²): a saddle of sharpness 4",
+ "fields": {
+  "f": {
+   "kind": "scalar",
+   "name": "f",
+   "domain": "plane",
+   "summary": "4·(x² − y²)",
+   "data": {
+    "type": "symbolic",
+    "box": [
+     [
+      -2,
+      2
+     ],
+     [
+      -2,
+      2
+     ]
+    ],
+    "expr": {
+     "op": "mul",
+     "vals": [
+      4,
+      {
+       "op": "add",
+       "vals": [
+        {
+         "op": "square",
+         "val": {
+          "op": "coord",
+          "index": 0
+         }
+        },
+        {
+         "op": "negate",
+         "val": {
+          "op": "square",
+          "val": {
+           "op": "coord",
+           "index": 1
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   }
+  }
+ },
+ "defaultManifold": "plane"
+}

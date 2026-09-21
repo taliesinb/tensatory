@@ -3,7 +3,7 @@ import type { BundleSpec, CodomainSpec, CurveSpec, FieldSpec, ManifoldDefinition
 import { CurveSchema, buildCurveData, type CurveResolver } from "../curves/spec";
 import type { CurveData } from "../curves/curveData";
 import { BUNDLE_VERSION } from "@tensatory/schema";
-import { SpecError, TensatoryError } from "../errors";
+import { SpecError, TensatoryError, specErrorOf } from "../errors";
 import { Codomain } from "../fields/codomain";
 import type { ScalarFieldData, VectorFieldData } from "../fields/fieldData";
 import { FieldSchema, buildScalarFieldData, buildVectorFieldData, type FieldResolver } from "../fields/spec";
@@ -200,10 +200,7 @@ export class Bundle {
   /** validate a JSON value against the schema */
   static validate(json: unknown): BundleSpec {
     const r = BundleSchema.safeParse(json);
-    if (!r.success) {
-      const issue = r.error.issues[0]!;
-      throw new SpecError(`${issue.message}${r.error.issues.length > 1 ? ` (+${r.error.issues.length - 1} more issues)` : ""}`, issue.path.map(String));
-    }
+    if (!r.success) throw specErrorOf(r.error.issues);
     return r.data;
   }
 

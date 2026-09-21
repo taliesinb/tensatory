@@ -2,28 +2,19 @@
 // zarr-python (fixtures/handles/make.py), `part` with kept axes, collectHandles over a bundle, and a bundle whose
 // fields are backed by every format (Bundle.load through a readFile ByteSource).
 
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { dirSource } from "./helpers";
 import type { BundleSpec } from "@tensatory/schema";
 import type { ArrayData, RawArray } from "../src";
 import {
   Bundle, DenseGrid, DenseScalarFieldData, SpecError, NotSupportedError,
   applyPart, collectHandles, formatOf, loadArray, loadArrays, mapSource, partShape, rebaseSource, sizedShape, zarrSplit,
-  type ByteSource,
 } from "../src";
 
 const DIR = join(__dirname, "fixtures/handles");
 
-/** the environment's part: bytes by path under a directory; a missing file is null */
-function dirSource(dir: string): ByteSource {
-  return {
-    bytes: async (path) => {
-      try { const b = await readFile(join(dir, path)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }
-      catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT" || (e as NodeJS.ErrnoException).code === "ENOTDIR") return null; throw e; }
-    },
-  };
-}
 const src = dirSource(DIR);
 const load = (path: string, hint?: { shape?: number[]; dtype?: RawArray["dtype"] }) => loadArray(src, path, hint, ["t"]);
 

@@ -6,15 +6,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Bundle, type ByteSource } from "../src";
+import { Bundle } from "../src";
+import { dirSource } from "./helpers";
 
 const DIR = join(__dirname, "../../../apps/viewer/public/bundles/mnist-mlp");
-const src: ByteSource = {
-  bytes: async (path) => {
-    try { const b = await readFile(join(DIR, path)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  },
-};
+const src = dirSource(DIR);
 type Ref = { loss: number; acc: number };
 const refP = readFile(join(__dirname, "fixtures/mnist-mlp-reference.json"), "utf8").then((s) => JSON.parse(s) as {
   eval_n: number; small_n: number; points3: number[][]; points2: number[][];

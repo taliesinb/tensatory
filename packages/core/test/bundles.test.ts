@@ -1,24 +1,36 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Bundle, DenseGrid, infoOf, isoContours, type ByteSource } from "../src";
+import { Bundle, DenseGrid, Sweep, infoOf, isoContours, rootKind } from "../src";
+import { dirSource } from "./helpers";
 
 const dir = join(__dirname, "../../../apps/viewer/public/bundles");
-/** every bundle document: a top-level `<name>.json`, or a directory's `bundle.json` (a bundle with sidecar arrays) */
+/**
+ * every document: a top-level `<name>.json` (a bundle), or a directory's `bundle.json` (a bundle with sidecar arrays)
+ * or `sweep.json` (a sweep whose members live inline or in subdirectories — those are not documents of their own here)
+ */
 const files = readdirSync(dir).flatMap((f) => {
   if (f.endsWith(".json")) return f === "index.json" ? [] : [f];
-  return statSync(join(dir, f)).isDirectory() && existsSync(join(dir, f, "bundle.json")) ? [`${f}/bundle.json`] : [];
+  if (!statSync(join(dir, f)).isDirectory()) return [];
+  return ["bundle.json", "sweep.json"].filter((doc) => existsSync(join(dir, f, doc))).map((doc) => `${f}/${doc}`);
 });
 
 /** the sidecar files beside a document, as the viewer would fetch them */
-const sourceFor = (file: string): ByteSource => ({
-  bytes: async (path) => {
-    try { const b = await readFile(join(dir, dirname(file), path)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  },
-});
-const load = (file: string) => Bundle.load(JSON.parse(readFileSync(join(dir, file), "utf8")), sourceFor(file));
+const sourceFor = (file: string) => dirSource(join(dir, dirname(file)));
+const readJson = (file: string) => JSON.parse(readFileSync(join(dir, file), "utf8")) as unknown;
+const load = (file: string) => Bundle.load(readJson(file), sourceFor(file));
+/** a document's bundles: the bundle itself, or every member of a sweep (by id) */
+async function bundlesOf(file: string): Promise<[string, Bundle][]> {
+  const json = readJson(file);
+  if (rootKind(json) !== "sweep") return [[file, await load(file)]];
+  const s = Sweep.parse(json, sourceFor(file));
+  return Promise.all(s.memberIds.map(async (id) => [`${file} · ${id}`, await s.member(id)] as [string, Bundle]));
+}
+/** what an index entry mirrors: a bundle's or a sweep's own name and summary */
+const infoOfDoc = (file: string): { name: string; summary: string | undefined } => {
+  const json = readJson(file);
+  return rootKind(json) === "sweep" ? (({ name, spec }) => ({ name, summary: spec.summary }))(Sweep.parse(json, sourceFor(file))) : (({ name, spec }) => ({ name, summary: spec.summary }))(Bundle.parse(json));
+};
 
 /** bundles whose live fields cost ~0.1 s per point on the CPU (the MNIST MLP): built here, sampled in their own test */
 const HEAVY = new Set(["mnist-mlp/bundle.json"]);
@@ -26,9 +38,9 @@ const HEAVY = new Set(["mnist-mlp/bundle.json"]);
 describe("example bundles", () => {
   for (const f of files) {
     it(`${f} parses, builds every field${HEAVY.has(f) ? "" : ", samples and contours"}`, async () => {
-      const b = await load(f);
+      for (const [label, b] of await bundlesOf(f)) {
       const errors = b.buildAll();
-      expect([...errors.entries()].map(([id, e]) => `${id}: ${e.message}`)).toEqual([]);
+      expect([...errors.entries()].map(([id, e]) => `${label} ${id}: ${e.message}`)).toEqual([]);
       if (HEAVY.has(f)) return;
       for (const id of b.scalarFieldIds) {
         const fd = b.scalarField(id).data;
@@ -46,6 +58,7 @@ describe("example bundles", () => {
         const fd = b.vectorField(id).data;
         const v = fd.value(fd.box.center);
         expect(v?.length).toBe(fd.box.dimCount);
+      }
       }
     }, 30_000); // iris: 16 net fields, half of them over the 120-example training set, sampled on the CPU
   }
@@ -87,11 +100,11 @@ describe("example bundles", () => {
     // every indexed bundle exists; the heavy ones are deliberately unindexed (the viewer cannot show them yet)
     expect(index.map((e) => e.file).sort()).toEqual(files.filter((f) => !HEAVY.has(f)).sort());
     for (const e of index) {
-      const b = await load(e.file);
-      expect(e.name, `${e.file} name`).toBe(b.name);
-      expect(e.summary, `${e.file} summary`).toBe(b.spec.summary);
-      expect(b.info?.summary, `${e.file} has a summary`).toBeDefined();
-      for (const m of b.manifolds.values()) if (m.info?.summary) expect(m.info.summary).not.toContain("\n"); // one line
+      const info = infoOfDoc(e.file);
+      expect(e.name, `${e.file} name`).toBe(info.name);
+      expect(e.summary, `${e.file} summary`).toBe(info.summary);
+      expect(info.summary, `${e.file} has a summary`).toBeDefined();
+      for (const [, b] of await bundlesOf(e.file)) for (const m of b.manifolds.values()) if (m.info?.summary) expect(m.info.summary).not.toContain("\n"); // one line
     }
     const b = Bundle.parse(JSON.parse(readFileSync(join(dir, "dynamical-systems.json"), "utf8")));
     expect(b.manifolds.get("lorenz")!.info?.summary).toMatch(/^σ = 10/);
