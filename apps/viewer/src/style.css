@@ -92,7 +92,10 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .ch.record .seg.direct:not(.on):hover { background: #26467f; color: #c4d2ee; }
 .ch.record .seg { padding: 0 6px; min-width: 8px; }
 .ch.record { flex-wrap: wrap; height: auto; row-gap: 3px; }
-/* the `data` row of a sweep member: the record's keys on ONE line, cut with an ellipsis; the tooltip has the table */
+/* a row whose (smaller) value sits on the key's baseline rather than centred against it */
+#picker .prow.baseline { align-items: baseline; }
+#picker .prow.baseline label { align-self: auto; }
+/* the `params` row of a sweep member: the record's keys on ONE line, cut with an ellipsis; the tooltip has the table */
 #picker .pval.data { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 /* the tooltip's key / value table (data-tip-rows): themed like the picker tables */
 #tip .tiptable { border-collapse: collapse; margin-top: 5px; white-space: nowrap; }

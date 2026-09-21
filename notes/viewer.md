@@ -167,7 +167,7 @@ attribute — blue = this member's value, tinted = a DIRECT switch (a member
 exists that differs in this key alone), plain = the value exists but reaching
 it changes other keys too (the tooltip says which; the status line repeats it
 after the jump), disabled = listed in `keys.values` but no member has it; and
-`data` — the keys that do not vary plus the member's attributes (`params`,
+`params` — the keys that do not vary plus the member's attributes (`parameters`,
 `test acc`, …) as one line of key names, cut with an ellipsis; hovering it
 shows the keys and values as a table (the shared tooltip renders
 `data-tip-rows`, JSON `[key, value]` pairs, as a themed two-column table

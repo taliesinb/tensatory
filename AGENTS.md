@@ -164,7 +164,7 @@ profiling test.
   member's name + ⓘ, one flipper per varying non-attribute key (blue = this
   member, tinted = a direct switch that changes only this key, plain = jumps
   to the nearest member and changes others too — the status line says
-  which, disabled = no member has it), and a `data` row: the fixed keys and
+  which, disabled = no member has it), and a `params` row: the fixed keys and
   attributes as one ellipsized line of key names whose tooltip is a themed
   key / value table (`data-tip-rows` on the shared tooltip). Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
   same-shaped members share everything; into a new signature the usable
