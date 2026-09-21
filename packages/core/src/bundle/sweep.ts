@@ -228,6 +228,7 @@ export const SINGLE_MEMBER = "bundle";
 export class Sweep {
   readonly name: string;
   private readonly loading = new Map<string, Promise<Bundle>>();
+  private readonly done = new Map<string, Bundle>();
 
   constructor(readonly spec: SweepSpec, private readonly src: ByteSource) {
     this.name = spec.name ?? "untitled sweep";
@@ -257,6 +258,7 @@ export class Sweep {
     if (bundle.spec.details !== undefined) spec.details = bundle.spec.details;
     const s = new Sweep(spec, { bytes: async () => null });
     s.loading.set(SINGLE_MEMBER, Promise.resolve(bundle));
+    s.done.set(SINGLE_MEMBER, bundle);
     return s;
   }
 
@@ -284,10 +286,13 @@ export class Sweep {
     if (!p) {
       p = this.loadMember(id, opts);
       this.loading.set(id, p);
-      p.catch(() => this.loading.delete(id)); // a failed load may be retried
+      p.then((b) => this.done.set(id, b), () => this.loading.delete(id)); // a failed load may be retried
     }
     return p;
   }
+
+  /** a member's bundle if it has been loaded already (synchronous; for labels of members seen before) */
+  loaded(id: string): Bundle | undefined { return this.done.get(id); }
 
   private async loadMember(id: string, opts: { onProgress?: (p: LoadProgress) => void }): Promise<Bundle> {
     const m = this.spec.members[id];

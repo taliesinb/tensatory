@@ -160,18 +160,21 @@ space, where it does nothing). Live dragging is the planned follow-up.
 ## Sweeps: the record rows
 
 When the loaded document is a sweep ([sweeps.md](sweeps.md) §2), the bundle
-panel gains rows between the `bundle` picker (the sweep, its ⓘ) and the
-`space` picker (`apps/viewer/src/recordPane.ts`): `member` — the member's
-name and ⓘ; one flipper per key that varies across the members and is not an
-attribute — blue = this member's value, tinted = a DIRECT switch (a member
-exists that differs in this key alone), plain = the value exists but reaching
-it changes other keys too (the tooltip says which; the status line repeats it
-after the jump), disabled = listed in `keys.values` but no member has it; and
-`params` — the keys that do not vary plus the member's attributes (`parameters`,
-`test acc`, …) as one line of key names, cut with an ellipsis; hovering it
-shows the keys and values as a table (the shared tooltip renders
-`data-tip-rows`, JSON `[key, value]` pairs, as a themed two-column table
-under the text). A click loads that member (`Sweep.member`: fetched
+panel gains a `member` row between the `bundle` picker (the sweep, its ⓘ)
+and the `space` picker (`apps/viewer/src/recordPane.ts`): a TABLE PICKER
+like the bundle's — the member's name (its bundle's `name`; a member not
+loaded yet is named from the sweep document's prefetched inventory,
+`docInventory` `memberInfo`), the ⌃⌄ chevron, wheel / ↑↓ stepping; the table
+has one row per member with a column per varying key and the summary — and
+a ⓘ whose modal shows the member's summary / details and, as a section
+below, its whole RECORD as a key / value table (`info.ts` `kvTable`; the
+same table the shared tooltip renders for `data-tip-rows`). Under the row,
+one indented KEY LINE per key that varies across the members and is not an
+attribute: an inline label and a flipper — blue = this member's value,
+tinted = a DIRECT switch (a member exists that differs in this key alone),
+plain = the value exists but reaching it changes other keys too (the tooltip
+says which; the status line repeats it after the jump), disabled = listed in
+`keys.values` but no member has it. A click loads that member (`Sweep.member`: fetched
 once with its sidecars, relative to its own document) and `setBundle`s it in
 the same space when it has one. Options are keyed by the sweep file AND the
 member's structural signature (`tensatory.opts.<file>#<hash>`), so members

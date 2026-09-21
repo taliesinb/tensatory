@@ -160,13 +160,16 @@ profiling test.
   sampled arguments must have IDENTICAL sample points (error otherwise).
   Pullbacks keep the kind and move the support along.
 * Sweeps in the viewer (`notes/viewer.md` "Sweeps"): `loadBundle` dispatches
-  on `rootKind`; the bundle panel gains RECORD ROWS (`recordPane.ts`): the
-  member's name + ⓘ, one flipper per varying non-attribute key (blue = this
-  member, tinted = a direct switch that changes only this key, plain = jumps
-  to the nearest member and changes others too — the status line says
-  which, disabled = no member has it), and a `params` row: the fixed keys and
-  attributes as one ellipsized line of key names whose tooltip is a themed
-  key / value table (`data-tip-rows` on the shared tooltip). Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
+  on `rootKind`; the bundle panel gains a MEMBER row (`recordPane.ts`): a
+  table picker like the bundle's (name + ⌃⌄, wheel / ↑↓ step; the table has
+  a column per varying key and the summary; members not loaded yet are
+  named from the prefetched inventory), a ⓘ whose modal ends with the
+  member's whole RECORD as a key / value table (`info.ts` `kvTable`, also
+  the tooltip's `data-tip-rows`), and under it one indented KEY LINE per
+  varying non-attribute key — an inline label and a flipper (blue = this
+  member, tinted = a direct switch that changes only this key, plain =
+  jumps to the nearest member and changes others too — the status line says
+  which, disabled = no member has it). Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
   same-shaped members share everything; into a new signature the usable
   slots, the view / camera (same space) or the camera's orientation only
   (another 3D space, refit to its box: `View3D.holdOrientation`) carry.

@@ -35,7 +35,7 @@ export class TablePicker {
   onPick: ((id: string) => void) | undefined;
 
   /** `host` is the element the picker replaces (the former <select>); its id moves to the control */
-  constructor(host: HTMLElement, private readonly columns: PickerColumn[], private readonly rowsOf: () => PickerRow[]) {
+  constructor(host: HTMLElement, private columns: PickerColumn[], private readonly rowsOf: () => PickerRow[]) {
     this.el = document.createElement("div");
     this.el.className = "tpick-btn";
     this.el.id = host.id;
@@ -64,6 +64,9 @@ export class TablePicker {
   }
 
   get isOpen(): boolean { return this.pop.style.display !== "none"; }
+
+  /** replace the columns (a picker whose alternatives' descriptive columns depend on the data: a sweep's keys) */
+  setColumns(columns: PickerColumn[]): void { this.columns = columns; if (this.isOpen) this.build(); }
 
   /** the current alternative; `fallback` is shown when `id` is not among the rows (a bundle opened from disk) */
   set(id: string, fallback = id): void {

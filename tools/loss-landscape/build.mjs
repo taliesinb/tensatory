@@ -89,7 +89,7 @@ function buildMember(name) {
       `\`${name}.bin\` — headerless float32, channels interleaved, x fastest: row-major (z, y, x, channel) — so the`,
       `bundle reads it through \`{ "type": "handle", "path": "vol.bin", "shape": [${shape}], "part": [null, null, null, c],`,
       `"axes": [${perm}] }\`: the part picks the channel, the axes permutation puts x first.`,
-    ].join("\n"),
+    ].join(" "),
     manifolds: {
       [dirs]: {
         name: dirs === "pca" ? "PCA directions" : "random directions",

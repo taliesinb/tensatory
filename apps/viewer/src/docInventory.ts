@@ -15,6 +15,8 @@ export interface DocInventory {
   members: number | undefined;
   /** the bundle's inventory, or one per member of a sweep */
   inventories: Inventory[];
+  /** a sweep's members by id: their (merged) bundle's name and summary, for describing members not loaded yet */
+  memberInfo: Record<string, { name?: string | undefined; summary?: string | undefined }> | undefined;
 }
 export type DocInventoryResult = { ok: true; inv: DocInventory } | { ok: false; error: string };
 
@@ -48,14 +50,17 @@ async function compute(url: URL): Promise<DocInventoryResult> {
   let out: DocInventory;
   if (rootKind(json) === "sweep") {
     const spec = Sweep.validate(json);
-    const inventories = await Promise.all(Object.values(spec.members).map(async (m) => {
+    const merged = await Promise.all(Object.entries(spec.members).map(async ([id, m]) => {
       const member = typeof m.bundle === "string" ? Bundle.validate(await fetchJson(new URL(m.bundle, url))) : m.bundle;
-      return inventoryOf(mergeCommon(spec.common, member));
+      return [id, mergeCommon(spec.common, member)] as const;
     }));
-    out = { summary: spec.summary, members: inventories.length, inventories };
+    out = {
+      summary: spec.summary, members: merged.length, inventories: merged.map(([, m]) => inventoryOf(m)),
+      memberInfo: Object.fromEntries(merged.map(([id, m]) => [id, { name: m.name, summary: m.summary }])),
+    };
   } else {
     const spec = Bundle.validate(json);
-    out = { summary: spec.summary, members: undefined, inventories: [inventoryOf(spec)] };
+    out = { summary: spec.summary, members: undefined, inventories: [inventoryOf(spec)], memberInfo: undefined };
   }
   return { ok: true, inv: out };
 }

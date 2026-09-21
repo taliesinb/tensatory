@@ -81,7 +81,7 @@ import {
   makeDiscreteSlider,
   makeSlider,
   syncTicks,
-  wheelStepper,
+  stepOnWheel,
   type ChoiceEl,
   type ValueControl,
 } from "./widgets";
@@ -1544,6 +1544,9 @@ function setSpace(id: string, fromUser: boolean): void {
 
 const controls = new ControlsPane($("controlsPanel"));
 const recordPane = new RecordPane($("recordRows"));
+recordPane.onPick = (id, why) => void setMember(id, why);
+// members not loaded yet are described from the sweep document's prefetched inventory (name, summary)
+recordPane.describe = (id) => { const r = state.sweep ? docInventoryNow(bundleUrl(state.bundleFile)) : undefined; return r?.ok ? r.inv.memberInfo?.[id] : undefined; };
 
 // the left stack scrolls within the height the bottom-left column (curves, fields) leaves it
 {
@@ -1709,7 +1712,7 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null, memb
   const docInfo = state.sweep ? state.sweep.info : bundle.info;
   bindInfoIcon($("bundleInfo"), docInfo);
   bundlePicker.set(file, file.replace(/^local:/, ""));
-  recordPane.build(state.sweep, member, bundle.info, (id, why) => void setMember(id, why));
+  recordPane.build(state.sweep, member, bundle.info);
   showBuildErrors();
   const spaces = spaceList();
   const saved = readOpts().space;
@@ -1745,6 +1748,7 @@ async function loadBundle(file: string, wantSpace?: string | null, wantMember?: 
       const sweep = Sweep.parse(json, fetchSource(url));
       if (!sweep.memberIds.length) throw new TensatoryError("the sweep has no members");
       state.sweep = sweep; state.bundleFile = file;
+      void docInventory(url, () => recordPane.refresh()); // the members' names for the member table (already cached after boot's prefetch)
       const saved = localStorage.getItem(memberKey()!) ?? undefined;
       const member = [wantMember ?? undefined, saved, sweep.memberIds[0]].find((id): id is string => id !== undefined && sweep.spec.members[id] !== undefined)!;
       await setMember(member, undefined, wantSpace);
@@ -1816,14 +1820,6 @@ function prefetchInventories(): void { for (const b of bundleList) void docInven
 stepOnWheel(bundlePicker.el, (dir) => bundlePicker.step(dir));
 stepOnWheel(spacePicker.el, (dir) => spacePicker.step(dir));
 
-/** step a picker with the wheel or ↑/↓ while hovering its closed control (same one-step-per-gesture wheel handling as the discrete sliders) */
-function stepOnWheel(el: HTMLElement, step: (dir: number) => void): void {
-  let over = false;
-  el.addEventListener("pointerenter", () => (over = true)); el.addEventListener("pointerleave", () => (over = false));
-  const wheel = wheelStepper(step);
-  el.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
-  window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); } });
-}
 $("uploadBtn").onclick = () => $<HTMLInputElement>("pickFile").click();
 /* local bundles: pick the JSON alone, or together with its sidecar files (.bin / .npy / .npz beside it; a zarr store
    cannot be picked as flat files, so handles into one fail on their fields with a clear message) */

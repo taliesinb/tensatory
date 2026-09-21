@@ -1,4 +1,5 @@
 import { formatReal } from "@tensatory/core";
+import { kvTable } from "./info";
 
 // Framework-free widgets, ported from the loss-landscape prototype.
 // Controls are plain <div>s configured by data- attributes; sliders expose a
@@ -26,15 +27,16 @@ function fillTip(tip: HTMLElement, el: HTMLElement): void {
   let rows: unknown;
   try { rows = JSON.parse(el.dataset.tipRows); } catch { return; }
   if (!Array.isArray(rows)) return;
-  const table = document.createElement("table"); table.className = "tiptable";
-  for (const r of rows as unknown[]) {
-    if (!Array.isArray(r) || r.length < 2) continue;
-    const tr = document.createElement("tr");
-    const k = document.createElement("td"); k.className = "k"; k.textContent = String(r[0]);
-    const v = document.createElement("td"); v.className = "v"; v.textContent = String(r[1]);
-    tr.append(k, v); table.appendChild(tr);
-  }
-  tip.appendChild(table);
+  tip.appendChild(kvTable((rows as unknown[]).filter((r): r is [unknown, unknown] => Array.isArray(r) && r.length >= 2).map(([k, v]) => [String(k), String(v)])));
+}
+
+/** step a control with the wheel or ↑/↓ while hovering it (one step per gesture, as the discrete sliders) */
+export function stepOnWheel(el: HTMLElement, step: (dir: number) => void): void {
+  let over = false;
+  el.addEventListener("pointerenter", () => (over = true)); el.addEventListener("pointerleave", () => (over = false));
+  const wheel = wheelStepper(step);
+  el.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
+  window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); } });
 }
 
 export function installTooltips(root: ParentNode = document): void {

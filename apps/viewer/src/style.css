@@ -92,17 +92,23 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .ch.record .seg.direct:not(.on):hover { background: #26467f; color: #c4d2ee; }
 .ch.record .seg { padding: 0 6px; min-width: 8px; }
 .ch.record { flex-wrap: wrap; height: auto; row-gap: 3px; }
-/* a row whose (smaller) value sits on the key's baseline rather than centred against it */
-#picker .prow.baseline { align-items: baseline; }
-#picker .prow.baseline label { align-self: auto; }
-/* the `params` row of a sweep member: the record's keys on ONE line, cut with an ellipsis; the tooltip has the table */
-#picker .pval.data { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
-/* the tooltip's key / value table (data-tip-rows): themed like the picker tables */
-#tip .tiptable { border-collapse: collapse; margin-top: 5px; white-space: nowrap; }
-#tip .tiptable td { padding: 2px 8px 2px 0; vertical-align: baseline; font-variant-numeric: tabular-nums; border-top: 1px solid #2a2f3d; }
-#tip .tiptable tr:first-child td { border-top: none; }
-#tip .tiptable td.k { color: #7d8db0; font-size: 11px; }
-#tip .tiptable td.v { color: #e8ecf5; padding-right: 0; }
+/* the KEY lines under the member picker: an inline label ("model") and the flipper, left-aligned under the member's
+   name (the row's key column stays empty), no alignment across lines */
+#picker .prow.keyline { margin-top: 1px; }
+#picker .prow.keyline > label { visibility: hidden; }
+#picker .keyline .inl { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; }
+#picker .keyline .klabel { flex: none; color: #8a96b0; font-size: 11px; }
+#picker .keyline .ch.record { flex: 0 1 auto; }
+/* the key / value table (info.ts kvTable): under a tooltip's text (data-tip-rows) and as the info modal's record section */
+.kvtable { border-collapse: collapse; white-space: nowrap; }
+.kvtable td { padding: 2px 8px 2px 0; vertical-align: baseline; font-variant-numeric: tabular-nums; border-top: 1px solid #2a2f3d; }
+.kvtable tr:first-child td { border-top: none; }
+.kvtable td.k { color: #7d8db0; font-size: 11px; }
+.kvtable td.v { color: #e8ecf5; padding-right: 0; }
+#tip .kvtable { margin-top: 5px; }
+#infoTable { padding: 10px 14px 12px; border-top: 1px solid #2a2f3d; overflow: auto; font-size: 12.5px; }
+#infoTable .kvtable td { padding: 3px 14px 3px 0; }
+#infoTable .kvtable td.k { font-size: 12px; }
 .commit { color: #3b82f6; font-size: 14px; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; padding: 0 4px; flex: none; }
 .commit:hover { color: #93c5fd; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }
