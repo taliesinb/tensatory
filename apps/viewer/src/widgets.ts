@@ -15,16 +15,36 @@ export interface SliderEl extends ValueControl {
 const $ = (id: string) => document.getElementById(id)!;
 
 /*******************************************************/
-/* tooltips (0.25 s delay) on any [data-tip] */
+/* tooltips (0.25 s delay) on any [data-tip]; an element may add [data-tip-rows] = JSON [[key, value], …], shown as a
+   themed two-column table under the text (a sweep member's record) */
+
+/** the tooltip's content: the text, then the rows as a table (text only — nothing is interpreted as HTML) */
+function fillTip(tip: HTMLElement, el: HTMLElement): void {
+  tip.replaceChildren();
+  if (el.dataset.tip) tip.append(el.dataset.tip);
+  if (!el.dataset.tipRows) return;
+  let rows: unknown;
+  try { rows = JSON.parse(el.dataset.tipRows); } catch { return; }
+  if (!Array.isArray(rows)) return;
+  const table = document.createElement("table"); table.className = "tiptable";
+  for (const r of rows as unknown[]) {
+    if (!Array.isArray(r) || r.length < 2) continue;
+    const tr = document.createElement("tr");
+    const k = document.createElement("td"); k.className = "k"; k.textContent = String(r[0]);
+    const v = document.createElement("td"); v.className = "v"; v.textContent = String(r[1]);
+    tr.append(k, v); table.appendChild(tr);
+  }
+  tip.appendChild(table);
+}
 
 export function installTooltips(root: ParentNode = document): void {
   const tip = $("tip");
   let timer: ReturnType<typeof setTimeout> | undefined;
   for (const el of root.querySelectorAll<HTMLElement>("[data-tip]")) {
     el.addEventListener("pointerenter", () => {
-      if (!el.dataset.tip) return; // data-tip="" reserves a tooltip whose text is set later
+      if (!el.dataset.tip && !el.dataset.tipRows) return; // data-tip="" reserves a tooltip whose text is set later
       timer = setTimeout(() => {
-        tip.textContent = el.dataset.tip ?? "";
+        fillTip(tip, el);
         tip.style.display = "block";
         const r = el.getBoundingClientRect(), tw = tip.offsetWidth, th = tip.offsetHeight;
         let x = r.left, y = r.bottom + 6;

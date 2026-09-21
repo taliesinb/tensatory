@@ -78,14 +78,17 @@ export class RecordPane {
       this.host.appendChild(row);
     }
 
-    // the rest of the record: keys that do not vary, and the member's attributes (measurements) whether they vary or not
+    // the rest of the record — keys that do not vary, and the member's attributes (measurements) whether they vary or
+    // not — as one line of key names (cut with an ellipsis); hovering shows the keys and values as a table
     const fixed = facets.filter((f) => (!f.varying || f.attribute) && record[f.key] !== undefined);
     if (fixed.length) {
       const row = document.createElement("div"); row.className = "prow";
-      const label = document.createElement("label"); label.textContent = "record";
-      label.dataset.tip = "The rest of this member's record: keys that are the same on every member, and the member's own measurements (test accuracy, parameter count, …) — attributes of the member, not coordinates of the sweep.";
-      const val = document.createElement("div"); val.className = "pval";
-      val.textContent = fixed.map((f) => `${f.name} ${fmtOf(f.key)(record[f.key]!)}`).join(" · ");
+      const label = document.createElement("label"); label.textContent = "data";
+      label.dataset.tip = "The rest of this member's record: keys that are the same on every member, and the member's own measurements (test accuracy, parameter count, …) — attributes of the member, not coordinates of the sweep. Hover the list for the values.";
+      const val = document.createElement("div"); val.className = "pval data";
+      val.textContent = fixed.map((f) => f.name).join(", ");
+      val.dataset.tip = "";
+      val.dataset.tipRows = JSON.stringify(fixed.map((f) => [f.name, fmtOf(f.key)(record[f.key]!)]));
       row.append(label, val);
       this.host.appendChild(row);
     }

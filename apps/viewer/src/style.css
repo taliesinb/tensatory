@@ -92,6 +92,14 @@ body.gpu-render #gpu, body.dim3 #gpu { display: block; }
 .ch.record .seg.direct:not(.on):hover { background: #26467f; color: #c4d2ee; }
 .ch.record .seg { padding: 0 6px; min-width: 8px; }
 .ch.record { flex-wrap: wrap; height: auto; row-gap: 3px; }
+/* the `data` row of a sweep member: the record's keys on ONE line, cut with an ellipsis; the tooltip has the table */
+#picker .pval.data { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+/* the tooltip's key / value table (data-tip-rows): themed like the picker tables */
+#tip .tiptable { border-collapse: collapse; margin-top: 5px; white-space: nowrap; }
+#tip .tiptable td { padding: 2px 8px 2px 0; vertical-align: baseline; font-variant-numeric: tabular-nums; border-top: 1px solid #2a2f3d; }
+#tip .tiptable tr:first-child td { border-top: none; }
+#tip .tiptable td.k { color: #7d8db0; font-size: 11px; }
+#tip .tiptable td.v { color: #e8ecf5; padding-right: 0; }
 .commit { color: #3b82f6; font-size: 14px; line-height: 1; cursor: pointer; user-select: none; -webkit-user-select: none; padding: 0 4px; flex: none; }
 .commit:hover { color: #93c5fd; }
 select, button, input[type="file"] { background: #1b2030; color: #eee; border: 1px solid #333a4d; border-radius: 4px; padding: 3px 6px; font: inherit; }
@@ -154,7 +162,7 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #curvesPanel .body { padding: 4px 10px 6px; max-height: 40vh; overflow-y: auto; scrollbar-width: none; }
 #metricSvgBody { padding: 4px 8px 6px; }
 #metricSvgBody svg { display: block; margin-left: auto; font: 11.5px system-ui, sans-serif; user-select: none; }
-#tip { position: absolute; z-index: 10; max-width: 280px; background: #222a3c; color: #e6ebf5; border: 1px solid #3a4560; border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.35; pointer-events: none; display: none; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
+#tip { position: absolute; z-index: 10; max-width: 320px; background: #222a3c; color: #e6ebf5; border: 1px solid #3a4560; border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.35; pointer-events: none; display: none; box-shadow: 0 4px 14px rgba(0,0,0,.5); }
 label[data-tip]:not(.tick) { cursor: help; }
 #help { display: none; }
 #status { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: #9ab; pointer-events: none; max-width: 60vw; text-align: center; }

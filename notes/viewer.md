@@ -167,8 +167,11 @@ attribute — blue = this member's value, tinted = a DIRECT switch (a member
 exists that differs in this key alone), plain = the value exists but reaching
 it changes other keys too (the tooltip says which; the status line repeats it
 after the jump), disabled = listed in `keys.values` but no member has it; and
-`record` — the keys that do not vary plus the member's attributes (`params`,
-`test acc`, …) as text. A click loads that member (`Sweep.member`: fetched
+`data` — the keys that do not vary plus the member's attributes (`params`,
+`test acc`, …) as one line of key names, cut with an ellipsis; hovering it
+shows the keys and values as a table (the shared tooltip renders
+`data-tip-rows`, JSON `[key, value]` pairs, as a themed two-column table
+under the text). A click loads that member (`Sweep.member`: fetched
 once with its sidecars, relative to its own document) and `setBundle`s it in
 the same space when it has one. Options are keyed by the sweep file AND the
 member's structural signature (`tensatory.opts.<file>#<hash>`), so members

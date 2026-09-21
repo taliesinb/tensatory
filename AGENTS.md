@@ -164,8 +164,9 @@ profiling test.
   member's name + ⓘ, one flipper per varying non-attribute key (blue = this
   member, tinted = a direct switch that changes only this key, plain = jumps
   to the nearest member and changes others too — the status line says
-  which, disabled = no member has it), the fixed keys and attributes as
-  text. Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
+  which, disabled = no member has it), and a `data` row: the fixed keys and
+  attributes as one ellipsized line of key names whose tooltip is a themed
+  key / value table (`data-tip-rows` on the shared tooltip). Options are keyed `tensatory.opts.<sweepFile>#<signature hash>` so
   same-shaped members share everything; into a new signature the usable
   slots, the view / camera (same space) or the camera's orientation only
   (another 3D space, refit to its box: `View3D.holdOrientation`) carry.
