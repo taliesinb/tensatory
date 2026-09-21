@@ -449,7 +449,13 @@ is the chance to make the members first-class. In order of value:
    "snapshot"`, and beside it `record.json` = `{ dataset, model, dirs, seed,
    lr, epochs, batch_size, momentum, weight_decay, n_params, test_acc,
    final_train_loss, eval_n, grid, explained_variance?, wall_s }` for the
-   sweep document to gather. One source of truth for the metadata.
+   sweep document to gather. One source of truth for the metadata. For MLP
+   members also emit the **`net` def** (the script has the `nn.Module` in
+   hand; a `.pt` state_dict is only named tensors, the architecture and
+   nonlinearities are not in it — `tools/mnist/export.py` writes the def by
+   hand today) and assert that def reproduces the model's own loss at θ*.
+   Nothing reads `.pt` in TypeScript and nothing should: export `.npz` (or
+   safetensors) from Python.
 4. **Save the directions**, always. The `random` volumes' directions were
    never written, so those volumes cannot be related to parameter space at
    all; pca directions are recomputable only while the `.pt` exists. Write
