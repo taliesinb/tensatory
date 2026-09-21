@@ -341,3 +341,87 @@ Where the seams are today, so the work does not start by rediscovering them:
   small member; `mnist-mlp/` is heavy and unindexed. A sweep fixture wants
   2–3 tiny members with a shared `common` and a non-Cartesian record set (one
   key absent on some members) so `facets` is exercised.
+
+### Worked example: the loss-landscape trial dataset as a sweep
+
+What the prototype actually produced (`~/projects/loss-landscape`, one run of
+`run_all.sh`, September 2025; **one seed**, `--seed 0`; the loop over
+`{mnist, fmnist, cifar10} × {mlp, convnet}` only completed for MNIST, and
+there is no ResNet or "ReSST" anywhere — just an MLP 784-256-256-10 and a
+3-conv ConvNet):
+
+| member | dataset | model | dirs | what exists | box |
+|---|---|---|---|---|---|
+| `mnist_mlp_pca` | mnist | mlp (269 322 params, test acc 0.976) | pca | 64³ volume (`log10_loss`, `accuracy`; N = 1024), trajectory (48), θ*, `.pt` checkpoint | from the trajectory |
+| `mnist_mlp_random` | mnist | mlp | random | 64³ volume, no trajectory | [−1.5, 1.5]³ |
+| `mnist_convnet_pca` | mnist | convnet (56 394 params, test acc 0.984) | pca | 40³ volume (N = 384), trajectory, θ*, `.pt` | from the trajectory |
+| `mnist_convnet_random` | mnist | convnet | random | 40³ volume | [−1.5, 1.5]³ |
+| `fmnist_convnet_{pca,random}` | fmnist | convnet | pca / random | only the 2D `.npy` planes (25 × 25, raw loss); no checkpoint, so the pca plane's box is lost (the random one is [−1, 1]²) | — |
+| `mnist_{mlp,convnet}_{pca,random}` 2D | mnist | both | both | 31 × 31 `.npy` planes from `landscape.py` (same θ*, N = 2048) | random [−1, 1]²; pca recomputable from `.pt` |
+
+So "multiple seeds, architectures" is half true: **architectures and direction
+kinds vary, seeds do not**. The dataset is a 2 × 2 grid of volumes plus a
+ragged fringe (a dataset with planes but no volumes; 2D planes beside 3D
+volumes for the same θ*), which is exactly the non-Cartesian shape the record
+model was designed for. Generating more seeds is cheap if wanted (MLP: ~2 s
+per epoch, a 64³ volume ~2 min on the Apple GPU; `landscape.py --seed k` then
+`volume.py --ckpt`) and would make `training_seed` a real key.
+
+**As a sweep document** (`bundles/loss-landscape/sweep.json`):
+
+```jsonc
+{
+  "tensatory": "0.2",
+  "name": "loss-landscape prototype runs",
+  "keys": {
+    "dataset": { "kind": "nominal", "values": ["mnist", "fmnist"] },
+    "model":   { "kind": "nominal", "values": ["mlp", "convnet"] },
+    "dirs":    { "kind": "nominal", "values": ["pca", "random"] },
+    "seed":    { "kind": "nominal" },
+    "test_acc": { "kind": "ordinal", "codomain": "fraction" }      // a per-member summary: a sparse field on the record space
+  },
+  "common": {
+    "fields": {
+      "loss": { "kind": "scalar", "codomain": "celoss", "data": { "type": "pointwise", "expr": { "op": "pow", "vals": [10, "l"] }, "scalars": { "l": "log10_loss" } } }
+    }
+  },
+  "members": {
+    "mnist_mlp_pca":        { "record": { "dataset": "mnist", "model": "mlp",     "dirs": "pca",    "seed": 0, "test_acc": 0.976, "n_params": 269322 }, "bundle": "mnist-mlp-pca/bundle.json" },
+    "mnist_mlp_random":     { "record": { "dataset": "mnist", "model": "mlp",     "dirs": "random", "seed": 0, "test_acc": 0.976, "n_params": 269322 }, "bundle": "mnist-mlp-random/bundle.json" },
+    "mnist_convnet_pca":    { "record": { "dataset": "mnist", "model": "convnet", "dirs": "pca",    "seed": 0, "test_acc": 0.984, "n_params": 56394 },  "bundle": "mnist-convnet-pca/bundle.json" },
+    "mnist_convnet_random": { "record": { "dataset": "mnist", "model": "convnet", "dirs": "random", "seed": 0, "test_acc": 0.984, "n_params": 56394 },  "bundle": "mnist-convnet-random/bundle.json" },
+    "fmnist_convnet_random": { "record": { "dataset": "fmnist", "model": "convnet", "dirs": "random", "seed": 0 }, "bundle": "fmnist-convnet-random/bundle.json" }
+  }
+}
+```
+
+Each member is what `tools/loss-landscape/build.mjs` already emits (a
+manifold `pca` or `random`, dense `log10_loss` / `accuracy` handles into the
+prototype's `.bin`, the trajectory curve and θ* for pca members) — the tool
+gains a `--member` mode that writes the record beside it, and a 2D variant
+that wraps a `.npy` plane. `common` holds what every member repeats
+(`loss` = 10^log10_loss; the codomains). The **structural signatures**: the
+four volume members share `{log10_loss, accuracy, loss}` on a 3D space, so
+slots, iso levels, camera and colormaps carry over verbatim when flipping
+`model` or `dirs`; the pca members additionally have the `trajectory` curve
+and θ* (a superset — the curve row appears / disappears, nothing else
+changes); the fmnist member is a 2D space, so the arm switches and only the
+2D options apply.
+
+**UI for this example**: the bundle panel gains a **record row** above
+`space`: `dataset` [mnist | fmnist], `model` [mlp | convnet], `dirs`
+[pca | random] as three choice flippers (the `#sliceRow` bar is the widget),
+`seed 0` and `test acc 0.976 · 269k params` as plain text since they do not
+vary (or vary only with the others). Faceting: picking `fmnist` greys `mlp`
+and `pca` (no such members); picking `mlp` greys `fmnist`. Switching a
+member is a `setBundle` of that member's `Bundle` with options loaded under
+`sweep + signature`; the space picker shows the member's single space as a
+label (`syncPickers`). The sweep's own ⓘ carries the description above. The
+natural first "cross-member" view is not a difference map (deferred) but the
+one the record already affords: flipping `dirs` between pca and random for
+the same θ* with the camera held — the paper's two views of one minimum,
+side by side in time.
+
+The local-storage key for member options becomes
+`tensatory.opts.<sweepFile>#<signature>`; a lone bundle keeps
+`tensatory.opts.<file>`.
