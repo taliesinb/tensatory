@@ -1,5 +1,6 @@
-export { GpuBackend } from "./device";
+export { GpuBackend, programKernels, COOP_CHUNK_WORK } from "./device";
 export { ProgramBuilder, buildSampleProgram } from "./program";
+export type { ResidentProvider } from "./program";
 export type { GpuProgram } from "./program";
 export { gpuSampleOn } from "./sample";
 export { FunctionEmitter, PRELUDE, expandGrad, f32, keyOf, vecType } from "./wgsl";
@@ -40,3 +41,5 @@ export { colourCode, isResidentGrid } from "./colour";
 export type { ColourSource } from "./colour";
 export { recolourer, recolourStep, freshProgress, VERT_LAYOUT, SEG_LAYOUT, SEG3_LAYOUT } from "./recolour";
 export type { Recolourer, RecolourProgress, RecordLayout } from "./recolour";
+export { CoopEmitter, emitCoopKernel, coopCapable, clearCoopCache, setCoopCodeShape, COOP_WG, COOP_DEFAULT_FLOATS, setCoopWorkgroupBytes, coopWorkgroupFloats } from "./coop";
+export type { CoopEmitContext, CoopKernel } from "./coop";

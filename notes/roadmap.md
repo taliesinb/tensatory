@@ -56,15 +56,18 @@ out) but build to `NotSupportedError`.
    shape inference, CPU reference evaluator, WebGPU transpiler, autodiff
    (`grad` as a program rewrite; exact derivatives of net fields), the iris
    example checked against PyTorch, CPU / GPU agreement; streaming of the
-   dataset axis, elementwise fusion and lazy arrays in the emitter. The
-   **MNIST MLP bundle** exists (`bundles/mnist-mlp/`, `tools/mnist/export.py`:
-   269k weights and the eval set as `.npz` members, CPU-checked against
-   PyTorch) but is not indexed: one GPU lane per point takes ~10 s per
-   dispatch at any grid size (nets.md "the MNIST MLP experiment"), so the
-   work budget leaves it to the CPU path, which is two minutes per rung.
-   Next: a **cooperative kernel** — a workgroup per grid point splitting the
-   matmuls, writing a resident values grid — then hoisting the
-   point-independent first layer, then index the bundle.
+   dataset axis, elementwise fusion and lazy arrays in the emitter; ~~the
+   cooperative kernel~~ (nets.md "As built": hoisting of point-independent
+   contractions in core, one workgroup per grid point with the dataset axis
+   tiled in workgroup memory, chunked dispatches into resident grids, a
+   resident provider for programs over such nets, the gradient as central
+   differences of the resident values) — the **MNIST MLP bundle**
+   (`bundles/mnist-mlp/`, 269k weights, 1024 examples) is indexed and
+   interactive: 50 µs/point, a 48² fill in 0.36 s in Chrome. Left: the exact
+   cooperative gradient (a 3-operand contraction fusion or distributing
+   every displaced matmul), Safari's remaining 1.5× per-point cost, a GPU
+   point evaluation for the cursor pane, folding hoisted constants on the
+   GPU.
 6. **Server-side computation**: a Tensatory server that materializes fields on
    demand (e.g. a Torch script sampling a new grid), with the same
    `FieldDataSpec` vocabulary; and client-side computation via third-party JS

@@ -1,0 +1,69 @@
+<!doctype html>
+<!-- Timing probe for the COOPERATIVE net kernel (gpu/src/coop.ts) — dev server only (imports the workspace sources
+     through /@fs/). Open http://127.0.0.1:5180/cooptiming.html in each browser: it builds the MNIST fast/loss
+     kernel (N = 256) in several code shapes and times a 32² grid (1024 workgroups) per shape, GPU completion timed.
+     ?field=loss2 for the 1024-example net, ?n=16 for a 16² grid. Results land in the page and in document.title. -->
+<html><head><meta charset="utf-8"><title>coop timing</title>
+<style>body{font:13px/1.4 -apple-system,system-ui,sans-serif;background:#0b0d12;color:#e6ebf5;padding:16px}table{border-collapse:collapse}td,th{padding:2px 10px;text-align:right;border-bottom:1px solid #2a3244}th{color:#9aa5bd}td:first-child{text-align:left}</style></head>
+<body><h3 id="h">loading…</h3><table id="t"></table><pre id="log"></pre>
+<script type="module">
+const core = await import("/@fs/Users/tali/github/tensatory/packages/core/src/index.ts");
+const gpu = await import("/@fs/Users/tali/github/tensatory/packages/gpu/src/index.ts");
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; };
+const ua = navigator.userAgent.includes("Chrome") ? "chrome" : navigator.userAgent.includes("Safari") ? "safari" : "other";
+const params = new URLSearchParams(location.search);
+const fieldId = params.get("field") ?? "fastLoss2";
+const n = +(params.get("n") ?? 32);
+const base = new URL("/bundles/mnist-mlp/", location.href);
+const src = { bytes: async (path) => { const r = await fetch(new URL(path, base)); return r.ok ? r.arrayBuffer() : null; } };
+const spec = await (await fetch(new URL("bundle.json", base))).json();
+const b = await core.Bundle.load(spec, src);
+const fd = b.scalarField(fieldId).data;
+const grid = new core.DenseGrid([n, n], fd.box);
+const backend = await gpu.GpuBackend.create();
+if (!backend) { document.getElementById("h").textContent = "no WebGPU"; throw new Error("no WebGPU"); }
+backend.asyncCompile = false;
+const device = backend.device;
+document.getElementById("h").textContent = `${ua}: ${fieldId} on ${n}² (${grid.sampleCount} points); workgroup storage ${device.limits.maxComputeWorkgroupStorageSize} B`;
+const rows = [];
+const render = () => {
+  document.getElementById("t").innerHTML = `<tr><th>shape</th><th>tile</th><th>floats</th><th>compile ms</th><th>dispatch ms</th><th>µs / point</th><th>chars</th></tr>` +
+    rows.map((r) => `<tr><td>${r.label}</td><td>${r.tile}</td><td>${r.floats}</td><td>${r.compile.toFixed(0)}</td><td>${r.ms.toFixed(0)}</td><td>${(r.ms / grid.sampleCount * 1000).toFixed(0)}</td><td>${r.chars}</td></tr>`).join("");
+};
+/** run the program's chunks once; GPU completion timed */
+async function runOnce(program) {
+  const nOut = program.sampleCount * program.channels;
+  const out = device.createBuffer({ size: Math.max(16, nOut * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  const data = device.createBuffer({ size: Math.max(16, program.data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(data, 0, program.data);
+  const kernels = gpu.programKernels(program, { role: "rw", buffer: out }, { role: "r", buffer: data });
+  const t0 = performance.now();
+  for (const k of kernels) await backend.runKernel(k);
+  await device.queue.onSubmittedWorkDone();
+  const ms = performance.now() - t0;
+  out.destroy(); data.destroy();
+  return ms;
+}
+async function time(label, opts) {
+  gpu.setCoopCodeShape(opts);
+  const pb = new gpu.ProgramBuilder(grid);
+  const program = pb.buildCooperative(fd);
+  if (!program) { log(`${label}: not cooperative`); return; }
+  const tc = performance.now();
+  try { await runOnce(program); } catch (e) { log(`${label}: ${e.message}`); return; } // first run: compile + warm-up
+  const compile = performance.now() - tc;
+  const ts = [];
+  for (let r = 0; r < 3; r++) ts.push(await runOnce(program));
+  rows.push({ label, tile: program.cooperative.tile, floats: program.cooperative.floats, compile, ms: Math.min(...ts), chars: program.code.length });
+  render();
+}
+await time("loops, opaque example bound", { unroll: false, exampleBound: "opaque", tile: null });
+await time("loops, literal example bound", { unroll: false, exampleBound: "literal", tile: null });
+await time("unrolled tile, opaque example bound (default)", { unroll: true, exampleBound: "opaque", tile: null });
+await time("unrolled tile, literal example bound", { unroll: true, exampleBound: "literal", tile: null });
+await time("unrolled, tile 4 (twice the barriers)", { unroll: true, exampleBound: "opaque", tile: 4 });
+await time("unrolled, tile 2", { unroll: true, exampleBound: "opaque", tile: 2 });
+gpu.setCoopCodeShape({ unroll: true, exampleBound: "opaque", tile: null });
+document.getElementById("h").textContent += " — done";
+document.title = "done " + JSON.stringify(rows.map((r) => [r.label, Math.round(r.ms)]));
+</script></body></html>

@@ -437,6 +437,145 @@ usable at isoline vertices). Expected: 7·10⁷ MAC spread over 256 lanes ≈
 3·10⁵ per lane ≈ tens of ms per point-batch, so a 64² grid in well under a
 second even before hoisting the first layer. Roadmap 5.
 
+**Step 0, measured** (`gpu/test/coop-proto.test.ts`, `PERF=1`; Apple M4, Dawn):
+a HAND-WRITTEN cooperative kernel for the MNIST loss — one workgroup of 256
+threads per point, layer 1 hoisted, the dataset axis streamed in TILES of E
+examples with the activation tiles `[E, 256]` in workgroup memory, thread j
+owning output unit j and reading the displaced weight `W2(t)[i, j]` ONCE per
+i for the E examples — agrees with the CPU evaluator to 1e-3 and takes, per
+point at N = 256: **245 µs (E = 1), 131 (2), 77 (4), 45 µs (E = 8)**, i.e. a
+32² grid in 46 ms (780 GFLOPS effective); N = 1024 at E = 8: 271 µs/point.
+Versus 10 s per dispatch on the serial lane and 110 ms/point on the CPU. The
+linear gain in E says the cooperative kernel is **memory-bound on the weight
+stream** (the naive mapping re-reads the point's weights per example; the
+tile divides that by E), so example tiling is the core of the design; opaque
+loop bounds (`nb_`) cost 2–3× here (unrolling the 256-long contraction lets
+the compiler batch the loads).
+
+### As built: hoisting and the cooperative kernel
+
+Three pieces, all on by default, nothing in the bundle format changed:
+
+1. **Hoisting** (`core/src/nets/hoist.ts`, `hoistProgram`), applied lazily
+   to every net FIELD's program (`fields/spec.ts` `netField`: the field's
+   `program` getter hoists on first use and memoizes per program object, so
+   fields sharing a net pay once — ~0.2 s for N = 256, ~0.9 s for 1024). A
+   displaced constant is the node `W__disp = W + einsum("k,k…->…", t, Dd)`
+   (`matchDisp`); a two-operand contraction (matmul or einsum) of it with a
+   CONSTANT distributes, wherever it sits in an expression tree —
+   `relu(add(matmul(xs, W1__disp), b))` becomes `relu(add(A + einsum("k,knj
+   ->nj", t, XD), b))` with `A = xs·W1` and `XD = stack_k xs·D1_k` folded
+   constants (`<node>__h`, `<node>__hd`, declared shapes with the symbolic
+   axis kept: `XD: [K, "N", 256]`). Every other node whose operands are all
+   constants folds too (up to `FOLD_MAX_ELEMENTS`, 4 M), a fully bound
+   program folds down to its outputs, and dead nodes / constants are pruned
+   (`x`, `W1t`, `W1t__dispd`, `xs` disappear from the MNIST program). Only
+   field programs are hoisted: their sole input is the point, so nobody asks
+   for a gradient with respect to a folded array; `grad` of the field
+   differentiates the hoisted program through the einsum with t. The CPU
+   evaluator gains the same 4× (per-point work 7·10⁷ → 1.8·10⁷ MAC).
+   `core/test/hoist.test.ts`: structure, values and gradients against the
+   unhoisted program (synthetic net and MNIST); the iris and MNIST PyTorch
+   comparisons run through hoisted programs.
+
+2. **The cooperative emitter** (`gpu/src/coop.ts`, `CoopEmitter extends
+   NetEmitter`): the same op vocabulary with a different loop-to-thread
+   mapping. Arrays are `var<workgroup>` at module scope (`declare` hook)
+   with the base emitter's liveness reuse; every element loop is STRIDED
+   over the workgroup (`for (f = lid; f < n; f += WG)`) and followed by a
+   `workgroupBarrier()` — only ever in uniform control flow (bounds are
+   literals or `nb_`, which reads read-only storage; the chunk guard
+   `if (point >= count) return` is uniform per workgroup). `tiled()` is
+   `streamed()` with the axis KEPT at size E instead of dropped: the plan
+   (`streamPlan`, factored out of `streamed`: axis, shapes, batched /
+   boundary / plain classification, loop levels) is shared; arrays carrying
+   the axis are tile views `sVar + e`; `perExample` is consulted only for
+   legality and the accumulation function; a `mean` over the axis is summed
+   per tile and divided by the full count at the end; `sizeOf(S)` inside the
+   loop is E, so a `reshape` naming N works per tile. E is the largest of
+   8 / 4 / 2 / 1 dividing N whose emission fits the workgroup budget
+   (`setCoopWorkgroupBytes` from the device limit: 32 KB on Apple → 7872
+   floats → E = 8 for MNIST at 4787 floats; the 16 KB default gives E = 4).
+   Contractions have three mappings: OUTPUT-PARALLEL WITH A REGISTER TILE
+   when a storage-resident operand (the weight, kind `data` / `expr` /
+   data view) lacks some output letters (the tile axis) and the rest give
+   ≥ WG/2 threads work — thread ↔ its letters, E private accumulators, the
+   weight read once per summed index; plain output-parallel otherwise (the
+   `[E, 10]` logits); CONTRACTION-PARALLEL with a tree reduction through
+   `red_[WG]` when the output is ≤ 32 elements and the contraction ≥ 2·WG
+   (the same for `reduce`). The displacement term `einsum(t, XD)` stays
+   LAZY (a tile view of storage data counts as stable inside the loop) so
+   the hoisted layer is one in-place elementwise fill. Thread 0 writes the
+   wanted outputs' elements to `out[point * channels + c]`; the point comes
+   from the dispatch grid header offset by `params[0]` (the chunk).
+   `emitCoopKernel` returns the `main` + declarations; `ProgramBuilder.
+   buildCooperative(fd, outputs)` prepends its `library()`;
+   `coopCapable(fd)` is a cached dry emission. Two CODE-SHAPE knobs
+   (`CoopEmitContext.unroll` / `exampleBound`, defaults via
+   `setCoopCodeShape`) were settled with `apps/viewer/public/cooptiming.html`
+   (dev server; builds the MNIST fast/loss kernel in every shape and times a
+   32² grid, GPU completion timed; `?field=loss2`, `?n=16`): the register
+   tile's small per-thread loops are emitted UNROLLED with one scalar
+   accumulator per tile element — Chrome is indifferent (50 µs/point either
+   way) but Safari goes from 163 to 73 µs/point and compiles in half the
+   time; the example loop's `nb_` bound costs nothing in either browser and
+   stays (the body is huge). The remaining Safari gap (73 vs 50) is in the
+   per-tile weight stream itself, not the barriers — both browsers pay the
+   same for halving the tile (E = 8 / 4 / 2: Chrome 50 / 77 / 143, Safari
+   73 / 103 / 188 µs) — most likely WebKit's bounds-checked storage reads,
+   out of WGSL's reach. Measured: the EMITTED MNIST kernel runs at 50
+   µs/point (N = 256; 32² in 51 ms) and 200 µs/point (N = 1024), within 15 %
+   of the hand-written kernel; a 3×3 grid including the compile takes 98 ms
+   against 0.5 s on the CPU. `gpu/test/coop.test.ts`
+   checks iris training nets (values and the autodiff GRADIENT as a vector
+   output, N = 120 → E = 8), MNIST loss / accuracy in 2D and 3D, the
+   integration below, and times (`PERF=1`).
+
+3. **Integration**: `buildSampleProgram(field, grid, resident?)` returns a
+   cooperative `GpuProgram` (`cooperative: { workgroupSize, work, tile,
+   floats }`) for a net field that is not `gpuTranspilable` but
+   `coopCapable`; `programKernels` turns a program into its dispatches —
+   one for an ordinary kernel, CHUNKS of points bounded by
+   `COOP_CHUNK_WORK` (10¹⁰ MAC ≈ 30 ms) with their own `params` binding for
+   a cooperative one, `Kernel.workgroups` dispatching one workgroup per
+   point — and `GpuBackend.run`, `sampleResident(Sync)` and `gpuSampleOn`
+   all go through it, so the viewer's fills (`F.grid`, `View3D` grids, the
+   `Sampler`) are cooperative without knowing. A `ResidentProvider`
+   supplies a program with the RESIDENT values of such a net on the
+   dispatch grid: `ProgramBuilder.scalar` / `vector` ask it where they used
+   to sample on the CPU (extra read-only bindings 2, 3, … carried in
+   `GpuProgram.bindings`), so an expression over a cooperative net
+   (`log10 loss`) reads the net's grid, and the net's GRADIENT — whose
+   autodiff program has weight-shaped adjoints (145 k floats) and fits no
+   workgroup — is taken as CENTRAL DIFFERENCES of the resident values over
+   one grid spacing, one-sided at the box edges (`difference`; a
+   `NetVectorFieldData` remembers the scalar it is the gradient of,
+   `gradientOf`, so `∇` reaches it either way; within ~7 % of the exact
+   gradient on an 8² grid, fine for streamlines and glyphs). The viewer
+   wires the provider to its resident-grid caches
+   (`apps/viewer/src/residentProvider.ts`: keys by data-object identity;
+   `FusedGeometry.grids`, `View3D.netGrids`); the range statistics of a
+   costly field sample 2 points per axis on the CPU before the GPU
+   reduction (24² used to be 15 s); the cursor pane shows costly fields as
+   `…` while the pointer moves and evaluates them 250 ms after it rests
+   (25 ms–1 s per CPU evaluation). Verified in Chrome and Safari: the
+   1024-example loss as colour field with isolines at 48² (fill 0.36 s in
+   Chrome, 1.15 s in Safari — its WGSL compiler is ~3× slower on this
+   kernel, to be looked at), descending streamlines and glyphs from the
+   differenced gradient, `log10 loss` over the resident grid, 3D
+   isosurfaces of fast/loss coloured by fast/accuracy at 16³; the ladder
+   holds where the next fill would exceed `FILL_BUDGET_MS`. The MNIST
+   bundle is in `bundles/index.json`. A REMEASURE (`AutoRes.onRemeasure`)
+   now evicts the resident value grids too (`FusedGeometry.redo`,
+   `View3D.redo`: `Cache.takeAll`, the old buffers destroyed after
+   `whenIdle`) and clears the sampler: a frame drawing only the colour
+   field used to find everything cached, never recompute, and leave the
+   ladder at its first rung for any bundle (symbolic2d held at 32² with
+   isolines off; it now reaches 2048², and fast/loss alone 64²).
+
+Known limits: the exact cooperative gradient (below); Safari at 1.5× Chrome's
+per-point cost on this kernel.
+
 ## Implementation (`packages/core/src/nets/`)
 
 * `spec.ts` — zod: `ArrayExprSchema`, `NetSchema` (mutually recursive via
@@ -466,14 +605,22 @@ MLP forward pass by hand, net-backed field checks and values);
 
 ## Next
 
-1. **Big nets on the GPU: the cooperative kernel** (above). Streaming and
-   lazy arrays solved memory; the per-lane serial chain is what remains. Then
-   hoisting of point-independent linear parts (`x·W₁`, `x·D₁ₖ` once per
-   bundle load) as a program rewrite in `displaceProgram`, and the MNIST
-   bundle goes into `index.json`.
-2. The gradient of the MNIST fields does not fit either way (its adjoints
-   are weight-shaped arrays); with the cooperative kernel they become
-   ordinary workgroup-wide contractions.
+1. ~~Big nets on the GPU: the cooperative kernel~~ — built ("As built"
+   above). Left: the Safari gap (1.5× per point after unrolling the tile
+   loops; what remains looks like bounds-checked storage reads), a GPU point
+   evaluation for the cursor pane (a one-point cooperative dispatch read
+   back asynchronously), hoisting's constant folding as a GPU pre-pass for
+   large datasets (0.9 s on the CPU for N = 1024).
+2. **The exact cooperative gradient.** The MNIST gradient's adjoints are
+   weight-shaped (`adjW2 = einsum("ni,nj->ij", h1, g)`, 145 k floats), so
+   the viewer differences the resident values instead. Either fuse the
+   chain `einsum("ij,kij->k", adjW, Dd)` ∘ `einsum("ni,nj->ij", h1, g)`
+   into one 3-operand contraction (`ni,nj,kij->k`: never stores `adjW`,
+   ~3× the forward cost of the layer — the cooperative emitter's
+   contraction-parallel mapping takes a `[K]` output over a large
+   contraction), or apply the distributivity rewrite to every displaced
+   matmul, after which autodiff produces no weight-shaped node (at (1 + K)×
+   the forward MACs).
 3. Emitter: call-site batching (a loop over the extra axes around the inlined
    callee); fusing multi-use elementwise producers (recompute vs store);
    second derivatives of nets within Safari's limit (stream the dataset axis).

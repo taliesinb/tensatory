@@ -25,6 +25,11 @@
     "summary": "A 4-16-3 ReLU MLP trained on iris; validation and training loss / accuracy / per-class loss landscapes around θ* along 2 or 3 random directions (reseed / rescale in Controls)."
   },
   {
+    "file": "mnist-mlp/bundle.json",
+    "name": "MNIST MLP: live PCA landscape",
+    "summary": "The loss-landscape prototype's trained 784-256-256-10 MLP (269,322 parameters) evaluated IN THE BROWSER by the net evaluator: cross-entropy and accuracy on 1024 (or 256) training examples around θ* along the top-3 PCA directions of its SGD trajectory; weights, directions and data as .npz members; the prototype's PyTorch-sampled volume alongside for comparison."
+  },
+  {
     "file": "navier-stokes.json",
     "name": "Navier–Stokes blowup (closed-form pieces)",
     "summary": "The two closed-form pieces of the 2026 finite-time-blowup construction for 3D Navier–Stokes at one snapshot τ: the exact heat-exterior vortex and the leading-order concentrating core."

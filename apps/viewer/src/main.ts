@@ -336,15 +336,16 @@ function rangeOf(f: ScalarUse): [number, number] {
   if (f.data.kind === "symbolic" && (D === 2 || D === 3) && modes.compute === "gpu" && sampler.gpu) {
     // the coarse grid runs on the main thread: 10³ points keep even an exact symbolic curl of a large
     // expression (~1 ms per point) under a second, where core's default 32³ stats grid would freeze the page
-    const coarse = new DenseGrid(D === 2 ? [24, 24] : [10, 10, 10], f.data.box);
+    // a costly (net) field is ~25–100 ms per point on the CPU: 2 per axis, and the GPU (cooperative) reduction follows
+    const coarse = new DenseGrid(costly(f.data) ? new Array<number>(D).fill(2) : D === 2 ? [24, 24] : [10, 10, 10], f.data.box);
     const vals = f.data.sampleOn(coarse);
     r = rangeFrom(f, computeStats(vals), () => { let m = Infinity; for (const v of vals) if (v > 0 && v < m) m = v; return m; });
     rangeCache.set(f.id, r);
     if (!rangePending.has(f.id)) {
       rangePending.add(f.id);
-      const gpu = sampler.gpu, id = f.id, grid = costly(f.data) ? new DenseGrid([48, 48], f.data.box) : defaultStatsGrid(f.data.box);
+      const gpu = sampler.gpu, id = f.id, grid = costly(f.data) ? new DenseGrid(D === 2 ? [48, 48] : [12, 12, 12], f.data.box) : defaultStatsGrid(f.data.box);
       const shared = D === 2 ? fused : undefined; // 2D: the fused geometry owns resident grids; 3D: a temporary buffer
-      const resident = shared ? shared.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid);
+      const resident = shared ? shared.grid(gridKey(f, grid), f.data, grid) : sampleResidentSync(gpu, f.data, grid, view3d?.residentProvider());
       gpuStats(gpu, resident).then((st) => {
         if (!Number.isFinite(st.min)) return;
         rangeCache.set(id, rangeFrom(f, st, () => st.posMin));
@@ -478,7 +479,9 @@ function flash(glyph: "up" | "down" | "remeasure", title: string): void {
 }
 for (const a of [autoRes2, autoRes3]) {
   a.onChange = (_tier, dir) => { flash(dir > 0 ? "up" : "down", a.note); state.dirty = true; saveOptsSoon(); };
-  a.onRemeasure = () => { flash("remeasure", "remeasuring"); fused?.redo(); view3d?.redo(); isoCache = undefined; state.dirty = true; };
+  // a remeasure recomputes the rung's whole settled work: geometry, resident grids, and the sampler's values (the
+  // non-fused modes draw from those)
+  a.onRemeasure = () => { flash("remeasure", "remeasuring"); fused?.redo(); view3d?.redo(); sampler.clear(); isoCache = undefined; state.dirty = true; };
 }
 const MB = 2 ** 20;
 /** the memory cap (MB), global: `tensatory.memcap`, ?memcap= */
@@ -1208,18 +1211,29 @@ function placeCursorPane(): void {
   pane.style.bottom = `${12 + infoH}px`;
 }
 function hideCursor(): void {
+  if (cursorRest !== undefined) { clearTimeout(cursorRest); cursorRest = undefined; }
   $("cursorPane").style.display = "none";
   for (const pip of document.querySelectorAll<HTMLElement>("#info .pip")) pip.style.display = "none";
 }
-function showCursor(x: number, y: number): void {
+/**
+ * A costly (net) field is 25 ms to a second per CPU evaluation: while the pointer moves such fields show `…` and are
+ * evaluated once it has rested (`rested`), so the pane never stalls a mouse move.
+ */
+let cursorRest: ReturnType<typeof setTimeout> | undefined;
+const CURSOR_REST_MS = 250;
+function showCursor(x: number, y: number, rested = false): void {
   const b = state.bundle;
   if (!b || !viewBox.contains([x, y], 1e-12)) { hideCursor(); return; }
+  if (cursorRest !== undefined) { clearTimeout(cursorRest); cursorRest = undefined; }
+  let deferred = false;
+  const slow = (fd: ScalarFieldData | VectorFieldData) => { if (rested || !costly(fd)) return false; deferred = true; return true; };
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const lines: string[] = [`<b>${esc(currentSpace()?.name ?? "")}:</b> ${fmt3(x)} ${fmt3(y)}`];
   const seenV = new Set<string>();
   for (const vf of [streamVector(), glyphVector()]) {
     if (!vf || seenV.has(vf.id)) continue;
     seenV.add(vf.id);
+    if (slow(vf.data)) { lines.push(`<b>${esc(vf.name)}:</b> …`); continue; }
     const g = vf.data.value([x, y]); if (g) lines.push(`<b>${esc(vf.name)}:</b> ${g.map(fmt3).join(" ")}`);
   }
   const seen = new Set<string>();
@@ -1227,6 +1241,7 @@ function showCursor(x: number, y: number): void {
   for (const f of uses) {
     if (!f || seen.has(f.id)) continue;
     seen.add(f.id);
+    if (slow(f.data)) { lines.push(`<b>${esc(f.name)}:</b> …`); continue; }
     const v = f.data.value([x, y]);
     if (v !== undefined) lines.push(`<b>${esc(f.name)}:</b> ${f.codomain.unit ? f.codomain.format(v) : fmt3(v)}`);
   }
@@ -1236,12 +1251,14 @@ function showCursor(x: number, y: number): void {
   placeCursorPane();
   for (const pip of document.querySelectorAll<HTMLElement>("#info .pip")) {
     const f = legendUses.get(pip.dataset.pip!);
+    if (f && slow(f.data)) continue; // keeps its last place until the pointer rests
     const v = f?.data.value([x, y]);
     if (!f || v === undefined || Number.isNaN(v)) { pip.style.display = "none"; continue; }
     const [lo, hi] = rangeOf(f);
     pip.style.left = `${(f.codomain.toParam(Math.min(hi, Math.max(lo, v)), lo, hi) * 100).toFixed(2)}%`;
     pip.style.display = "block";
   }
+  if (deferred) cursorRest = setTimeout(() => { cursorRest = undefined; showCursor(x, y, true); }, CURSOR_REST_MS);
 }
 
 /*******************************************************/

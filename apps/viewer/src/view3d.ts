@@ -68,6 +68,8 @@ import {
   type ValueMap,
 } from "@tensatory/gpu";
 import { Cache, uidOf, type MemoryUser } from "./cache";
+import { residentProvider } from "./residentProvider";
+import type { ResidentProvider } from "@tensatory/gpu";
 import type { Recolour } from "./recolour";
 
 export interface Use3 { id: string; data: ScalarFieldData }
@@ -186,6 +188,9 @@ export class View3D implements MemoryUser {
   private readonly grids = new Cache<GpuGrid>(4, (g) => g.destroy(), bufBytes);
   private readonly cpuValues = new Cache<Float64Array>(16, () => {}, (v) => v.byteLength);
   private readonly vgrids = new Cache<GpuGrid>(4, (g) => g.destroy(), bufBytes);
+  /** resident values of nets one lane cannot evaluate (cooperative kernel), read by the programs over them */
+  private readonly netGrids = new Cache<GpuGrid>(6, (g) => g.destroy(), bufBytes);
+  private readonly resident: ResidentProvider;
   private readonly vsampled = new Cache<DenseVectorFieldData>(4, () => {}, (d) => d.samplePoints.sampleCount * d.dimCount * 8);
   // ∝ n²
   private readonly kernels = new Cache<FusedIsosurface>(8, (k) => k.destroy());
@@ -208,11 +213,15 @@ export class View3D implements MemoryUser {
   private readonly ctx2d: CanvasRenderingContext2D;
 
   constructor(private readonly c: View3DContext) {
+    this.resident = residentProvider(c.gpu, this.netGrids);
     this.renderer = new GpuRenderer3D(c.gpu, c.canvas);
     this.ctx2d = c.overlay.getContext("2d")!;
   }
 
-  private get volumeCaches(): Cache<unknown>[] { return [this.grids, this.cpuValues, this.vgrids, this.vsampled] as Cache<unknown>[]; }
+  /** the provider of resident net values (for callers sampling 3D grids outside this view: the range statistics) */
+  residentProvider(): ResidentProvider { return this.resident; }
+
+  private get volumeCaches(): Cache<unknown>[] { return [this.grids, this.cpuValues, this.vgrids, this.netGrids, this.vsampled] as Cache<unknown>[]; }
   private get surfaceCaches(): Cache<unknown>[] { return [this.meshes, this.cpuMeshes, this.faces, this.faceCpu, this.lines3, this.streamSets, this.kernels, this.streamKernels, this.glyphSets, this.glyphCpu, this.glyphKernels, this.glyphSamples] as Cache<unknown>[]; }
 
   clear(): void {
@@ -221,11 +230,14 @@ export class View3D implements MemoryUser {
     this.boxKey = "";
   }
 
-  /** forget that the meshes and face lines are up to date: the next frame computes them again (timing without compiles) */
+  /** forget that the meshes, face lines and the resident value grids are up to date: the next frame computes them
+   *  all again (a remeasure: the rung's whole settled work, timed without compiles; see FusedGeometry.redo) */
   redo(): void {
     for (const m of this.meshes.values()) m.stamp = "";
     for (const f of this.faces.values()) for (const s of f.sets) s.stamp = "";
-    if (this.c.compute() === "cpu") this.cpuMeshes.clear();
+    if (this.c.compute() === "cpu") { this.cpuMeshes.clear(); this.cpuValues.clear(); }
+    const old = [...this.grids.takeAll(), ...this.netGrids.takeAll()];
+    if (old.length) void this.c.gpu.whenIdle().then(() => old.forEach((g) => g.destroy()));
   }
   /** bytes per cache (debugging) */
   debug(): Record<string, string> {
@@ -238,7 +250,7 @@ export class View3D implements MemoryUser {
   trim(bytes: number): number {
     let freed = 0;
     // biggest, least essential first: CPU meshes and face lines are cheap to rebuild, value grids are not
-    for (const c of [this.cpuMeshes, this.faceCpu, this.glyphCpu, this.faces, this.meshes, this.streamSets, this.glyphSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.grids]) {
+    for (const c of [this.cpuMeshes, this.faceCpu, this.glyphCpu, this.faces, this.meshes, this.streamSets, this.glyphSets, this.lines3, this.vsampled, this.cpuValues, this.vgrids, this.netGrids, this.grids]) {
       if (freed >= bytes) break;
       freed += c.trim(bytes - freed);
     }
@@ -409,7 +421,7 @@ export class View3D implements MemoryUser {
   /** the resident I_V grid, blurred when `metric` is set */
   private volumeGpu(iv: Use3, grid: DenseGrid): { values: GpuGrid; key: string } {
     const gk = gridKey(iv, grid);
-    const values = this.grids.getOr(gk, () => sampleResidentSync(this.c.gpu, iv.data, grid));
+    const values = this.grids.getOr(gk, () => sampleResidentSync(this.c.gpu, iv.data, grid, this.resident));
     const r = this.c.blur();
     if (r === null || r <= 0) return { values, key: gk };
     const bk = `${gk}|blur${r}`;
@@ -442,7 +454,7 @@ export class View3D implements MemoryUser {
       // already resident on this grid (it is the I_V field's blur source, say)? else a capped grid: the colour is
       // interpolated anyway, and a net at 256³ is 16.7 M evaluations (4 s) for a tint
       let g = this.grids.get(gridKey(c, grid));
-      if (!g) { const cg = new DenseGrid(grid.size.map((n) => Math.min(n, View3D.COLOUR_GRID_MAX)), grid.box); g = this.grids.getOr(gridKey(c, cg), () => sampleResidentSync(this.c.gpu, c.data, cg)); }
+      if (!g) { const cg = new DenseGrid(grid.size.map((n) => Math.min(n, View3D.COLOUR_GRID_MAX)), grid.box); g = this.grids.getOr(gridKey(c, cg), () => sampleResidentSync(this.c.gpu, c.data, cg, this.resident)); }
       return { src: g, key: `${c.id}#${uidOf(g)}` };
     }
     return { src: c.data, key: c.id };
@@ -600,7 +612,7 @@ export class View3D implements MemoryUser {
     if (this.c.compute() !== "gpu") return this.vsampled.getOr(key, () => new DenseVectorFieldData(grid, v.data.sampleOn(grid)));
     if (!this.vreading.has(key)) {
       this.vreading.add(key);
-      const vectors = this.vgrids.getOr(`vec:${key}`, () => sampleResidentSync(this.c.gpu, v.data, grid));
+      const vectors = this.vgrids.getOr(`vec:${key}`, () => sampleResidentSync(this.c.gpu, v.data, grid, this.resident));
       void readGrid(this.c.gpu, vectors).then((f32) => {
         this.vsampled.set(key, new DenseVectorFieldData(grid, Float64Array.from(f32)));
         this.c.invalidate();
@@ -632,7 +644,7 @@ export class View3D implements MemoryUser {
         plan = c.plan(key, field, { count: o.count, mode: o.mode, ...iopts }); seeds = plan.seeds;
       }
       if (gpu) {
-        const vectors = this.vgrids.getOr(`vec:${gridKey(v, vgrid)}`, () => sampleResidentSync(c.gpu, v.data, vgrid));
+        const vectors = this.vgrids.getOr(`vec:${gridKey(v, vgrid)}`, () => sampleResidentSync(c.gpu, v.data, vgrid, this.resident));
         const kernel = this.streamKernels.getOr(key, () => fusedStreamlines3(c.gpu, vectors, seeds!, iopts, scc.src));
         segs = allocSegments3(c.gpu, kernel.capacity, true);
         kernel.dispatch(segs);

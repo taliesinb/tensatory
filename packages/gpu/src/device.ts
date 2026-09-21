@@ -1,6 +1,7 @@
 // WebGPU device acquisition (browser `navigator.gpu`, or Dawn's node bindings
 // from the optional `webgpu` package) and program execution.
 
+import { setCoopWorkgroupBytes } from "./coop";
 import type { GpuProgram } from "./program";
 
 export type BufferRole = "r" | "rw";
@@ -21,6 +22,9 @@ export interface Kernel {
   /** complete WGSL with an entry point `main` using @workgroup_size(64) and global_invocation_id.x */
   code: string;
   invocations: number;
+  /** COOPERATIVE kernels: dispatch this many workgroups instead of ceil(invocations / 64); the kernel declares its own
+   *  @workgroup_size and indexes by workgroup_id / local_invocation_id (one workgroup per grid point) */
+  workgroups?: number;
   buffers: KernelBuffer[];
 }
 export interface KernelResult {
@@ -28,6 +32,30 @@ export interface KernelResult {
   read: ArrayBuffer[];
   /** kept buffers, in binding order of those marked `keep` */
   kept: GPUBuffer[];
+}
+
+/**
+ * Multiply-adds per cooperative dispatch: a chunk of points small enough for one dispatch to stay far below the GPU
+ * watchdog and for the resolution controller to time fills (~30 ms at the measured ~4·10¹¹ MAC/s).
+ */
+export const COOP_CHUNK_WORK = 1e10;
+
+/**
+ * The dispatches that run a sampling program with `out` and `data` already created (bound at 0 and 1, resident
+ * buffers the program reads after): ONE for an ordinary kernel; for a COOPERATIVE program (one workgroup per point)
+ * chunks of points bounded by COOP_CHUNK_WORK, each with its own `params` = [first point] at binding 2.
+ */
+export function programKernels(program: GpuProgram, out: KernelBuffer, data: KernelBuffer): Kernel[] {
+  const extra: KernelBuffer[] = (program.bindings ?? []).map((buffer) => ({ role: "r", buffer }));
+  const c = program.cooperative;
+  if (!c) return [{ code: program.code, invocations: program.sampleCount, buffers: [out, data, ...extra] }];
+  const per = Math.max(1, Math.min(program.sampleCount, Math.floor(COOP_CHUNK_WORK / Math.max(1, c.work))));
+  const kernels: Kernel[] = [];
+  for (let from = 0; from < program.sampleCount; from += per) {
+    const n = Math.min(per, program.sampleCount - from);
+    kernels.push({ code: program.code, invocations: n * c.workgroupSize, workgroups: n, buffers: [out, data, { role: "r", data: new Uint32Array([from]) }, ...extra] });
+  }
+  return kernels;
 }
 
 /** usage flags for buffers that later passes read (compute storage, render storage/vertex) */
@@ -92,8 +120,10 @@ export class GpuBackend {
     // resident meshes / segment sets can exceed the 128 MB default binding size: ask for what the adapter offers (up to 2 GB)
     const lim = adapter.limits, want = (v: number, dflt: number) => Math.min(Math.max(v, dflt), 2 ** 31);
     let device: GPUDevice;
-    try { device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: want(lim.maxStorageBufferBindingSize, 134217728), maxBufferSize: want(lim.maxBufferSize, 268435456) } }); }
+    // cooperative net kernels hold their activation tiles in workgroup memory: 16 KB by default, 32 KB on Apple GPUs
+    try { device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: want(lim.maxStorageBufferBindingSize, 134217728), maxBufferSize: want(lim.maxBufferSize, 268435456), maxComputeWorkgroupStorageSize: Math.max(lim.maxComputeWorkgroupStorageSize, 16384) } }); }
     catch { device = await adapter.requestDevice(); }
+    setCoopWorkgroupBytes(device.limits.maxComputeWorkgroupStorageSize);
     device.addEventListener?.("uncapturederror", (e) => console.error("WebGPU:", (e as GPUUncapturedErrorEvent).error.message));
     const info = adapter.info;
     return new GpuBackend(gpu, adapter, device, [info?.vendor, info?.architecture, info?.device].filter(Boolean).join(" "));
@@ -170,8 +200,8 @@ export class GpuBackend {
     if (!code.includes(sig)) return code;
     return code.replace(sig, "fn main(@builtin(global_invocation_id) gid_: vec3<u32>, @builtin(num_workgroups) nwg_: vec3<u32>) {\n  let id = vec3<u32>(gid_.x + gid_.y * nwg_.x * 64u, 0u, 0u);");
   }
-  private groups(invocations: number): [number, number] {
-    const wg = Math.max(1, Math.ceil(invocations / 64)), x = Math.min(wg, this.maxGroups);
+  private groups(kernel: Kernel): [number, number] {
+    const wg = Math.max(1, kernel.workgroups ?? Math.ceil(kernel.invocations / 64)), x = Math.min(wg, this.maxGroups);
     return [x, Math.ceil(wg / x)];
   }
 
@@ -270,7 +300,7 @@ export class GpuBackend {
     const pass = enc.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(...this.groups(kernel.invocations));
+    pass.dispatchWorkgroups(...this.groups(kernel));
     pass.end();
     for (const r of reads) if (r) enc.copyBufferToBuffer(gpuBuffers[r.i]!.buf, 0, r.buf, 0, gpuBuffers[r.i]!.size);
     dev.queue.submit([enc.finish()]);
@@ -309,7 +339,7 @@ export class GpuBackend {
       return { buf, own: true };
     });
     const bindGroup = dev.createBindGroup({ layout: this.layoutFor(roles), entries: gpuBuffers.map(({ buf }, binding) => ({ binding, resource: { buffer: buf } })) });
-    const groups = this.groups(kernel.invocations);
+    const groups = this.groups(kernel);
     const run = (pipeline: GPUComputePipeline) => {
       const enc = dev.createCommandEncoder();
       const pass = enc.beginComputePass();
@@ -330,15 +360,24 @@ export class GpuBackend {
     return kept;
   }
 
-  /** run a sampling program and read the result back */
+  /** run a sampling program (in chunks when cooperative) and read the result back */
   async run(program: GpuProgram): Promise<Float32Array> {
+    const dev = this.device;
     const n = program.sampleCount * program.channels;
-    const { read: [out] } = await this.runKernel({
-      code: program.code,
-      invocations: program.sampleCount,
-      buffers: [{ role: "rw", size: n * 4, readback: true }, { role: "r", data: program.data }],
-    });
-    return new Float32Array(out!, 0, n);
+    const out = dev.createBuffer({ size: Math.max(16, n * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const data = dev.createBuffer({ size: Math.max(16, program.data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(data, 0, program.data as unknown as BufferSource);
+    try {
+      const kernels = programKernels(program, { role: "rw", buffer: out }, { role: "r", buffer: data });
+      let read: ArrayBuffer | undefined;
+      for (let i = 0; i < kernels.length; i++) {
+        const k = kernels[i]!;
+        if (i === kernels.length - 1) k.buffers[0] = { ...k.buffers[0]!, readback: true };
+        const r = await this.runKernel(k);
+        if (r.read.length) read = r.read[0];
+      }
+      return new Float32Array(read!, 0, n);
+    } finally { out.destroy(); data.destroy(); }
   }
 
   /** release the device (call at the end of a test run; Dawn dislikes being torn down implicitly) */

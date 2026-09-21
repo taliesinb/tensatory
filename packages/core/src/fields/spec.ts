@@ -22,7 +22,8 @@ import { checkNamespaces, normalizeScalar, normalizeVector, type NameEnv } from 
 import { SymbolicScalarSchema, SymbolicVectorSchema } from "../symbolic/spec";
 import { NetScalarFieldData, NetVectorFieldData, fieldProgram, type NetField } from "../nets/fieldData";
 import type { Val } from "../nets/ops";
-import { compileNet, type ProgramResolver } from "../nets/program";
+import { hoistProgram } from "../nets/hoist";
+import { compileNet, type Program, type ProgramResolver } from "../nets/program";
 import { inferNetField } from "../nets/shapes";
 import { NetScalarFieldDataObject, NetVectorFieldDataObject } from "../nets/spec";
 import { CodomainSchema } from "./codomain";
@@ -152,7 +153,11 @@ function netField(spec: NetScalarFieldDataSpec | NetVectorFieldDataSpec, dimCoun
     const p = [...path, "arrays", n];
     arrays.set(n, { arr: buildAnyArray(a, p, resolver.arrays), rank: anyShape(a, p, resolver.arrays).length });
   }
-  return { program: fieldProgram(base, spec.inputs, arrays, dimCount, path), output: spec.output, nets };
+  const program = fieldProgram(base, spec.inputs, arrays, dimCount, path);
+  // hoisting (point-independent contractions folded, nets/hoist.ts) is lazy: it evaluates the folded constants,
+  // which for a large dataset is real work, and only a field that is actually evaluated pays it
+  let h: Program | undefined;
+  return { get program() { return (h ??= hoistProgram(program, nets)); }, output: spec.output, nets };
 }
 
 function resolvePoint(spec: PointSpec, dimCount: number, resolver: FieldResolver, path: string[]): number[] {

@@ -101,7 +101,7 @@ const COMPARE: Record<string, string> = { lt: "<", le: "<=", gt: ">", ge: ">=", 
 const NARY = new Set(["add", "mul", "min", "max", "mean", "rms"]);
 
 /** an array inside the emitted function */
-interface Arr {
+export interface Arr {
   readonly shape: readonly number[];
   /** priv: function-scope array `base[i]`; data: storage `data[base + i]`; lit: a scalar expression (uniform over
    *  the shape); point: the point `p` ([D]); view: one example of a batched priv / data array (streaming);
@@ -121,7 +121,31 @@ interface Arr {
 /** a program the streaming emitter cannot stream (the caller falls back to the batched emission) */
 export class StreamError extends Error {}
 
-const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1);
+/** what `NetEmitter.streamPlan` works out about a program's streamed axis (see `streamed`) */
+export interface StreamPlan {
+  env: Map<string, Arr>;
+  sizeOf: (d: number | string) => number;
+  fail: (why: string) => never;
+  /** the streamed symbolic axis and its extent */
+  S: string; n: number;
+  /** full (symbolic) shape of every name */
+  names: Map<string, Shape>;
+  sPos: (sh: Shape) => number | undefined;
+  sPosOfExpr: (x: ArrayExpr) => number | undefined;
+  concrete: (sh: Shape) => number[];
+  /** the needed nodes, in order */
+  nodes: readonly { name: string; expr: ArrayExpr }[];
+  batched: ReadonlySet<string>;
+  kind: ReadonlyMap<string, "batched" | "boundary" | "plain">;
+  /** number of loop levels */
+  loops: number;
+  keep: ReadonlySet<string>;
+  plainAt: (k: number) => { name: string; expr: ArrayExpr }[];
+  bodyOf: (L: number) => { boundaries: { name: string; expr: ArrayExpr }[]; body: Set<string> };
+  wantedNames: string[];
+}
+
+export const size = (shape: readonly number[]) => shape.reduce((a, b) => a * b, 1);
 
 /**
  * Arrays at least this large whose operands are all STABLE (storage data, literals, the point, other lazy arrays —
@@ -133,35 +157,35 @@ export const LAZY_MIN_FLOATS = 512;
 const stable = (a: Arr): boolean => a.kind === "data" || a.kind === "lit" || a.kind === "point" || a.kind === "expr";
 /** most summed elements an einsum unrolls into a lazy element expression (a displacement sums K ≤ 8 directions) */
 const LAZY_MAX_SUMMED = 8;
-const strides = (shape: readonly number[]): number[] => { const s = new Array<number>(shape.length); for (let d = shape.length - 1, acc = 1; d >= 0; d--) { s[d] = acc; acc *= shape[d]!; } return s; };
+export const strides = (shape: readonly number[]): number[] => { const s = new Array<number>(shape.length); for (let d = shape.length - 1, acc = 1; d >= 0; d--) { s[d] = acc; acc *= shape[d]!; } return s; };
 const dims = (shape: Shape, what: string): number[] => shape.map((d) => { if (typeof d !== "number") throw new Error(`${what}: unresolved symbolic size "${d}"`); return d; });
 
-class NetEmitter {
+export class NetEmitter {
   readonly lines: string[] = [];
   floats = 0;
   /** estimated per-point work: elements written by fills plus multiply-adds of contractions, times the streamed N */
   work = 0;
-  private scale = 1;
-  private n = 0;
+  protected scale = 1;
+  protected n = 0;
 
-  constructor(private readonly ctx: NetEmitContext, private readonly nets: ProgramResolver) {}
+  constructor(protected readonly ctx: NetEmitContext, protected readonly nets: ProgramResolver) {}
 
-  private fresh(prefix: string): string { return `${prefix}${this.n++}`; }
+  protected fresh(prefix: string): string { return `${prefix}${this.n++}`; }
 
   /** a loop bound the shader compiler cannot see through (so it does not unroll the loop nests: compile time) */
-  private bound(n: number): string { return !OPAQUE_BOUNDS || n <= 2 ? String(n) : `nb_(${n})`; }
+  protected bound(n: number): string { return !OPAQUE_BOUNDS || n <= 2 ? String(n) : `nb_(${n})`; }
 
   /** function-scope arrays whose values are dead, by element count: reused before anything new is declared */
-  private readonly free = new Map<number, string[]>();
+  protected readonly free = new Map<number, string[]>();
   /** arrays allocated while emitting the current node (freed at its end unless they became the node's value) */
-  private scratch: string[] = [];
+  protected scratch: string[] = [];
   /** live node names per array base (aliases such as reshape share a base) */
-  private readonly owners = new Map<string, Set<string>>();
+  protected readonly owners = new Map<string, Set<string>>();
 
   /** a function-scope array, reusing a dead one of the same size when there is one (private memory is the GPU's
    *  scarce resource here: every float a thread holds costs occupancy) */
-  private readonly sizes = new Map<string, number>();
-  private alloc(shape: readonly number[]): Arr {
+  protected readonly sizes = new Map<string, number>();
+  protected alloc(shape: readonly number[]): Arr {
     const n = Math.max(1, size(shape));
     // best fit: the smallest dead array that holds n floats (a larger one wastes nothing — it is already declared)
     let name: string | undefined;
@@ -172,13 +196,23 @@ class NetEmitter {
       name = this.fresh("a");
       this.floats += n;
       this.sizes.set(name, n);
-      this.lines.push(`  var ${name}: array<f32, ${n}>;`);
+      this.declare(name, n);
     }
     this.scratch.push(name);
     return { shape, kind: "priv", base: name };
   }
 
-  private release(base: string): void {
+  /** declare a fresh array of n floats (function scope here; the cooperative emitter puts them in workgroup memory) */
+  protected declare(name: string, n: number): void { this.lines.push(`  var ${name}: array<f32, ${n}>;`); }
+
+  /** the end of a streamed loop body: arrays declared inside it (not in `declared`) are block-scoped and gone */
+  protected endLoopScope(declared: ReadonlySet<string>): void {
+    for (const [sz, pool] of this.free) this.free.set(sz, pool.filter((b) => declared.has(b)));
+    for (const base of [...this.owners.keys()]) if (!declared.has(base)) this.owners.delete(base);
+    for (const nm of [...this.sizes.keys()]) if (!declared.has(nm)) this.sizes.delete(nm);
+  }
+
+  protected release(base: string): void {
     const n = this.sizes.get(base);
     if (n === undefined) return;
     const pool = this.free.get(n) ?? this.free.set(n, []).get(n)!;
@@ -186,7 +220,7 @@ class NetEmitter {
   }
 
   /** flat index expression of `idx` (one string per axis) in `shape` */
-  private flat(shape: readonly number[], idx: readonly string[]): string {
+  protected flat(shape: readonly number[], idx: readonly string[]): string {
     const st = strides(shape);
     const paren = (i: string) => (/^[A-Za-z_][A-Za-z_0-9]*$|^\d+$/.test(i) ? i : `(${i})`);
     const terms = idx.map((i, d) => (shape[d] === 1 ? null : st[d] === 1 ? paren(i) : `${paren(i)} * ${st[d]}`)).filter((t): t is string => t !== null);
@@ -210,13 +244,13 @@ class NetEmitter {
   }
 
   /** read `a` broadcast against an output of rank `outIdx.length` (numpy right alignment; size-1 axes index 0) */
-  private readB(a: Arr, outIdx: readonly string[]): string {
+  protected readB(a: Arr, outIdx: readonly string[]): string {
     const off = outIdx.length - a.shape.length;
     return this.read(a, a.shape.map((s, d) => (s === 1 ? "0" : outIdx[off + d]!)));
   }
 
   /** nested loops over `shape`; `body` receives the index variables */
-  private loops(shape: readonly number[], body: (idx: string[]) => void): void {
+  protected loops(shape: readonly number[], body: (idx: string[]) => void): void {
     const idx: string[] = [];
     const open = (d: number) => {
       if (d === shape.length) { body(idx); return; }
@@ -231,7 +265,7 @@ class NetEmitter {
   }
 
   /** write `expr(idx)` into every element of a new array of `shape` */
-  private fill(shape: readonly number[], expr: (idx: string[]) => string): Arr {
+  protected fill(shape: readonly number[], expr: (idx: string[]) => string): Arr {
     this.work += this.scale * size(shape);
     const out = this.alloc(shape);
     this.loops(shape, (idx) => this.lines.push(`  ${this.read(out, idx)} = ${expr(idx)};`));
@@ -239,7 +273,7 @@ class NetEmitter {
   }
 
   /** a contiguous copy of `a` in a function-scope array (for aliasing ops on literals / the point) */
-  private materialize(a: Arr): Arr {
+  protected materialize(a: Arr): Arr {
     if (a.kind === "priv" || a.kind === "data") return a;
     return this.fill(a.shape, (idx) => this.read(a, idx));
   }
@@ -255,7 +289,7 @@ class NetEmitter {
   }
 
   /** bind a program's inputs and constants: the starting environment and the concrete symbolic sizes */
-  private bindEnv(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string): { env: Map<string, Arr>; sizeOf: (d: number | string) => number; sizes: Map<string, number> } {
+  protected bindEnv(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string): { env: Map<string, Arr>; sizeOf: (d: number | string) => number; sizes: Map<string, number> } {
     const env = new Map<string, Arr>();
     const sizes = new Map<string, number>();
     const bind = (name: string, actual: readonly number[], declared: Shape) => {
@@ -289,7 +323,7 @@ class NetEmitter {
    * an inlined call): names in `keep` are never released (outputs, values a later phase reads). `compute` overrides
    * how a node's value is produced (the streaming emitter's per-example / accumulating nodes).
    */
-  private emitNodes(nodes: readonly { name: string; expr: ArrayExpr }[], env: Map<string, Arr>, sizeOf: (d: number | string) => number, path: string, keep: ReadonlySet<string>, manage: boolean, compute?: (node: { name: string; expr: ArrayExpr }, env: Map<string, Arr>) => Arr): void {
+  protected emitNodes(nodes: readonly { name: string; expr: ArrayExpr }[], env: Map<string, Arr>, sizeOf: (d: number | string) => number, path: string, keep: ReadonlySet<string>, manage: boolean, compute?: (node: { name: string; expr: ArrayExpr }, env: Map<string, Arr>) => Arr): void {
     // liveness: the last node that reads each name; outputs and everything a nested (inlined) call produces live on
     const lastUse = new Map<string, number>();
     nodes.forEach((node, i) => { for (const dep of exprNames(node.expr)) lastUse.set(dep, i); });
@@ -342,7 +376,9 @@ class NetEmitter {
    * accumulated result belongs to a later loop, which recomputes the per-example chain it needs (the gradient of a
    * mean needs no second pass thanks to the fold above). Only the nodes `wanted` outputs need are emitted.
    */
-  streamed(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string, wanted: readonly string[]): Record<string, Arr> {
+  /** the analysis behind `streamed` (and the cooperative emitter's tiled variant): the streamed axis, every name's
+   *  full shape, the needed nodes classified batched / boundary / plain with their loop levels */
+  protected streamPlan(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string, wanted: readonly string[]): StreamPlan {
     const { env, sizeOf } = this.bindEnv(prog, inputs, path);
     const fail = (why: string): never => { throw new StreamError(`${path}: cannot stream: ${why}`); };
     // the streamed axis: the symbolic size of the largest concrete extent
@@ -359,7 +395,6 @@ class NetEmitter {
     const sPos = (sh: Shape): number | undefined => { const i = sh.indexOf(S); if (i >= 0 && sh.indexOf(S, i + 1) >= 0) fail(`"${S}" appears twice in a shape`); return i < 0 ? undefined : i; };
     const sPosOfExpr = (x: ArrayExpr): number | undefined => (typeof x === "number" ? undefined : typeof x === "string" ? sPos(names.get(x) ?? fail(`unknown name ${x}`)) : x.op === "arg" ? sPos(names.get(x.name)!) : sPos(inferExpr(x, shapeEnv, [path])));
     const concrete = (sh: Shape) => sh.map((d) => sizeOf(d));
-    const rest = (sh: Shape) => { const p = sPos(sh); return concrete(p === undefined ? sh : sh.filter((_, i) => i !== p)); };
     // only what the wanted outputs need
     const byName = new Map(prog.nodes.map((nd) => [nd.name, nd]));
     const needed = new Set<string>();
@@ -385,19 +420,31 @@ class NetEmitter {
     const group = (nm: string) => (kind.get(nm) === "batched" ? `b${lvl.get(nm)}` : `p${avail.get(nm)}`);
     const keep = new Set(wantedNames);
     for (const nd of nodes) for (const d of exprNames(nd.expr)) if (byName.has(d) && needed.has(d) && group(d) !== group(nd.name)) keep.add(d);
-    const hints = (inLoop: boolean) => { const h = new Map<string, readonly number[]>(); for (const [k, sh] of names) h.set(k, inLoop ? rest(sh) : concrete(sh)); return h; };
     const plainAt = (k: number) => nodes.filter((nd) => kind.get(nd.name) === "plain" && avail.get(nd.name) === k);
+    /** the per-example (or per-tile) chain a loop level needs: batched nodes reachable from its boundaries */
+    const bodyOf = (L: number) => {
+      const boundaries = nodes.filter((nd) => kind.get(nd.name) === "boundary" && lvl.get(nd.name) === L);
+      const body = new Set<string>();
+      const grow = (nm: string) => { for (const d of exprNames(byName.get(nm)!.expr)) if (batched.has(d) && byName.has(d) && !body.has(d)) { body.add(d); grow(d); } };
+      boundaries.forEach((b) => grow(b.name));
+      return { boundaries, body };
+    };
+    return { env, sizeOf, fail, S, n, names, sPos, sPosOfExpr, concrete, nodes, batched, kind, loops, keep, plainAt, bodyOf, wantedNames };
+  }
+
+  streamed(prog: Program, inputs: ReadonlyMap<string, Arr>, path: string, wanted: readonly string[]): Record<string, Arr> {
+    const P = this.streamPlan(prog, inputs, path, wanted);
+    const { env, sizeOf, fail, S, n, names, sPos, sPosOfExpr, concrete, nodes, keep, plainAt } = P;
+    const rest = (sh: Shape) => { const p = sPos(sh); return concrete(p === undefined ? sh : sh.filter((_, i) => i !== p)); };
+    const hints = (inLoop: boolean) => { const h = new Map<string, readonly number[]>(); for (const [k, sh] of names) h.set(k, inLoop ? rest(sh) : concrete(sh)); return h; };
+    const loops = P.loops;
 
     this.shapeHints = hints(false);
     this.emitNodes(plainAt(-1), env, sizeOf, path, keep, !this.inCall);
     for (const nd of plainAt(-1)) if (sPos(names.get(nd.name)!) !== undefined && env.get(nd.name)!.kind !== "lit") fail(`"${nd.name}" has the streamed axis but depends on no batched value and is not uniform`);
 
     for (let L = 0; L < loops; L++) {
-      const boundaries = nodes.filter((nd) => kind.get(nd.name) === "boundary" && lvl.get(nd.name) === L);
-      // the per-example chain this loop needs: batched nodes reachable from its boundaries through batched names
-      const body = new Set<string>();
-      const grow = (nm: string) => { for (const d of exprNames(byName.get(nm)!.expr)) if (batched.has(d) && byName.has(d) && !body.has(d)) { body.add(d); grow(d); } };
-      boundaries.forEach((b) => grow(b.name));
+      const { boundaries, body } = P.bodyOf(L);
       // accumulators
       const accs = new Map<string, { acc: Arr; fn: string }>();
       for (const b of boundaries) {
@@ -438,10 +485,7 @@ class NetEmitter {
       });
       this.lines.push(`  }`);
       this.scale = outerScale;
-      // loop-scoped arrays are gone
-      for (const [sz, pool] of this.free) this.free.set(sz, pool.filter((b) => declared.has(b)));
-      for (const base of [...this.owners.keys()]) if (!declared.has(base)) this.owners.delete(base);
-      for (const nm of [...this.sizes.keys()]) if (!declared.has(nm)) this.sizes.delete(nm);
+      this.endLoopScope(declared);
       this.shapeHints = hints(false);
       for (const [nm, { acc, fn }] of accs) {
         if (fn === "mean") this.loops(acc.shape, (i) => this.lines.push(`  ${this.read(acc, i)} = ${this.read(acc, i)} / ${f32(n)};`));
@@ -454,7 +498,7 @@ class NetEmitter {
   }
 
   /** one example of a batched array (streaming): the loop variable indexes the streamed axis */
-  private view(a: Arr, sAxis: number, sVar: string): Arr {
+  protected view(a: Arr, sAxis: number, sVar: string): Arr {
     const shape = a.shape.filter((_, i) => i !== sAxis);
     if (a.kind === "lit") return { ...a, shape };
     if (a.kind === "priv" || a.kind === "data") return { kind: "view", base: a.base, shape, full: a.shape, sAxis, sVar, store: a.kind };
@@ -463,7 +507,7 @@ class NetEmitter {
   }
 
   /** `v` as `shape` (an alias when contiguous and of the same size) */
-  private reconcile(v: Arr, shape: readonly number[], what: string): Arr {
+  protected reconcile(v: Arr, shape: readonly number[], what: string): Arr {
     if (v.shape.length === shape.length && v.shape.every((d, i) => d === shape[i])) return v;
     if (size(v.shape) !== size(shape)) throw new StreamError(`"${what}": per-example shape [${v.shape}] is not [${shape}]`);
     if (v.kind === "lit") return { ...v, shape };
@@ -475,7 +519,7 @@ class NetEmitter {
    * arguments shift past it, einsum letters lose it. `fn` set means the node consumes the axis — the returned
    * expression is this example's contribution, to be accumulated with `fn` across the loop.
    */
-  private perExample(e: ArrayExpr, sPosOf: (x: ArrayExpr) => number | undefined, S: string, n: number, path: string): { expr: ArrayExpr; fn?: ArrayReduceFn } {
+  protected perExample(e: ArrayExpr, sPosOf: (x: ArrayExpr) => number | undefined, S: string, n: number, path: string): { expr: ArrayExpr; fn?: ArrayReduceFn } {
     const fail = (why: string): never => { throw new StreamError(`${path}: cannot stream: ${why}`); };
     if (typeof e !== "object") return { expr: e };
     const rankOf = (x: ArrayExpr): number => (typeof x === "number" ? 0 : typeof x === "string" || x.op === "arg" ? (this.shapeHints.get(typeof x === "string" ? x : (x as { name: string }).name)?.length ?? 0) + (sPosOf(x) === undefined ? 0 : 1) : fail("rank of a nested expression"));
@@ -589,12 +633,12 @@ class NetEmitter {
     }
   }
 
-  private inCall = false;
+  protected inCall = false;
   /** shapes of names that are not in the environment (streaming: a batched name inside a folded `mul(x, 0)`) */
   shapeHints: ReadonlyMap<string, readonly number[]> = new Map();
 
   /** shape of an expression whose operands are in `env` (symbolic sizes resolved) */
-  private shapeOf(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number): number[] {
+  protected shapeOf(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number): number[] {
     const names = new Map<string, Shape>();
     for (const [k, sh] of this.shapeHints) names.set(k, [...sh]);
     for (const [k, a] of env) names.set(k, a.shape);
@@ -746,7 +790,7 @@ class NetEmitter {
    * `relu(add(matmul, b))` or an autodiff mask `where(gt(y, 0), g, 0)` materializes nothing but its result.
    * Non-elementwise operands are emitted first (materialized); the tree's shape is inferred once.
    */
-  private elementwise(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number, path: string): Arr {
+  protected elementwise(e: ArrayExpr, env: ReadonlyMap<string, Arr>, sizeOf: (d: number | string) => number, path: string): Arr {
     const shape = this.shapeOf(e, env, sizeOf);
     // materialize non-elementwise / non-leaf operands once, keyed by object identity
     const leaves = new Map<object, Arr>();
@@ -815,7 +859,7 @@ class NetEmitter {
   }
 
   /** generalized einsum over declared axes (no batch here); size-1 letters broadcast */
-  private einsum(terms: string[], out: string, vals: Arr[], shape: number[]): Arr {
+  protected einsum(terms: string[], out: string, vals: Arr[], shape: number[]): Arr {
     const sizes = new Map<string, number>();
     terms.forEach((t, k) => [...t].forEach((l, d) => { const s = vals[k]!.shape[d]!; const prev = sizes.get(l); if (prev === undefined || prev === 1) sizes.set(l, s); }));
     const summed = [...new Set(terms.join(""))].filter((l) => !out.includes(l));
@@ -865,7 +909,7 @@ class NetEmitter {
     return res;
   }
 
-  private reduce(v: Arr, fn: ArrayReduceFn, axes: ReadonlySet<number>, keepDims: boolean, shape: number[]): Arr {
+  protected reduce(v: Arr, fn: ArrayReduceFn, axes: ReadonlySet<number>, keepDims: boolean, shape: number[]): Arr {
     const out = this.alloc(shape);
     const kept = v.shape.map((_, d) => d).filter((d) => !axes.has(d));
     const red = [...axes].sort((a, b) => a - b);
@@ -969,13 +1013,13 @@ export function fuseElementwise(prog: Program): Program {
 }
 
 /** ops whose output element depends only on the operands' element at the same (broadcast) index */
-function isElementwise(e: ArrayExpr): boolean {
+export function isElementwise(e: ArrayExpr): boolean {
   if (typeof e !== "object") return false;
   const op = e.op;
   return op in UNARY || op in BINARY || op in COMPARE || NARY.has(op) || op === "clamp" || op === "where";
 }
 
-function lookup(name: string, env: ReadonlyMap<string, Arr>, path: string): Arr {
+export function lookup(name: string, env: ReadonlyMap<string, Arr>, path: string): Arr {
   const a = env.get(name);
   if (!a) throw new Error(`${path}: unknown name "${name}"`);
   return a;

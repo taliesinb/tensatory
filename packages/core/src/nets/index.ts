@@ -10,6 +10,7 @@ export {
 export { inferNet, inferExpr, inferNetField, broadcastShapes, fmtShape, noNetResolver } from "./shapes";
 export type { NetSignature, NetResolver, ArrayEnv, Dim, Shape } from "./shapes";
 export { compileNet, evaluate, pruneProgram } from "./program";
+export { hoistProgram, FOLD_MAX_ELEMENTS } from "./hoist";
 export { exprNames } from "./shapes";
 export type { Program, ProgramResolver, EvalContext } from "./program";
 export { NetScalarFieldData, NetVectorFieldData, fieldProgram, pointInput, GRADIENT_VALUE_OUTPUT } from "./fieldData";

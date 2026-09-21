@@ -182,7 +182,7 @@ export class NetScalarFieldData extends ScalarFieldData {
   private _gradient: NetVectorFieldData | undefined;
   /** ∇f as a net vector field (one backward pass for all D components) */
   gradient(): NetVectorFieldData {
-    return (this._gradient ??= new NetVectorFieldData(this.dimCount, this.box, gradientProgram(this.field)));
+    return (this._gradient ??= new NetVectorFieldData(this.dimCount, this.box, gradientProgram(this.field), this));
   }
 
   private readonly derivatives = new Map<number, ScalarFieldData>();
@@ -200,7 +200,11 @@ export class NetVectorFieldData extends VectorFieldData {
   readonly fn: VectorFn;
   override get costly(): boolean { return true; }
 
-  constructor(readonly dimCount: number, readonly box: Box, readonly field: NetField) {
+  /**
+   * @param gradientOf the scalar net field this is the gradient of (`NetScalarFieldData.gradient()`): a consumer that
+   *   cannot evaluate the autodiff program may fall back to differences of the scalar's values
+   */
+  constructor(readonly dimCount: number, readonly box: Box, readonly field: NetField, readonly gradientOf?: NetScalarFieldData) {
     super();
     this.fn = (p, _pos, out) => {
       const v = evalPoints(field, new NdArray([1, dimCount], Float64Array.from(p as ArrayLike<number>)));

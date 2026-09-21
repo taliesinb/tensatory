@@ -62,6 +62,10 @@ export class Cache<V> {
 
   clear(): void { for (const k of [...this.map.keys()]) this.delete(k); }
 
+  /** remove every entry WITHOUT disposing; the caller owns the values (to destroy them once the GPU queue is past
+   *  dispatches that still read them) */
+  takeAll(): V[] { const vs = [...this.map.values()].map((e) => e.v); this.map.clear(); this.total = 0; return vs; }
+
   values(): IterableIterator<V> { return [...this.map.values()].map((e) => e.v).values(); }
 
   /**

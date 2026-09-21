@@ -273,11 +273,46 @@ profiling test.
   WORK BUDGET (`NET_MAX_WORK`, 4·10⁶ MAC per point): one lane evaluates the
   whole net per point, latency-bound at ~10⁷ MAC/s, so the MNIST MLP
   (`bundles/mnist-mlp/`, `tools/mnist/export.py`: 269k weights + eval set
-  as `.npz`, CPU-checked against PyTorch to 1e-6) takes ~10 s per dispatch
-  at ANY grid size and is refused by `gpuTranspilable` (→ `costly`, CPU
-  ~110 ms/point); it is NOT in `index.json` until the cooperative kernel
-  (a workgroup per point) exists — `notes/nets.md` "the MNIST MLP
-  experiment".
+  as `.npz`, CPU-checked against PyTorch to 1e-6) took ~10 s per dispatch
+  at ANY grid size and is refused by `gpuTranspilable` (→ `costly` for the
+  viewer: small streamline grids, resident colour, no exact isolines). Such
+  nets run in the COOPERATIVE KERNEL (`gpu/src/coop.ts`, `notes/nets.md`
+  "As built"): one workgroup of 256 threads per grid point, arrays in
+  workgroup memory (budget from the device limit, 32 KB on Apple), every
+  element loop strided over the workgroup + a barrier, the dataset axis
+  streamed in TILES of E = 8 / 4 / 2 / 1 examples (`CoopEmitter.tiled` over
+  the shared `NetEmitter.streamPlan`) so a weight is read once per tile —
+  the kernel is memory-bound on the weight stream —, contractions
+  output-parallel with a register tile / plain / contraction-parallel with
+  a tree reduction. Before it, HOISTING (`core/src/nets/hoist.ts`, lazily on
+  every net field's program): a contraction of a constant with a displaced
+  constant distributes into folded constants `A = X·W`, `XD = stack_k X·D_k`
+  plus `einsum(t, XD)`, constant-only nodes fold, dead ones are pruned — the
+  MNIST first layer (75 % of the MACs) leaves the per-point work and the
+  net's input becomes 256 wide. `buildSampleProgram(field, grid, resident?)`
+  returns a cooperative program (`GpuProgram.cooperative`) when
+  `coopCapable(fd)`; `programKernels` chunks it (`COOP_CHUNK_WORK` ≈ 30 ms
+  per dispatch, `Kernel.workgroups`) and `run` / `sampleResident(Sync)` /
+  `gpuSampleOn` all use it, so the viewer's fills are cooperative unchanged.
+  A `ResidentProvider` (viewer `residentProvider.ts` over the resident-grid
+  caches) hands programs the net's resident values (extra bindings) where
+  they used to sample on the CPU: expressions over the net, and its
+  GRADIENT as CENTRAL DIFFERENCES of the grid (`ProgramBuilder.difference`;
+  the autodiff program's weight-shaped adjoints fit no workgroup — the
+  exact cooperative gradient is the next step). 50 µs/point in Chrome
+  (N = 256), 200 (N = 1024); Safari 73 µs/point after the register tile's
+  loops are emitted UNROLLED with scalar accumulators (`setCoopCodeShape`;
+  163 before — measured with `apps/viewer/public/cooptiming.html`, which
+  times the kernel's code shapes per browser; what remains is not the
+  barriers). The bundle is in `index.json`. A REMEASURE of the resolution
+  ladder evicts the resident value grids (`redo()`, `Cache.takeAll`) and the
+  sampler cache, so a colour-field-only frame recomputes and the ladder
+  climbs (it used to hold at the first rung for every bundle). The range statistics of a
+  costly field sample 2 points per axis on the CPU (the GPU reduction
+  follows); the cursor pane shows costly fields as `…` until the pointer
+  rests 250 ms. `core/test/hoist.test.ts`, `gpu/test/coop.test.ts` (iris
+  and MNIST values / gradients vs the CPU, integration), `coop-proto.test.ts`
+  (the step-0 hand-written kernel, `PERF=1`).
 * Vector fields are plain vector-valued functions: pullbacks reparametrize the
   domain only (no pushforward). 1-forms are not distinguished yet.
 * `exactGradient` on a scalar field names a vector field holding gradients

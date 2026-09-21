@@ -37,9 +37,14 @@ describe("MNIST MLP bundle on the GPU", () => {
       expect(r.work, `${id} work`).toBeGreaterThan(NET_MAX_WORK);
       expect(gpuTranspilable(fd), `${id} is left to the CPU path`).toBe(false);
     }
-    // 256 examples × (784·256 + 256·256 + 256·10) multiply-adds, roughly; the 1024-example fields 4× that
-    expect(netFieldWork(b.scalarField("fastLoss2").data as NetScalarFieldData)).toBeGreaterThan(256 * 269_000);
-    expect(netFieldWork(b.scalarField("loss2").data as NetScalarFieldData)).toBeGreaterThan(4 * 256 * 269_000);
+    // the field's program is HOISTED (core nets/hoist.ts): the first layer x·W1(t) is folded into constants, so the
+    // per-point work is 256 examples × (256·256 + 256·10) multiply-adds plus the layer-1 reads — a quarter of the
+    // unhoisted 256 × 269k; the 1024-example fields 4× that. Still far beyond one lane's budget.
+    const work = (id: string) => { const fd = b.scalarField(id).data as NetScalarFieldData; return emitNetField("f", fd.field, { D: fd.dimCount, upload: () => 0, maxWork: Infinity }, [fd.field.output])!.work; };
+    expect(work("fastLoss2")).toBeGreaterThan(256 * 66_000);
+    expect(work("fastLoss2")).toBeLessThan(256 * 269_000 / 2);
+    expect(work("loss2")).toBeGreaterThan(4 * 256 * 66_000);
+    expect(netFieldWork(b.scalarField("loss2").data as NetScalarFieldData)).toBe(Infinity); // refused: netFieldSize reports the budget overrun
   }, 60_000);
 
   it.runIf(process.env.PERF)("PERF: loss / accuracy (256 examples) agree with the CPU evaluator; timing", async () => {

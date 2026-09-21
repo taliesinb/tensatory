@@ -97,8 +97,8 @@ describe("example bundles", () => {
 
   it("summary / details: `info` of bundles, spaces and fields, and index.json mirrors every bundle's name and summary", async () => {
     const index = JSON.parse(readFileSync(join(dir, "index.json"), "utf8")) as { file: string; name?: string; summary?: string }[];
-    // every indexed bundle exists; the heavy ones are deliberately unindexed (the viewer cannot show them yet)
-    expect(index.map((e) => e.file).sort()).toEqual(files.filter((f) => !HEAVY.has(f)).sort());
+    // every bundle is indexed (the MNIST MLP since the cooperative kernel evaluates it live) and every indexed one exists
+    expect(index.map((e) => e.file).sort()).toEqual([...files].sort());
     for (const e of index) {
       const info = infoOfDoc(e.file);
       expect(e.name, `${e.file} name`).toBe(info.name);

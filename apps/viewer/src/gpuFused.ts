@@ -31,6 +31,8 @@ import {
   freshProgress,
 } from "@tensatory/gpu";
 import { Cache, uidOf, type MemoryUser } from "./cache";
+import { residentProvider } from "./residentProvider";
+import type { ResidentProvider } from "@tensatory/gpu";
 
 /** a segment set with its count read back after every dispatch (see `track`) */
 interface Counted { segs: GpuSegments; stamp: string; pending: boolean; count: number; overflow: boolean; recolour?: RecolourProgress }
@@ -44,6 +46,8 @@ export interface FusedInfo { segments: number; capacity: number; overflow: boole
 export class FusedGeometry implements MemoryUser {
   // ∝ n²
   private readonly grids = new Cache<GpuGrid>(24, (g) => g.destroy(), bufBytes);
+  /** resident values of nets one lane cannot evaluate (cooperative kernel), read by programs over them */
+  private readonly resident: ResidentProvider;
   private readonly blurred = new Cache<GpuGrid>(8, (g) => g.destroy(), bufBytes);
   private readonly smoothKernels = new Cache<SmoothedIsolines>(8, (k) => k.destroy()); // own n²-sized scratch (not counted: destroyed with the kernel)
   // ∝ n
@@ -59,7 +63,7 @@ export class FusedGeometry implements MemoryUser {
   info: FusedInfo = { segments: 0, capacity: 0, overflow: false };
 
   /** @param invalidate called when a count readback resized a set: render again */
-  constructor(readonly gpu: GpuBackend, private readonly invalidate: () => void) {}
+  constructor(readonly gpu: GpuBackend, private readonly invalidate: () => void) { this.resident = residentProvider(gpu, this.grids); }
 
   clear(): void {
     for (const c of [this.grids, this.blurred, this.smoothKernels, this.isoKernels, this.isoSets, this.streamKernels, this.uploaded, this.glyphSets, this.glyphKernels] as Cache<unknown>[]) c.clear();
@@ -68,7 +72,17 @@ export class FusedGeometry implements MemoryUser {
   /** call at the start of a frame: the info accumulates over the frame's isoline sets */
   beginFrame(): void { this.info = { segments: 0, capacity: 0, overflow: false }; }
   /** forget that the isoline sets are up to date: the next frame dispatches them again (timing without compiles) */
-  redo(): void { for (const s of this.isoSets.values()) s.stamp = ""; }
+  /**
+   * Forget that the isoline sets AND the resident value grids are up to date, so the next frame recomputes the rung's
+   * whole settled work (a remeasure for the resolution controller). Without the grids, a frame drawing only the
+   * colour field found everything cached, never recomputed, and the ladder waited forever at its first rung. The old
+   * grids are destroyed once every deferred dispatch that may read them has been enqueued.
+   */
+  redo(): void {
+    for (const s of this.isoSets.values()) s.stamp = "";
+    const old = [...this.grids.takeAll(), ...this.blurred.takeAll()];
+    if (old.length) void this.gpu.whenIdle().then(() => old.forEach((g) => g.destroy()));
+  }
 
   debug(): Record<string, string> {
     const e = { grids: this.grids, blurred: this.blurred, isoSets: this.isoSets, streamKernels: this.streamKernels, uploaded: this.uploaded };
@@ -88,7 +102,7 @@ export class FusedGeometry implements MemoryUser {
 
   /** resident samples of `field` on `grid` (enqueued on first use) */
   grid(key: string, field: ScalarFieldData | VectorFieldData, grid: DenseGrid): GpuGrid {
-    return this.grids.getOr(key, () => sampleResidentSync(this.gpu, field, grid));
+    return this.grids.getOr(key, () => sampleResidentSync(this.gpu, field, grid, this.resident));
   }
   /** an already-resident grid, or undefined (no sampling) */
   gridIfResident(key: string): GpuGrid | undefined { return this.grids.get(key); }

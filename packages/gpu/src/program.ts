@@ -26,8 +26,16 @@ import {
   type ScalarFieldData,
   type VectorFieldData,
 } from "@tensatory/core";
+import { COOP_WG, coopCapable, coopWorkgroupFloats, emitCoopKernel } from "./coop";
 import { emitNetField, gpuTranspilable } from "./nets";
 import { FunctionEmitter, GRID_FLOATS, OPAQUE_BOUND_WGSL, PRELUDE, bakedGrid, expandGrad, f32, gridWgsl, packGrid, vecType, type ArgBindings, type GridRef } from "./wgsl";
+
+/**
+ * Supplies a RESIDENT buffer of a field's values on the dispatch grid (`channels` per point), filled by a dispatch
+ * that is queue-ordered before the program reading it — the viewer's grid cache (`sampleResidentSync` of the field,
+ * a cooperative kernel for a big net). Undefined = not available: the builder samples on the CPU instead.
+ */
+export type ResidentProvider = (fd: ScalarFieldData | VectorFieldData, grid: DenseGrid) => GPUBuffer | undefined;
 
 export interface GpuProgram {
   code: string;
@@ -37,6 +45,11 @@ export interface GpuProgram {
   /** number of output values per grid point (1 for scalars, D for vectors) */
   channels: number;
   sampleCount: number;
+  /** resident buffers the program reads (`ResidentProvider`), bound read-only at bindings 2, 3, … in this order */
+  bindings?: GPUBuffer[];
+  /** a COOPERATIVE program (coop.ts): dispatched as one workgroup of `workgroupSize` threads per grid point, in
+   *  chunks — binding 2 is `params: array<u32>` = [first point of the chunk]; absent for ordinary sampling kernels */
+  cooperative?: { workgroupSize: number; work: number; tile: number; floats: number };
 }
 
 const NAN = "nan_()"; // WGSL rejects NaN constants; the prelude builds one at runtime
@@ -52,7 +65,10 @@ export class ProgramBuilder {
   readonly dg: GridRef;
   private readonly dgCode: string;
 
-  constructor(readonly grid: DenseGrid) {
+  /** extra read-only storage buffers (resident grids), binding 2 + i */
+  readonly residentBuffers: GPUBuffer[] = [];
+
+  constructor(readonly grid: DenseGrid, private readonly resident?: ResidentProvider) {
     this.D = grid.dimCount;
     const g = gridWgsl("dg_", "data", 0);
     this.dg = g.ref; this.dgCode = g.code;
@@ -104,6 +120,41 @@ export class ProgramBuilder {
     const G = gridWgsl(`rg${off}_`, "data", off);
     this.fns.push(G.code);
     return this.reader(buf, 0, G.ref, g.grid.equals(this.grid, 1e-12), g.channels, ch);
+  }
+
+  /** the binding name of a resident buffer this program reads */
+  private residentBinding(buf: GPUBuffer): string {
+    let i = this.residentBuffers.indexOf(buf);
+    if (i < 0) { i = this.residentBuffers.length; this.residentBuffers.push(buf); this.fns.push(`@group(0) @binding(${2 + i}) var<storage, read> rb${i}: array<f32>;`); }
+    return `rb${i}`;
+  }
+
+  /** `fn(p, pos) -> f32` reading channel `ch` of a field's RESIDENT values on the dispatch grid (ResidentProvider), or
+   *  undefined when none is supplied: how a cooperative net's values reach every kernel and every derived field */
+  private residentScalar(fd: ScalarFieldData | VectorFieldData, ch: number, channels: number): string | undefined {
+    const buf = this.resident?.(fd, this.grid);
+    if (!buf) return undefined;
+    return this.residentReader({ grid: this.grid, channels }, this.residentBinding(buf), ch);
+  }
+
+  /**
+   * `fn(p, pos) -> f32`: ∂/∂x_d of a reader by CENTRAL DIFFERENCES over one grid spacing (one-sided at the box
+   * edges, interpolated in between). The gradient of a cooperative net whose autodiff program does not fit
+   * workgroup memory (weight-shaped adjoints) is taken from its resident values this way.
+   */
+  private difference(reader: string, d: number): string {
+    const D = this.D, T = vecType(D), G = this.dg;
+    const nm = this.name("dd");
+    const comp = (v: string) => (D === 1 ? v : `${v}[${d}]`);
+    this.fns.push(`fn ${nm}(p: ${T}, pos: i32) -> f32 {
+  let h: f32 = ${G.h(String(d))};
+  var q1: ${T} = p; var q0: ${T} = p;
+  ${comp("q1")} = min(${comp("p")} + h, ${G.b(String(d))}); ${comp("q0")} = max(${comp("p")} - h, ${G.a(String(d))});
+  let w: f32 = ${comp("q1")} - ${comp("q0")};
+  if (w <= 0.0) { return 0.0; }
+  return (${reader}(q1, -1) - ${reader}(q0, -1)) / w;
+}`);
+    return nm;
   }
 
   private reader(buf: string, off: number, G: GridRef, direct: boolean, channels: number, ch: number): string {
@@ -179,6 +230,12 @@ export class ProgramBuilder {
         const target = dims.reduce<ScalarFieldData>((f, d) => f.derivative(d), fd);
         const net = target instanceof NetScalarFieldData ? this.net(target) : undefined;
         if (net) return net;
+        // a net one lane cannot take: its resident values (a cooperative dispatch, via the provider), a first
+        // derivative as central differences of them
+        if (dims.length <= 1) {
+          const r = this.residentScalar(fd, 0, 1);
+          if (r) return dims.length === 0 ? r : this.difference(r, dims[0]!);
+        }
       }
       // fallback: let core evaluate it on the dispatch grid
       const target = dims.reduce<ScalarFieldData>((f, d) => f.derivative(d), fd);
@@ -208,6 +265,16 @@ export class ProgramBuilder {
       if (fd instanceof NetVectorFieldData) {
         const net = this.net(fd);
         if (net) return net;
+        // the gradient of a scalar net whose autodiff program does not fit: differences of the scalar's values
+        if (fd.gradientOf) return this.gradient(fd.gradientOf);
+        const r0 = this.residentScalar(fd, 0, D);
+        if (r0) {
+          const readers = [r0, ...Array.from({ length: D - 1 }, (_, i) => this.residentScalar(fd, i + 1, D)!)];
+          const nm = this.name("rv");
+          const comps = readers.map((r) => `${r}(p, pos)`);
+          this.fns.push(`fn ${nm}(p: ${T}, pos: i32) -> ${T} {\n  return ${D === 1 ? comps[0] : `${T}(${comps.join(", ")})`};\n}`);
+          return nm;
+        }
       }
       // dense (or fallback: sampled by core on the dispatch grid), one reader per channel
       const grid = fd instanceof DenseVectorFieldData ? fd.samplePoints : this.grid;
@@ -301,10 +368,31 @@ ${idx.join("\n")}
 ${write}
 }`;
     const lib = this.library();
-    return { code: `${lib.code}\n\n${main}`, data: lib.data, channels, sampleCount: grid.sampleCount };
+    return { code: `${lib.code}\n\n${main}`, data: lib.data, channels, sampleCount: grid.sampleCount, bindings: this.residentBuffers };
+  }
+
+  /**
+   * The cooperative program sampling a net field on the dispatch grid (one workgroup per point, coop.ts), or
+   * undefined when the net cannot be streamed or does not fit workgroup memory. `outputs` selects the program
+   * outputs written per point (default the field's; a gradient program may write value + gradient).
+   */
+  buildCooperative(fd: NetScalarFieldData | NetVectorFieldData, outputs: string[] = [fd.field.output]): GpuProgram | undefined {
+    const k = emitCoopKernel(fd.field, { D: this.D, upload: (d) => this.upload(d), workgroupFloats: coopWorkgroupFloats() }, outputs, this.dg);
+    if (!k) return undefined;
+    const lib = this.library();
+    return { code: `${lib.code}\n\n${k.code}`, data: lib.data, channels: k.channels, sampleCount: this.grid.sampleCount, cooperative: { workgroupSize: COOP_WG, work: k.work, tile: k.tile, floats: k.floats } };
   }
 }
 
-export function buildSampleProgram(field: ScalarFieldData | VectorFieldData, grid: DenseGrid): GpuProgram {
-  return new ProgramBuilder(grid).build(field);
+/**
+ * The program sampling `field` on `grid`: a COOPERATIVE kernel (one workgroup per point) for a net field one lane
+ * cannot evaluate but a workgroup can (`coopCapable`), else the ordinary per-point kernel — with `resident` supplying
+ * the values of such nets when they are arguments of `field` (or its gradient is wanted).
+ */
+export function buildSampleProgram(field: ScalarFieldData | VectorFieldData, grid: DenseGrid, resident?: ResidentProvider): GpuProgram {
+  if ((field instanceof NetScalarFieldData || field instanceof NetVectorFieldData) && !gpuTranspilable(field) && coopCapable(field)) {
+    const p = new ProgramBuilder(grid, resident).buildCooperative(field);
+    if (p) return p;
+  }
+  return new ProgramBuilder(grid, resident).build(field);
 }

@@ -14,6 +14,7 @@ shader-based renderer.
 | `src/program.ts` | `ProgramBuilder`: field data → a complete compute program for one dispatch grid. Symbolic data is transpiled, with its arguments bound recursively; dense data is uploaded and read through a generated reader (direct `pos` read when the dispatch grid *is* its support, multilinear interpolation otherwise, NaN outside its box — the CPU semantics exactly); derivatives of dense arguments are computed by core (grid differences) and uploaded; pullbacks become coordinate maps with the chain-rule factor; anything else (closure-backed data) is sampled by core on the dispatch grid and uploaded. **All uploads are packed into one storage buffer** (binding 1) with offsets — WebGPU allows only 8 storage buffers per stage, and derived fields easily need more readers than that. |
 | `src/device.ts` | `GpuBackend`: finds `navigator.gpu` in a browser or Dawn's node bindings (`webgpu` package) in node (device requested with the adapter's buffer limits, up to 2 GB); explicit bind-group layout (out + data); pipeline cache by shader code; validation error scopes; `run(program)` → `Float32Array`. Kernels use a 1D `id.x`; dispatches over 65535 workgroups are laid out in 2D and the entry point rewritten (`linearize`). `createBuffer` accounts resident allocations (`bytesAllocated`); `dispatches` / `pipelinesBuilt` counters and `readCounter` (a set's true record count) feed the viewer's adaptive resolution ([resolution.md](resolution.md)). |
 | `src/sample.ts` | `gpuSampleOn(backend, field, grid)`: the counterpart of `field.sampleOn(grid)`. |
+| `src/coop.ts` | The COOPERATIVE net kernel ([nets.md](nets.md) "As built"): `CoopEmitter extends NetEmitter` — one workgroup of `COOP_WG` = 256 threads per grid point, arrays in `var<workgroup>` memory (budget from the device's `maxComputeWorkgroupStorageSize`, `setCoopWorkgroupBytes`), every element loop strided over the workgroup and followed by a barrier, the dataset axis streamed in tiles of E examples (`tiled`, over `NetEmitter.streamPlan`), contractions output-parallel with a register tile / plain / contraction-parallel with a tree reduction. `emitCoopKernel` emits the `main`; `ProgramBuilder.buildCooperative` completes the program; `coopCapable(fd)` a cached dry emission. For nets one lane cannot take (MNIST: 50 µs/point against 10 s per dispatch). |
 | `src/nets.ts` | `emitNetField`: a net-backed field ([nets.md](nets.md)) → one WGSL field function. One thread evaluates the whole net for its point, so the function has no batch: every array has its declared per-example shape and lives in a function-scope `var a: array<f32, N>` (constants in the shared `data` buffer); ops are nested loops with an inner accumulation for `einsum` / `reduce`; elementwise trees are one loop; `call` inlines the callee; `reshape` aliases. Emitted from the A-normal form with elementwise fusion, best-fit array reuse by liveness and in-place updates, bounded by `NET_MAX_FLOATS` (2000 floats: Safari's 8192-byte limit); `gpuTranspilable(fd)` tells the viewer whether a field (or anything derived from it) needs no CPU fallback. Derivatives of net fields are core's autodiff programs, transpiled like any net; `ProgramBuilder.gradient(fd)` emits one `vecD` function per field. Loop bounds are opaque (`nb_`) so Metal does not unroll the nests. |
 
 ## Semantics preserved
@@ -366,6 +367,20 @@ is skipped for nets — at 256³ one dispatch of value + gradient per Newton
 step per vertex exceeded the GPU watchdog and lost the device (normals still
 use the exact gradient; 2D isolines of nets are exact).
 
+## Stage 9 (done): the cooperative kernel
+
+Nets beyond `NET_MAX_WORK` (the MNIST MLP: 269 k weights × 256–1024
+examples per point) are sampled by `src/coop.ts` — one workgroup per grid
+point, the dataset axis tiled, weights read once per tile — into a
+resident grid, chunked by `programKernels` (`COOP_CHUNK_WORK`, ~30 ms per
+dispatch; `Kernel.workgroups`) so a fill never trips the watchdog and the
+resolution controller can time it. A `ResidentProvider` given to
+`buildSampleProgram` supplies the resident values of such a net to programs
+that read it (expressions over it; its gradient as central differences,
+`ProgramBuilder.difference`) through extra read-only bindings
+(`GpuProgram.bindings`). Design, measurements and limits: [nets.md](nets.md)
+"the MNIST MLP experiment" and "As built".
+
 ## Next stages
 
 1. Interval-arithmetic quadtree seeding for exact isolines (topology still
@@ -374,8 +389,9 @@ use the exact gradient; 2D isolines of nets are exact).
    the adaptive resolution instead of vsync-quantized rAF intervals.
 3. Reuse same-sized resident buffers across frames (a moving crop allocates
    and frees its grids every frame; Dawn zero-fills new buffers).
-4. Nets beyond function-scope memory (an MNIST-sized validation set): stream
-   the declared dataset axis — every array carrying it is consumed only by
-   reductions, so the loop over examples can wrap the per-example body with
-   small intermediates. Also: fuse elementwise chains into their consumers
-   instead of materializing every node, and call-site batching in the emitter.
+4. ~~Nets beyond function-scope memory~~: streaming, elementwise fusion and
+   lazy arrays are in `nets.ts`; nets beyond one LANE's budget run in the
+   cooperative kernel (`coop.ts`). Left: the exact cooperative gradient,
+   Safari's remaining 1.5× per-point cost on that kernel
+   (`apps/viewer/public/cooptiming.html` measures its code shapes), call-site
+   batching.

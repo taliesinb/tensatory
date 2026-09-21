@@ -53,8 +53,13 @@ key (grid, levels, slots, options, view box, crop) changed or the backend
 counted dispatches (`GpuBackend.dispatches`); `compiled` = a compute
 pipeline was built (`pipelinesBuilt`) — such a frame is not representative,
 and for a settled recomputation the controller asks for a **remeasure**
-(`onRemeasure` → `fused.redo()` / `view3d.redo()`: the same geometry is
-dispatched again without compiles and timed cleanly) — unless the frame's
+(`onRemeasure` → `fused.redo()` / `view3d.redo()` / `sampler.clear()`: the
+same geometry AND the resident value grids are computed again without
+compiles and timed cleanly — the grids too, since a frame drawing only the
+colour field has no geometry to redo; it used to find everything cached,
+never recompute, and leave the ladder at its first rung with `afterCompile`
+set forever. The evicted grids are destroyed after `whenIdle`, once every
+deferred dispatch reading them has been enqueued) — unless the frame's
 JS time (`jsMs`) alone already exceeds the settled budget: a compile stalls
 the GPU, not the main thread, so a long JS time is real CPU work (a `costly`
 net field sampled on the dispatch grid, whose fallback reader bakes its grid
