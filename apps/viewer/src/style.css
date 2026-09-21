@@ -100,11 +100,36 @@ input[type="file"] { max-width: 100%; font-size: 11px; }
 #picker .body, #system .body { padding: 6px 12px 8px; }
 #picker .prow, #system .prow { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 #picker .prow label, #system .prow label { width: 66px; color: #aab; flex: none; line-height: 1.35; align-self: flex-start; }
-/* a picker with a single alternative is a plain label (clicking a one-option select shows nothing) */
-#picker .only { flex: 1; min-width: 0; color: #e8ecf5; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #picker .pval, #system .pval { color: #bcc4d6; font-size: 11px; text-align: left; line-height: 1.35; user-select: text; -webkit-user-select: text; cursor: text; white-space: pre-wrap; min-width: 0; }
 #picker .pval.err { color: #f88; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
-#pickBundle, #pickSpaceSel { min-width: 0; flex: 1; }
+
+/* the table pickers (picker.ts). Closed: FRAMELESS — the current name as plain text at the row's text baseline
+   (aligned with the `bundle` / `space` key like any other value) and a ⌃⌄ chevron at the right; hovering brightens
+   the name; `.single` = one alternative, the chevron gone (nothing to pick from). Open: the popover table under it,
+   one row per alternative, the current one ticked (✓, blue), the hovered / arrowed one highlighted. */
+.tpick-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; color: #e8ecf5; cursor: pointer; line-height: 1.35; }
+.tpick-btn:hover .lbl, .tpick-btn.open .lbl { color: #fff; }
+.tpick-btn .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpick-btn .chev { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 3px; background: #3b82f6; color: #fff; }
+.tpick-btn:hover .chev, .tpick-btn.open .chev { background: #60a5fa; }
+.tpick-btn.single { cursor: default; }
+.tpick-btn.single .chev { display: none; }
+.tpick { position: fixed; z-index: 40; overflow: auto; scrollbar-width: thin; padding: 4px; background: rgba(15,18,26,.96); border: 1px solid #3a4560; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.6); backdrop-filter: blur(8px); max-width: calc(100vw - 16px); font-size: 12px; }
+.tpick table { border-collapse: collapse; white-space: nowrap; }
+.tpick th { text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .03em; color: #6a7690; padding: 3px 10px 4px; border-bottom: 1px solid #2a2f3d; }
+.tpick td { padding: 4px 10px; color: #aab; font-variant-numeric: tabular-nums; }
+.tpick th:first-child, .tpick td.mark { width: 10px; padding-right: 0; padding-left: 8px; }
+.tpick td.mark { color: #3b82f6; font-size: 13px; line-height: 1; }
+.tpick td.name { color: #e8ecf5; }
+.tpick td.dim { color: #cfd6e6; }
+.tpick td.summary { color: #7d8db0; }
+.tpick td .tag { color: #6a7690; font-size: 11px; margin-left: 2px; }
+.tpick tr.pick { cursor: pointer; }
+.tpick tr.pick.hi td { background: #222a3c; }
+.tpick tr.pick.hi td.name, .tpick tr.pick.hi td.summary { color: #fff; }
+.tpick tr.pick td:first-child { border-radius: 5px 0 0 5px; }
+.tpick tr.pick td:last-child { border-radius: 0 5px 5px 0; }
+.tpick tr.pick.on td.name { font-weight: 600; }
 
 #cursorPane { position: absolute; right: 12px; bottom: 12px; display: none; pointer-events: none; }
 #cursorPane .body { padding: 6px 14px; font-size: 12px; line-height: 1.5; color: #dde; }

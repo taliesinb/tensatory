@@ -20,6 +20,8 @@ is a port of the loss-landscape prototype's widgets, adapted to 2D fields.
 | `src/interval.ts` | the interval slider: two nullable ends, full / half / none kinds, drag / click / wheel / keyboard gestures, `cmap` variant drawn as a bracket |
 | `src/cmapInterval.ts` | colormap interval selection: `Selection` (+ stretch / full, clip / mask modes), `selectParam`, `lutFor` (RGBA LUTs with masked alpha), the legend control `makeCmapInterval` |
 | `src/log.ts` | console capture, the L (log) modal, `status()` and red error display |
+| `src/picker.ts` | the TABLE PICKER of the `bundle` / `space` rows (a themed replacement for the OS-native select: a frameless control — the name at the row's text baseline, a ⌃⌄ chevron — opening a popover table, one row per alternative with descriptive columns) and the column formatters `describeSpaces` / `describeFields` (+ `*Of` for a sweep's members, ranges where they differ), `truncate` |
+| `src/docInventory.ts` | the inventory (core `inventoryOf`: spaces by dimension, fields / curves by kind) of a document that is NOT loaded, for the bundle table: fetched once per session, JSON only, sweep members by path too |
 
 ## Compute and render modes
 
@@ -36,17 +38,32 @@ pipelines and either draw with Canvas 2D or upload their results. See
 ## Layout
 
 * **Left super-stack** (one rounded container; strips are coloured rows):
-  `bundle` (picker and space picker, both with wheel/arrow switching; a
-  picker with a single alternative is shown as a plain label instead of a
-  select — clicking a one-option select shows nothing — its ⓘ stays
-  (`syncPickers`); each
-  gets a ⓘ to its right when the selected bundle / space has a `summary` or
-  `details` — hover = summary else details (the shared 0.25 s tooltip,
-  `cursor: help` like the panel keys), click = details else summary in a
-  modal; hovering an alternative in the dropdown shows its summary, else the
-  first line of its details (the option `title`; for bundles not yet loaded
-  that is the `summary` copied into `bundles/index.json`, which the core
-  bundle test keeps in sync). R = wipe storage, L = log, ⤒ = open a local
+  `bundle` (the bundle picker and the space picker, both TABLE PICKERS
+  (`src/picker.ts`, `TablePicker`): closed, a FRAMELESS control — the
+  current name as plain text flush with the row's key, a ⌃⌄ chevron at the
+  right — that steps with the wheel / ↑↓ while
+  hovered; clicked, a themed popover table under it, one row per alternative,
+  the current one ticked, hover / ↑↓ highlight, Enter or a click picks,
+  Escape / a click outside / a scroll closes, any other key closes it and
+  goes to the page. The bundle table's columns: name (a sweep tagged `sweep ·
+  n members`), spaces `3 × ℝ³, ℝ⁵` (manifolds by dimension), fields `5
+  scalar, 2 vector, 1 curve`, the summary cut to 60 characters (hover for the
+  whole line). Spaces and fields are counted from the DOCUMENT (core
+  `inventoryOf(spec)`, `src/docInventory.ts`: every indexed document is
+  fetched once, JSON only, half a second after boot; a sweep's members too
+  — `common` merged, members by path fetched — shown as ranges `1–2
+  scalar` where they differ), so an alternative not yet loaded is described
+  as well; until its fetch lands the cells read `…` and the table redraws.
+  The space table: name, dimension `ℝ³` (a sliced space as `ℝ³ ⊂ ℝ⁵`), the
+  fields and curves living there (from the built spec, so a slice's dropped
+  fields are not counted), the summary. A picker with a single alternative is
+  a plain label — nothing to pick from — its ⓘ stays; each gets a ⓘ to its
+  right when the selected bundle / space has a `summary` or `details` —
+  hover = summary else details (the shared 0.25 s tooltip, `cursor: help`
+  like the panel keys), click = details else summary in a modal. The
+  `summary` copied into `bundles/index.json` (which the core bundle test
+  keeps in sync) is what a row shows until its document has been seen.
+  R = wipe storage, L = log, ⤒ = open a local
   JSON), `system` (closed by default:
   compute / render modes (choice flippers; unavailable options greyed with
   the reason as tooltip), `mem cap`, device, live memory with the adaptive

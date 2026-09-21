@@ -9,6 +9,7 @@ import {
   rootKind,
   shortHash,
   signatureOf,
+  inventoryOf,
   DenseGrid,
   DenseVectorFieldData,
   computeStats,
@@ -67,6 +68,8 @@ import { ControlsPane } from "./controls";
 import { CurvesPane, curveOn, curveRange, type CurveDrawable, type CurveOpts } from "./curvesPane";
 import { RecordPane } from "./recordPane";
 import { bindInfoIcon, installInfoModal, optionText } from "./info";
+import { TablePicker, describeFields, describeFieldsOf, describeSpacesOf, realsOf, truncate, type PickerRow } from "./picker";
+import { docInventory, docInventoryNow } from "./docInventory";
 import { GpuRenderer, type Camera3D, type Quat, quatLook, quatNormalize, gpuStats, gpuTranspilable, packPolylines, packStreamlines, packTriangles, sampleResidentSync, type GpuLineLayer, type GpuScene, type ValueMap, type ColourSource, type GpuBackend, isResidentGrid, SEG_LAYOUT } from "@tensatory/gpu";
 import {
   installCollapsiblePanels,
@@ -1451,17 +1454,18 @@ function setCurveOpts(id: string, o: CurveOpts): void {
   state.dirty = true;
   saveOptsSoon();
 }
-const spaceSel = $<HTMLSelectElement>("pickSpaceSel");
-/** a picker with a single alternative is shown as a plain label (its ⓘ stays); with several, as the select */
-function syncPickers(): void {
-  for (const [sel, only] of [[pickSel, $("pickBundleOnly")], [spaceSel, $("pickSpaceOnly")]] as const) {
-    const single = sel.options.length < 2;
-    sel.style.display = single ? "none" : "";
-    only.style.display = single ? "" : "none";
-    only.textContent = sel.selectedOptions[0]?.textContent ?? "";
-  }
-}
-spaceSel.onchange = () => setSpace(spaceSel.value, true);
+/** the space table: name · ℝⁿ · the fields and curves living there (counted from the spec) · the summary */
+const spacePicker = new TablePicker($("pickSpaceSel"), [{ title: "space", cls: "name" }, { title: "dim", cls: "dim" }, { title: "fields" }, { title: "summary", cls: "summary" }], (): PickerRow[] => {
+  const spec = state.bundle?.spec; if (!spec) return [];
+  return spaceList().map((m) => {
+    const s = optionText(m.info), cut = truncate(s);
+    // a sliced space (its spec rewritten to the slice's dimension) is shown as the slice within the declared space: ℝ² ⊂ ℝ⁵
+    const declared = state.baseSpec?.manifolds?.[m.id]?.numDims ?? m.numDims;
+    const dim = declared === m.numDims ? realsOf(m.numDims) : `${realsOf(m.numDims)} ⊂ ${realsOf(declared)}`;
+    return { id: m.id, cells: [m.name, dim, describeFields(inventoryOf(spec, m.id)), cut], tips: [undefined, undefined, undefined, s.length > cut.length ? s : undefined] };
+  });
+});
+spacePicker.onPick = (id) => setSpace(id, true);
 
 /** switch to a space of the current bundle: fields, defaults, saved options and view */
 function setSpace(id: string, fromUser: boolean): void {
@@ -1469,8 +1473,7 @@ function setSpace(id: string, fromUser: boolean): void {
   const m = bundle.manifolds.get(id) ?? spaceList()[0]; if (!m) return;
   if (fromUser) saveOpts(); // remember the space we are leaving
   state.space = m.id;
-  spaceSel.value = m.id;
-  syncPickers();
+  spacePicker.set(m.id);
   bindInfoIcon($("spaceInfo"), m.info);
   syncSliceRow();
   // a fresh space (or bundle) starts PAUSED whatever the saved ▶ ticks say: its first frames build everything from
@@ -1705,12 +1708,10 @@ function setBundle(parsed: Bundle, file: string, wantSpace?: string | null, memb
   // For a sweep the `bundle` row is the sweep (its ⓘ); the member and its ⓘ are the record pane's first row.
   const docInfo = state.sweep ? state.sweep.info : bundle.info;
   bindInfoIcon($("bundleInfo"), docInfo);
-  const opt = [...pickSel.options].find((o) => o.value === file); if (opt) opt.title = optionText(docInfo);
+  bundlePicker.set(file, file.replace(/^local:/, ""));
   recordPane.build(state.sweep, member, bundle.info, (id, why) => void setMember(id, why));
   showBuildErrors();
   const spaces = spaceList();
-  spaceSel.replaceChildren(...spaces.map((m) => Object.assign(document.createElement("option"), { value: m.id, textContent: m.name, title: optionText(m.info) })));
-  syncPickers();
   const saved = readOpts().space;
   const pick = [wantSpace, saved, spaces.find((m) => m.numDims === 2)?.id, spaces[0]?.id].find((id) => id && spaces.some((m) => m.id === id));
   if (!pick) { usable = { scalars: [], vectors: [] }; state.space = ""; buildMetrics(); updateInfo(); status("no 2D or 3D space with fields"); state.dirty = true; return; }
@@ -1784,25 +1785,43 @@ async function setMember(id: string, why?: string, wantSpace?: string | null): P
   }
 }
 
-/** bundles/index.json: `summary` mirrors the bundle's own (the hover of a not-yet-loaded alternative) */
+/** bundles/index.json: `summary` mirrors the bundle's own (shown in the table until the document itself has been seen) */
 let bundleList: { file: string; name?: string; summary?: string }[] = [];
-const pickSel = $<HTMLSelectElement>("pickBundle");
-function chooseBundle(i: number): void {
-  if (!bundleList.length) return;
-  const b = bundleList[((i % bundleList.length) + bundleList.length) % bundleList.length]!;
-  pickSel.value = b.file;
-  void loadBundle(b.file);
-}
-pickSel.onchange = () => void loadBundle(pickSel.value);
-stepOnWheel(pickSel, (dir) => chooseBundle(pickSel.selectedIndex + dir));
-stepOnWheel(spaceSel, (dir) => { const n = spaceSel.options.length; if (n < 2) return; spaceSel.selectedIndex = (((spaceSel.selectedIndex + dir) % n) + n) % n; setSpace(spaceSel.value, true); });
+const bundleUrl = (file: string): URL => new URL(`bundles/${file}`, location.href);
+/**
+ * The bundle table: name (a sweep tagged with its member count) · its spaces "3 × ℝ³, ℝ⁵" · its fields "5 scalar,
+ * 2 vector, 1 curve" · the summary cut to 60 characters. Spaces and fields are counted from the DOCUMENT (docInventory:
+ * fetched once per session, JSON only, no sidecars; a sweep's members too — ranges where they differ), so an
+ * alternative not yet loaded is described as well; until its fetch lands the cells read "…" and the table redraws.
+ */
+const bundlePicker = new TablePicker($("pickBundle"), [{ title: "bundle", cls: "name" }, { title: "spaces" }, { title: "fields" }, { title: "summary", cls: "summary" }], (): PickerRow[] =>
+  bundleList.map((b) => {
+    const r = docInventoryNow(bundleUrl(b.file));
+    const inv = r?.ok ? r.inv : undefined;
+    const summary = inv?.summary ?? b.summary ?? "";
+    const name = document.createElement("span"); name.textContent = b.name ?? b.file;
+    if (inv?.members !== undefined) { const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = `sweep · ${inv.members} member${inv.members === 1 ? "" : "s"}`; name.append(" ", tag); }
+    const pending = r === undefined ? "…" : r.ok ? undefined : "?";
+    const cut = truncate(summary);
+    return {
+      id: b.file,
+      label: b.name ?? b.file,
+      cells: [name, pending ?? describeSpacesOf(inv!.inventories), pending ?? describeFieldsOf(inv!.inventories), cut],
+      tips: [undefined, r && !r.ok ? r.error : undefined, r && !r.ok ? r.error : undefined, summary.length > cut.length ? summary : undefined],
+    };
+  }));
+bundlePicker.onPick = (file) => void loadBundle(file);
+/** fetch every indexed document's inventory (idle work after boot; the table redraws as they land) */
+function prefetchInventories(): void { for (const b of bundleList) void docInventory(bundleUrl(b.file), () => bundlePicker.refresh()); }
+stepOnWheel(bundlePicker.el, (dir) => bundlePicker.step(dir));
+stepOnWheel(spacePicker.el, (dir) => spacePicker.step(dir));
 
-/** step a <select> with the wheel or ↑/↓ while hovering it (same one-step-per-gesture wheel handling as the discrete sliders) */
-function stepOnWheel(sel: HTMLSelectElement, step: (dir: number) => void): void {
+/** step a picker with the wheel or ↑/↓ while hovering its closed control (same one-step-per-gesture wheel handling as the discrete sliders) */
+function stepOnWheel(el: HTMLElement, step: (dir: number) => void): void {
   let over = false;
-  sel.addEventListener("pointerenter", () => (over = true)); sel.addEventListener("pointerleave", () => (over = false));
+  el.addEventListener("pointerenter", () => (over = true)); el.addEventListener("pointerleave", () => (over = false));
   const wheel = wheelStepper(step);
-  sel.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
+  el.addEventListener("wheel", (e) => { if (e.shiftKey) return; wheel(e); }, { passive: false });
   window.addEventListener("keydown", (e) => { if (!over || e.shiftKey) return; if (e.key === "ArrowDown") { e.preventDefault(); step(1); } else if (e.key === "ArrowUp") { e.preventDefault(); step(-1); } });
 }
 $("uploadBtn").onclick = () => $<HTMLInputElement>("pickFile").click();
@@ -1894,9 +1913,8 @@ $("cw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 1) % 4) as 0
 $("ccw").onclick = () => { renderer.view.rot = ((renderer.view.rot + 3) % 4) as 0 | 1 | 2 | 3; orientationChanged(); };
 /** panel shortcut key → the ✓ checkbox it toggles (the colorfield panel is absent in 3D, where the key is inert) */
 const PANEL_KEYS: Partial<Record<string, "showScalar" | "showIso" | "showStream" | "showVec">> = { c: "showScalar", i: "showIso", s: "showStream", v: "showVec" };
-// a picked <select> (bundle, space) keeps keyboard focus, and space would then reopen its menu instead of toggling
-// play: once a choice is made, focus goes back to the page. Text inputs keep their keys (the guard below).
-for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.addEventListener("change", () => sel.blur());
+// the pickers are not focusable (their table takes the keys only while open), so space always toggles play; text
+// inputs keep their keys (the guard below)
 window.addEventListener("keydown", (e) => {
   const t = e.target as HTMLElement | null;
   if (t && (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test((t as HTMLInputElement).type)) || t.tagName === "SELECT")) return;
@@ -2054,13 +2072,13 @@ const RECOLOUR_REFRESH = 4;
   // ?bundle= names an indexed document, or an unindexed one under bundles/ (mnist-mlp/bundle.json, loss-landscape/sweep-all.json): it joins the picker for this session
   const want = params.get("bundle");
   if (want && /^[\w./-]+\.json$/.test(want) && !want.includes("..") && !bundleList.some((b) => b.file === want)) bundleList.push({ file: want, name: want.replace(/\.json$/, ""), summary: "not in bundles/index.json: loaded from the URL" });
-  pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file, title: b.summary ?? "" })));
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
-  pickSel.value = file;
-  syncPickers();
+  bundlePicker.set(file);
   bootPhase(`bundle ${file}`);
   await loadBundle(file, params.get("space"), params.get("member"));
   bootPhase(undefined);
+  // the other documents' inventories for the bundle table, once the bundle shows (small JSON files, no sidecars)
+  setTimeout(prefetchInventories, 500);
   // UI overrides from the URL, e.g. &showIso=0&split=3&iv=loss&sg=lossGrad
   for (const [k, v] of params) {
     if ((CHECKS as readonly string[]).includes(k)) ui[k as CheckId].checked = v !== "0";

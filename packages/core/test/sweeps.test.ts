@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { BundleSpec, CommonSpec, SweepSpec } from "@tensatory/schema";
-import { Bundle, SINGLE_MEMBER, SpecError, Sweep, facets, mapSource, mergeCommon, nearestMember, rootKind, shortHash, signatureOf } from "../src";
+import { Bundle, SINGLE_MEMBER, SpecError, Sweep, facets, inventoryOf, mapSource, mergeCommon, nearestMember, rootKind, shortHash, signatureOf } from "../src";
 import { dirSource, jsonBytes, npyBytes } from "./helpers";
 
 const DEMO_DIR = join(__dirname, "../../../apps/viewer/public/bundles/sweep-demo");
@@ -236,5 +236,25 @@ describe("structural signature", () => {
     expect(shortHash("scalar f:2;space plane:2")).toBe(shortHash("scalar f:2;space plane:2"));
     expect(shortHash("a")).not.toBe(shortHash("b"));
     expect(shortHash("scalar f:2;space plane:2").length).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("inventory (the picker tables' columns)", () => {
+  it("counts spaces by dimension and fields / curves by kind, for the bundle or one manifold", async () => {
+    const s = demo();
+    const bowl = (await s.member("bowl-k1")).spec; // common carries `plane` (2D) and `volume` (3D) and the derived |∇f|
+    expect(inventoryOf(bowl)).toEqual({ spaces: [{ dims: 2, count: 1 }, { dims: 3, count: 1 }], scalars: 2, vectors: 0, curves: 0 });
+    expect(inventoryOf(bowl, "plane")).toEqual({ spaces: [{ dims: 2, count: 1 }], scalars: 2, vectors: 0, curves: 0 });
+    expect(inventoryOf(bowl, "volume")).toEqual({ spaces: [{ dims: 3, count: 1 }], scalars: 0, vectors: 0, curves: 0 });
+    expect(inventoryOf(bowl, "nowhere")).toEqual({ spaces: [], scalars: 0, vectors: 0, curves: 0 });
+    // the implicit manifold: one space of the inferred dimension; curves and vector fields counted; `defaultManifold` resolves omitted domains
+    const withCurve: BundleSpec = { ...plane(1), curves: { c: { data: { type: "symbolic", interval: [0, 1], expr: { op: "compv", coeffs: [{ op: "coord", index: 0 }, 0] } } } } };
+    withCurve.fields = { ...withCurve.fields, g: { kind: "vector", data: { type: "symbolicv", expr: { op: "coordv" } } } };
+    expect(inventoryOf(withCurve)).toEqual({ spaces: [{ dims: 2, count: 1 }], scalars: 1, vectors: 1, curves: 1 });
+    expect(inventoryOf(withCurve, "default")).toEqual({ spaces: [{ dims: 2, count: 1 }], scalars: 1, vectors: 1, curves: 1 });
+    expect(inventoryOf({ tensatory: "0.1", fields: { g: { kind: "vector", data: { type: "symbolicv", expr: { op: "coordv" } } } } }).spaces).toEqual([{ dims: 0, count: 1 }]);
+    const multi: BundleSpec = { tensatory: "0.1", manifolds: { a: { numDims: 3 }, b: { numDims: 3 }, c: { numDims: 5 } }, defaultManifold: "c", fields: { f: { kind: "scalar", data: { type: "symbolic", box: Array(5).fill([-1, 1]), expr: 1 } }, h: { kind: "scalar", domain: "a", data: { type: "symbolic", box: Array(3).fill([-1, 1]), expr: 1 } } } };
+    expect(inventoryOf(multi)).toEqual({ spaces: [{ dims: 3, count: 2 }, { dims: 5, count: 1 }], scalars: 2, vectors: 0, curves: 0 });
+    expect(inventoryOf(multi, "c").scalars).toBe(1);
   });
 });

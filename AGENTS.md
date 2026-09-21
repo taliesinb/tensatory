@@ -307,9 +307,16 @@ profiling test.
   fields and nets have independent optional `summary` (one line) and
   `details` (any length); the viewer shows them behind a ⓘ beside the bundle
   / space pickers and on each field row (hover: summary else details, click:
-  details else summary in a modal; picker alternatives show the summary else
-  the details' first line as their `title` — `bundles/index.json` repeats
-  each bundle's name and summary for that, `apps/viewer/src/info.ts`). The matrix assigns
+  details else summary in a modal, `apps/viewer/src/info.ts`). The bundle
+  and space pickers are TABLE PICKERS (`apps/viewer/src/picker.ts`: a
+  frameless control (name + ⌃⌄ chevron) — wheel / ↑↓ step it — opening a themed popover
+  table, one row per alternative: name, spaces `3 × ℝ³, ℝ⁵` / dimension,
+  fields `5 scalar, 2 vector, 1 curve`, the summary cut to 60 chars; ↑↓ /
+  Enter / Escape / click outside); the counts come from core
+  `inventoryOf(spec)` — for bundles not yet loaded from their DOCUMENT,
+  fetched once after boot (`docInventory.ts`, JSON only, sweep members too,
+  ranges where members differ); `bundles/index.json` repeats each bundle's
+  name and summary for the rows until then. The matrix assigns
   fields to slots C, I_V, I_C, S_∇, S_C, V_∇, V_C; rows are every scalar AND
   vector field, as a TREE: names are paths (`train/loss/setosa`), drawn
   flattened with a subtle indent, subtrees collapsed until clicked, a

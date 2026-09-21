@@ -314,11 +314,11 @@ Where the seams are today, so the work does not start by rediscovering them:
   `sweep + signatureOf(bundle)` for members — `Opts` is one JSON object per
   key with `ui` / `ui3` / `maps` / `intervals` / `space` / `spaces[space]`
   (sel, view, dir, res, camera) / `controls` / `boxZoom` / `slice` / `curves`.
-* `syncPickers()` turns a one-option picker into a plain label; a record row
+* A one-alternative table picker (`picker.ts`) is a plain label; a record row
   (one discrete control per varying key) belongs in the `bundle` panel
   (`#picker`, rows are `.prow`), above the `space` row; the slice row
   (`#sliceRow`, a `.ch.multi` flipper bar) is the closest existing widget.
-  Picker alternatives show `optionText(info)` as their `title`.
+  Picker rows show `optionText(info)` in their summary column.
 * Slot resolution on a member switch: `state.lockedSel` / `state.sel` are
   keyed by slot (`SLOTS`), values are field ids or `NONE`; `isUsable(id)`
   says whether an id exists on the current space. `SlotDef.present` hides
@@ -417,7 +417,8 @@ vary (or vary only with the others). Faceting: picking `fmnist` greys `mlp`
 and `pca` (no such members); picking `mlp` greys `fmnist`. Switching a
 member is a `setBundle` of that member's `Bundle` with options loaded under
 `sweep + signature`; the space picker shows the member's single space as a
-label (`syncPickers`). The sweep's own ⓘ carries the description above. The
+label (a one-alternative table picker). The sweep's own ⓘ carries the
+description above. The
 natural first "cross-member" view is not a difference map (deferred) but the
 one the record already affords: flipping `dirs` between pca and random for
 the same θ* with the camera held — the paper's two views of one minimum,

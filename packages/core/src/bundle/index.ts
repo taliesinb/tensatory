@@ -9,3 +9,5 @@ export { sliceSpec, sliceable, SLICE_MAX_DIMS, astToScalarSpec, astToVectorSpec 
 export type { SliceResult } from "./slice";
 export { Sweep, SweepSchema, KeySchema, CommonSchema, MemberSchema, SINGLE_MEMBER, rootKind, mergeCommon, facets, keyOrder, nearestMember, membersWhere, signatureOf, shortHash } from "./sweep";
 export type { Facet, FacetValue } from "./sweep";
+export { inventoryOf } from "./inventory";
+export type { Inventory } from "./inventory";

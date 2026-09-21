@@ -30,10 +30,12 @@ metadata records and a `common` partial merged into each; `schema/sweep.ts`,
   optional one-line `summary` and an optional `details` of any length,
   independent of each other (`Info` / `infoOf` in core; `.info` on `Bundle`,
   `Manifold`, `ScalarField`, `VectorField`). The viewer shows them behind a
-  ⓘ (hover: summary, else details; click: details, else summary) and as the
-  hover text of picker alternatives (summary, else the first line of the
-  details). `bundles/index.json` entries repeat each bundle's `name` and
-  `summary` so alternatives can be described before they are loaded.
+  ⓘ (hover: summary, else details; click: details, else summary) and in the
+  summary column of the picker tables (summary, else the first line of the
+  details, cut to 60 characters). `bundles/index.json` entries repeat each
+  bundle's `name` and `summary` so alternatives can be described before
+  their documents have been fetched (the tables' space / field counts are
+  `inventoryOf(spec)`, from the document itself).
 * **Manifold**: phase 1 treats every manifold as ℝⁿ with the identity chart.
   `dimWeights` is free-form per-dimension metadata (e.g. PCA explained
   variance). `flow` names a vector field on the manifold that is the time
