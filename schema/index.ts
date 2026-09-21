@@ -13,6 +13,7 @@ export * from "./codomain";
 export * from "./statistics";
 export * from "./manifolds";
 export * from "./mappings";
+export * from "./curves";
 export * from "./nets";
 export * from "./fieldData";
 export * from "./fields";
