@@ -160,8 +160,8 @@ space, where it does nothing). Live dragging is the planned follow-up.
 ## Sweeps: the record rows
 
 When the loaded document is a sweep ([sweeps.md](sweeps.md) §2), the bundle
-panel gains a `member` row between the `bundle` picker (the sweep, its ⓘ)
-and the `space` picker (`apps/viewer/src/recordPane.ts`): a TABLE PICKER
+panel gains a `member` row below the `bundle` picker (the sweep, its ⓘ), the
+`space` picker and the slice row (`apps/viewer/src/recordPane.ts`): a TABLE PICKER
 like the bundle's — the member's name (its bundle's `name`; a member not
 loaded yet is named from the sweep document's prefetched inventory,
 `docInventory` `memberInfo`), the ⌃⌄ chevron, wheel / ↑↓ stepping; the table

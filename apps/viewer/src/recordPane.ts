@@ -1,5 +1,5 @@
 // The MEMBER rows of the bundle panel (notes/sweeps.md §2): when the loaded document is a sweep, a `member` row
-// between the `bundle` and `space` pickers shows which member is on view and moves through the sweep:
+// below the `bundle` / `space` pickers (and the slice row) shows which member is on view and moves through the sweep:
 //
 //   member    mlp · pca                         ⌃⌄  ⓘ    a table picker over the members (their keys as columns) + ⓘ
 //             model: [mlp]  convnet                       one line per VARYING key: an inline label and a flipper —

@@ -160,7 +160,7 @@ profiling test.
   sampled arguments must have IDENTICAL sample points (error otherwise).
   Pullbacks keep the kind and move the support along.
 * Sweeps in the viewer (`notes/viewer.md` "Sweeps"): `loadBundle` dispatches
-  on `rootKind`; the bundle panel gains a MEMBER row (`recordPane.ts`): a
+  on `rootKind`; the bundle panel gains a MEMBER row below the space (and slice) rows (`recordPane.ts`): a
   table picker like the bundle's (name + ⌃⌄, wheel / ↑↓ step; the table has
   a column per varying key and the summary; members not loaded yet are
   named from the prefetched inventory), a ⓘ whose modal ends with the
