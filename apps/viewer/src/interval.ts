@@ -36,12 +36,18 @@
 //   (no event and no pointer cursor with data-notoggle);  an empty bar -> a small interval, as above.
 //   Dragging the top line translates the whole bracket, like dragging inside it. The consumer (cmapInterval.ts)
 //   owns what those toggles mean.
+//   A full cmap interval never gets narrower than MIN_PX (20 px, `data-minpx` overrides; 0 for plain sliders, whose
+//   narrow crops are deliberate): an end dragged towards the other stops short of it, a translate / resize / create
+//   that would be narrower is widened (an interval stored too narrow widens on its first drag, so it can always be
+//   recovered — overlapping handles used to leave no way to grab one).
 // Events: 'input' while the shown interval moves (drag / preview), 'change' when it is committed.
 
 /** a press released within this many ms is a click, not a drag; until then motion is ignored and the cursor is unchanged */
 const CLICK_MS = 150;
 /** width of the interval a click on an empty bar creates, as a fraction of the range */
 const CLICK_W = 0.1;
+/** minimum width of a full cmap interval on screen */
+const MIN_PX = 20;
 
 export interface IntervalEl extends HTMLElement {
   lo: number | null;
@@ -64,6 +70,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   const el = el0 as IntervalEl;
   let min = +el.dataset.min!, max = +el.dataset.max!, step = +(el.dataset.step ?? 0);
   const cmap = el.classList.contains("cmap"), notoggle = el.dataset.notoggle !== undefined;
+  const minPx = el.dataset.minpx !== undefined ? +el.dataset.minpx : cmap ? MIN_PX : 0;
   const span = () => max - min;
   const quant = (v: number) => { v = Math.min(max, Math.max(min, v)); if (step) v = min + Math.round((v - min) / step) * step; return +v.toFixed(6); };
   const num = (s: string | undefined, dflt: number): number | null => { if (s === "null") return null; const v = s === undefined ? dflt : +s; return Number.isFinite(v) ? quant(v) : dflt; };
@@ -100,8 +107,19 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   const atX = (clientX: number) => { const r = rect(); return min + ((clientX - r.left) / r.width) * span(); }; // unquantized
   const xOf = (v: number) => { const r = rect(); return r.left + ((v - min) / span()) * r.width; };
 
-  /** show (l, h) — quantized, ordered — and fire input if anything changed */
-  const show = (l: number | null, h: number | null) => {
+  /** the minimum width of a full interval, in range units (0 when the bar has no layout) */
+  const minW = () => { const w = rect().width; return w > 0 ? Math.min(span(), (minPx / w) * span()) : 0; };
+  /** show (l, h) — quantized, ordered, a full interval at least minW wide — and fire input if anything changed.
+   *  `keep` names the end that stays put when widening (the one NOT being dragged); default: widen about the centre */
+  const show = (l: number | null, h: number | null, keep?: End) => {
+    if (l !== null && h !== null) {
+      if (h < l) [l, h] = [h, l];
+      const w = minW();
+      if (h - l < w) {
+        if (keep === "hi") l = h - w; else if (keep === "lo") h = l + w; else { const c = (l + h) / 2; l = c - w / 2; h = c + w / 2; }
+        if (l < min) { l = min; h = min + w; } else if (h > max) { h = max; l = max - w; }
+      }
+    }
     if (l !== null) l = quant(l); if (h !== null) h = quant(h);
     if (l !== null && h !== null && h < l) [l, h] = [h, l];
     if (l !== lo || h !== hi) { lo = l; hi = h; paint(); fire("input"); }
@@ -111,7 +129,7 @@ export function makeIntervalSlider(el0: HTMLElement): IntervalEl {
   /** full: symmetric resize about c to half-width hw */
   const showScaled = (c: number, hw: number) => { hw = Math.max(0, Math.min(hw, c - min, max - c)); show(c - hw, c + hw); };
   /** move one end to v (the other end, if any, bounds it) */
-  const showEnd = (e: End, v: number) => { if (e === "lo") show(hi === null ? v : Math.min(v, hi), hi); else show(lo, lo === null ? v : Math.max(v, lo)); };
+  const showEnd = (e: End, v: number) => { if (e === "lo") show(hi === null ? v : Math.min(v, hi), hi, "hi"); else show(lo, lo === null ? v : Math.max(v, lo), "lo"); };
   const commit = () => { sLo = lo; sHi = hi; paint(); fire("change"); };
   const revert = () => { lo = sLo; hi = sHi; paint(); };
 
