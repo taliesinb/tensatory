@@ -1,8 +1,8 @@
 {
  "tensatory": "0.1",
- "name": "convnet on mnist: pca landscape",
- "summary": "Loss and accuracy of a trained convnet (56,394 parameters) around θ* in the top-3 PCA subspace of its optimizer trajectory: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it.",
- "details": "Collected by the loss-landscape prototype (~/projects/loss-landscape): the model was trained on mnist, then the\nloss and accuracy were evaluated on 384 held-out examples at every point of a 40×40×40 grid in the\n3D subspace spanned by the top principal components of the parameter trajectory (explained variance 80.0%, 15.2%, 2.6%).\nθ* (the final model) is at the origin; the box is the span of the trajectory with a margin. The stored channel is\nlog₁₀(loss); `loss` recovers the loss itself as a pointwise field. The raw volume is the prototype's own\n`mnist_convnet_pca.bin` — headerless float32, channels interleaved, x fastest: row-major (z, y, x, channel) — so the\nbundle reads it through `{ \"type\": \"handle\", \"path\": \"vol.bin\", \"shape\": [40,40,40,2], \"part\": [null, null, null, c],\n\"axes\": [2,1,0] }`: the part picks the channel, the axes permutation puts x first.",
+ "name": "convnet · pca",
+ "summary": "Loss and accuracy of the trained convnet (56,394 parameters) around θ* in the top-3 PCA subspace of its optimizer trajectory: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it.",
+ "details": "Collected by the loss-landscape prototype (~/projects/loss-landscape): the model was trained on mnist, then the\nloss and accuracy were evaluated on 384 held-out examples at every point of a 40×40×40 grid in the\n3D subspace spanned by the top principal components of the parameter trajectory (explained variance 80.0%, 15.2%, 2.6%).\nθ* (the final model) is at the origin; the box is the span of the trajectory with a margin. The stored channel is\nlog₁₀(loss); the sweep's common `loss` recovers the loss itself as a pointwise field. The raw volume is the prototype's own\n`mnist_convnet_pca.bin` — headerless float32, channels interleaved, x fastest: row-major (z, y, x, channel) — so the\nbundle reads it through `{ \"type\": \"handle\", \"path\": \"vol.bin\", \"shape\": [40,40,40,2], \"part\": [null, null, null, c],\n\"axes\": [2,1,0] }`: the part picks the channel, the axes permutation puts x first.",
  "manifolds": {
   "pca": {
    "name": "PCA directions",
@@ -124,26 +124,6 @@
       3.133129119873047
      ]
     ]
-   }
-  },
-  "loss": {
-   "kind": "scalar",
-   "name": "loss",
-   "domain": "pca",
-   "codomain": "celoss",
-   "summary": "the cross-entropy loss itself, 10^log10_loss (pointwise from the stored channel)",
-   "data": {
-    "type": "pointwise",
-    "expr": {
-     "op": "pow",
-     "vals": [
-      10,
-      "l"
-     ]
-    },
-    "scalars": {
-     "l": "log10_loss"
-    }
    }
   }
  },

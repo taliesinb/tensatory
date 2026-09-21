@@ -1508,9 +1508,10 @@ function setSpace(id: string, fromUser: boolean): void {
   // fields exist here (others fall back to the defaults above), and the view / camera when it is the same space
   if (carry && !hadSaved) {
     for (const k of SLOTS) { const id = carry.sel[k]; if (id === NONE || (id && isUsable(id))) state.sel[k] = state.lockedSel[k] = id; }
-    if (carry.space === m.id && carry.dims === m.numDims) {
-      if (m.numDims === 2 && carry.view) { renderer.view = { ...carry.view }; viewCustom = carry.viewCustom; }
-      if (m.numDims === 3 && carry.camera && view3d) { view3d.camera = { ...carry.camera }; view3d.cameraCustom = carry.cameraCustom; }
+    if (carry.dims === m.numDims) {
+      if (m.numDims === 2 && carry.view) { if (carry.space === m.id) { renderer.view = { ...carry.view }; viewCustom = carry.viewCustom; } else { renderer.view = { ...renderer.view, flipX: carry.view.flipX, flipY: carry.view.flipY, rot: carry.view.rot }; } }
+      // 3D: the same space keeps the camera; another space (pca vs random directions: other boxes, other scales) keeps the ORIENTATION and re-fits
+      if (m.numDims === 3 && carry.camera && view3d) { if (carry.space === m.id) { view3d.camera = { ...carry.camera }; view3d.cameraCustom = carry.cameraCustom; } else if (carry.cameraCustom) view3d.holdOrientation(carry.camera.rot); }
     }
   }
   carry = undefined;
@@ -2050,8 +2051,10 @@ const RECOLOUR_REFRESH = 4;
     bundleList = (await (await fetch("bundles/index.json", { cache: "no-cache" })).json()) as typeof bundleList;
   } catch (e) { console.error(e); }
   if (!bundleList.length) { bootPhase(undefined); status("no bundles found in bundles/index.json"); requestAnimationFrame(frame); return; }
-  pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file, title: b.summary ?? "" })));
+  // ?bundle= names an indexed document, or an unindexed one under bundles/ (mnist-mlp/bundle.json, loss-landscape/sweep-all.json): it joins the picker for this session
   const want = params.get("bundle");
+  if (want && /^[\w./-]+\.json$/.test(want) && !want.includes("..") && !bundleList.some((b) => b.file === want)) bundleList.push({ file: want, name: want.replace(/\.json$/, ""), summary: "not in bundles/index.json: loaded from the URL" });
+  pickSel.replaceChildren(...bundleList.map((b) => Object.assign(document.createElement("option"), { value: b.file, textContent: b.name ?? b.file, title: b.summary ?? "" })));
   const file = want && bundleList.some((b) => b.file === want) ? want : bundleList[0]!.file;
   pickSel.value = file;
   syncPickers();

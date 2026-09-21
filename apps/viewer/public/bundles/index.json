@@ -40,9 +40,9 @@
     "summary": "Symbolic fields on 4D and 5D spaces — Gaussians, quadratic forms, Rosenbrock, waves — viewed through 2D / 3D slices (the slice row of the bundle panel)."
   },
   {
-    "file": "mnist-convnet-pca/bundle.json",
-    "name": "convnet on mnist: pca landscape",
-    "summary": "Loss and accuracy of a trained convnet (56,394 parameters) around θ* in the top-3 PCA subspace of its optimizer trajectory: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it."
+    "file": "loss-landscape/sweep.json",
+    "name": "loss-landscape prototype runs",
+    "summary": "MNIST loss / accuracy volumes of the loss-landscape prototype around each trained model's θ*, along its top-3 PCA directions or 3 random ones (the ConvNet; the MLP members are local: ?bundle=loss-landscape/sweep-all.json) — a sweep: flip `dirs` with the camera held to see the same minimum in two frames."
   },
   {
     "file": "sweep-demo/sweep.json",

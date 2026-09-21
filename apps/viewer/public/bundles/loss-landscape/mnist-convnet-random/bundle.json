@@ -1,0 +1,141 @@
+{
+ "tensatory": "0.1",
+ "name": "convnet · random",
+ "summary": "Loss and accuracy of the trained convnet (56,394 parameters) around θ* in the span of 3 random directions: a 40×40×40 float32 volume stored beside the bundle (vol.bin), each channel a `handle` into it.",
+ "details": "Collected by the loss-landscape prototype (~/projects/loss-landscape): the model was trained on mnist, then the\nloss and accuracy were evaluated on 384 held-out examples at every point of a 40×40×40 grid in the\n3D subspace spanned by three random directions (filter-normalized).\nθ* (the final model) is at the origin; the box is [−1.5, 1.5]³. The stored channel is\nlog₁₀(loss); the sweep's common `loss` recovers the loss itself as a pointwise field. The raw volume is the prototype's own\n`mnist_convnet_random.bin` — headerless float32, channels interleaved, x fastest: row-major (z, y, x, channel) — so the\nbundle reads it through `{ \"type\": \"handle\", \"path\": \"vol.bin\", \"shape\": [40,40,40,2], \"part\": [null, null, null, c],\n\"axes\": [2,1,0] }`: the part picks the channel, the axes permutation puts x first.",
+ "manifolds": {
+  "random": {
+   "name": "random directions",
+   "numDims": 3,
+   "dimNames": [
+    "d0",
+    "d1",
+    "d2"
+   ],
+   "summary": "coefficients along 3 random directions (θ* at 0)"
+  }
+ },
+ "defaultManifold": "random",
+ "fields": {
+  "log10_loss": {
+   "kind": "scalar",
+   "name": "log10 loss",
+   "domain": "random",
+   "codomain": "lin",
+   "summary": "log₁₀ of the mnist cross-entropy loss of the convnet on 384 evaluation examples, sampled on a 40×40×40 grid",
+   "data": {
+    "type": "dense",
+    "samples": {
+     "type": "handle",
+     "path": "vol.bin",
+     "shape": [
+      40,
+      40,
+      40,
+      2
+     ],
+     "part": [
+      null,
+      null,
+      null,
+      0
+     ],
+     "axes": [
+      2,
+      1,
+      0
+     ],
+     "dtype": "float32"
+    },
+    "stats": {
+     "extrema": {
+      "min": -1.6760272979736328,
+      "max": 2.191908836364746
+     }
+    },
+    "box": [
+     [
+      -1.5,
+      1.5
+     ],
+     [
+      -1.5,
+      1.5
+     ],
+     [
+      -1.5,
+      1.5
+     ]
+    ]
+   }
+  },
+  "accuracy": {
+   "kind": "scalar",
+   "name": "accuracy",
+   "domain": "random",
+   "codomain": "fraction",
+   "summary": "classification accuracy on the same 384 examples",
+   "data": {
+    "type": "dense",
+    "samples": {
+     "type": "handle",
+     "path": "vol.bin",
+     "shape": [
+      40,
+      40,
+      40,
+      2
+     ],
+     "part": [
+      null,
+      null,
+      null,
+      1
+     ],
+     "axes": [
+      2,
+      1,
+      0
+     ],
+     "dtype": "float32"
+    },
+    "stats": {
+     "extrema": {
+      "min": 0.0833333358168602,
+      "max": 1
+     }
+    },
+    "box": [
+     [
+      -1.5,
+      1.5
+     ],
+     [
+      -1.5,
+      1.5
+     ],
+     [
+      -1.5,
+      1.5
+     ]
+    ]
+   }
+  }
+ },
+ "pointSets": {
+  "theta": {
+   "domain": "random",
+   "points": [
+    [
+     0,
+     0,
+     0
+    ]
+   ],
+   "labels": [
+    "θ*"
+   ],
+   "name": "θ*"
+  }
+ }
+}

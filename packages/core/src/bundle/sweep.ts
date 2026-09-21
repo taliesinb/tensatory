@@ -30,6 +30,7 @@ export const KeySchema: z.ZodType<KeySpec> = z.object({
   kind: z.enum(["nominal", "ordinal"]).optional(),
   values: z.array(recordValue).optional(),
   codomain: CodomainSchema.optional(),
+  attribute: z.boolean().optional(),
 });
 
 export const CommonSchema: z.ZodType<CommonSpec> = z.object({
@@ -105,7 +106,12 @@ export interface Facet {
   values: FacetValue[];
   /** more than one value occurs across the members */
   varying: boolean;
+  /** a per-member measurement (`keys.<k>.attribute`), not a coordinate: shown with the record, never a control */
+  attribute: boolean;
 }
+
+/** the keys that do not count when comparing two records */
+const attributeKeys = (spec: SweepSpec): Set<string> => new Set(Object.entries(spec.keys ?? {}).filter(([, k]) => k.attribute).map(([k]) => k));
 
 const sameValue = (a: RecordValue, b: RecordValue): boolean => a === b;
 
@@ -117,11 +123,11 @@ export function keyOrder(spec: SweepSpec): string[] {
   return out;
 }
 
-/** the number of shared keys on which two records DIFFER, and the number they share */
-function distance(a: RecordSpec, b: RecordSpec, except?: string): { differ: number; shared: number } {
+/** the number of shared (non-attribute) keys on which two records DIFFER, and the number they share */
+function distance(a: RecordSpec, b: RecordSpec, skip: Set<string>, except?: string): { differ: number; shared: number } {
   let differ = 0, shared = 0;
   for (const k of Object.keys(a)) {
-    if (k === except || !(k in b)) continue;
+    if (k === except || skip.has(k) || !(k in b)) continue;
     shared++;
     if (!sameValue(a[k]!, b[k]!)) differ++;
   }
@@ -134,6 +140,7 @@ function distance(a: RecordSpec, b: RecordSpec, except?: string): { differ: numb
  */
 export function facets(spec: SweepSpec, current?: string): Facet[] {
   const cur = current !== undefined ? spec.members[current]?.record : undefined;
+  const skip = attributeKeys(spec);
   const out: Facet[] = [];
   for (const key of keyOrder(spec)) {
     if (cur && !(key in cur)) continue;
@@ -148,7 +155,7 @@ export function facets(spec: SweepSpec, current?: string): Facet[] {
       let f = lookup(v);
       if (!f) { f = { value: v, members: [], direct: false }; found.push(f); }
       f.members.push(id);
-      if (!cur || distance(cur, m.record, key).differ === 0) f.direct = true;
+      if (!cur || distance(cur, m.record, skip, key).differ === 0) f.direct = true;
     }
     const kind = ks?.kind ?? (found.every((f) => typeof f.value === "number") ? "ordinal" : "nominal");
     if (kind === "ordinal") {
@@ -156,7 +163,7 @@ export function facets(spec: SweepSpec, current?: string): Facet[] {
       const rest = found.splice(listed).sort((a, b) => typeof a.value === "number" && typeof b.value === "number" ? a.value - b.value : String(a.value).localeCompare(String(b.value)));
       found.push(...rest);
     }
-    out.push({ key, spec: ks, name: ks?.name ?? key, kind, values: found, varying: found.filter((f) => f.members.length).length > 1 });
+    out.push({ key, spec: ks, name: ks?.name ?? key, kind, values: found, varying: found.filter((f) => f.members.length).length > 1, attribute: !!ks?.attribute });
   }
   return out;
 }
@@ -167,11 +174,12 @@ export function facets(spec: SweepSpec, current?: string): Facet[] {
  */
 export function nearestMember(spec: SweepSpec, current: string | undefined, key: string, value: RecordValue): string | undefined {
   const cur = current !== undefined ? spec.members[current]?.record : undefined;
+  const skip = attributeKeys(spec);
   let best: { id: string; differ: number; shared: number } | undefined;
   for (const [id, m] of Object.entries(spec.members)) {
     const v = m.record[key];
     if (v === undefined || !sameValue(v, value)) continue;
-    const d = cur ? distance(cur, m.record, key) : { differ: 0, shared: 0 };
+    const d = cur ? distance(cur, m.record, skip, key) : { differ: 0, shared: 0 };
     if (!best || d.differ < best.differ || (d.differ === best.differ && d.shared > best.shared)) best = { id, ...d };
   }
   return best?.id;
@@ -255,8 +263,8 @@ export class Sweep {
   get info(): Info | undefined { return infoOf(this.name, this.spec); }
   get memberIds(): string[] { return Object.keys(this.spec.members); }
   get keys(): string[] { return keyOrder(this.spec); }
-  /** whether any key varies across the members (a lone bundle, or several identical records, has none) */
-  get hasFacets(): boolean { return facets(this.spec).some((f) => f.varying); }
+  /** whether any coordinate key varies across the members (a lone bundle, or several identical records, has none) */
+  get hasFacets(): boolean { return facets(this.spec).some((f) => f.varying && !f.attribute); }
 
   record(id: string): RecordSpec {
     const m = this.spec.members[id];

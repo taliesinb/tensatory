@@ -49,6 +49,7 @@ import {
   quatMul,
   quatNormalize,
   type Camera3D,
+  type Quat,
   type ColourSource,
   type RecolourProgress,
   type FusedGlyphs,
@@ -299,6 +300,16 @@ export class View3D implements MemoryUser {
     const r = Math.hypot(...box.size) / 2 || 1;
     this.camera = { ...this.camera, target: box.center as [number, number, number], distance: r / Math.sin(this.fitFov() / 2) * 1.05 };
     this.cameraCustom = false;
+    if (this.heldRot) { this.camera.rot = this.heldRot; this.heldRot = undefined; this.cameraCustom = true; }
+  }
+
+  /** an orientation to keep through the next fit (a sweep member switch into another box: the camera holds its direction, the distance and target follow the new box) */
+  private heldRot: Quat | undefined;
+  /** hold `rot` as the orientation: applied now, and again after the next automatic fit to a new box */
+  holdOrientation(rot: Quat): void {
+    this.camera = { ...this.camera, rot };
+    this.heldRot = rot;
+    this.cameraCustom = false; // let the next box change re-fit the distance / target …
   }
 
   /**

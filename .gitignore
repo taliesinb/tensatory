@@ -3,3 +3,6 @@ dist/
 *.tsbuildinfo
 .DS_Store
 .logs/
+# the loss-landscape MLP volumes (2 MB each) and the sweep document that lists them stay local: tools/loss-landscape/build.mjs
+apps/viewer/public/bundles/loss-landscape/mnist-mlp-*/
+apps/viewer/public/bundles/loss-landscape/sweep-all.json

@@ -1,0 +1,10 @@
+{
+ "dataset": "mnist",
+ "model": "convnet",
+ "dirs": "random",
+ "seed": 0,
+ "n_params": 56394,
+ "eval_n": 384,
+ "grid": 40,
+ "test_acc": 0.9838
+}

@@ -28,6 +28,7 @@ export type KeySpec = {
   kind?: "nominal" | "ordinal"; // defaults to ordinal when every value is a number, else nominal
   values?: RecordValue[]; // display order (values not listed follow, in the order they are found); a listed value no member has is shown disabled
   codomain?: CodomainSpec; // ordinal keys: scaling (log-spaced learning rates) and formatting of the values
+  attribute?: boolean; // a per-member MEASUREMENT (test accuracy, parameter count, wall time) rather than a coordinate of the sweep: shown with the record, never a control, ignored when comparing records
 };
 
 /** the part of a bundle every member shares; merged per top-level record, per id, the member winning. No `handle` arrays here. */

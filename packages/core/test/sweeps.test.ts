@@ -125,6 +125,26 @@ describe("facets", () => {
     expect(s.facets("bowl-k1").find((f) => f.key === "k")!.name).toBe("sharpness");
   });
 
+  it("attribute keys (per-member measurements) never count when comparing records and are never facets", () => {
+    const spec: SweepSpec = {
+      tensatory: "0.2",
+      keys: { n_params: { attribute: true }, test_acc: { attribute: true, codomain: "fraction" } },
+      members: {
+        "mlp-pca": { record: { model: "mlp", dirs: "pca", n_params: 269322, test_acc: 0.976 }, bundle: plane(1) },
+        "mlp-rnd": { record: { model: "mlp", dirs: "random", n_params: 269322, test_acc: 0.976 }, bundle: plane(1) },
+        "conv-pca": { record: { model: "convnet", dirs: "pca", n_params: 56394, test_acc: 0.984 }, bundle: plane(1) },
+      },
+    };
+    const model = facets(spec, "conv-pca").find((f) => f.key === "model")!;
+    expect(model.values.map((v) => [v.value, v.direct])).toEqual([["mlp", true], ["convnet", true]]); // n_params / test_acc differ but do not count
+    expect(facets(spec, "conv-pca").filter((f) => f.attribute).map((f) => [f.key, f.varying])).toEqual([["n_params", true], ["test_acc", true]]);
+    expect(nearestMember(spec, "conv-pca", "model", "mlp")).toBe("mlp-pca");
+    const s = new Sweep(spec, { bytes: async () => null });
+    expect(s.hasFacets).toBe(true);
+    // only attributes varying: no facets to show
+    expect(new Sweep({ ...spec, members: { a: spec.members["mlp-pca"]!, b: { ...spec.members["mlp-pca"]!, record: { ...spec.members["mlp-pca"]!.record, test_acc: 0.9 } } } }, { bytes: async () => null }).hasFacets).toBe(false);
+  });
+
   it("nearestMember: the fewest differing shared keys, then the most shared keys, then sweep order", () => {
     expect(nearestMember(mlpSweep, "mlp-3-s0", "seed", 1)).toBe("mlp-3-s1");
     expect(nearestMember(mlpSweep, "mlp-3-s1", "num_layers", 4)).toBe("mlp-4-s0");

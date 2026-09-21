@@ -16,10 +16,14 @@ import type { RecordValue } from "@tensatory/schema";
 import { bindInfoIcon } from "./info";
 import { installTooltips } from "./widgets";
 
-/** a record value for display: ordinal keys through their codomain, numbers compactly, booleans as words */
+/** a record value for display: ordinal keys through their codomain, integers in full (thin-space groups), other numbers compactly, booleans as words */
 export function formatValue(v: RecordValue, f?: Facet): string {
   if (typeof v === "boolean") return v ? "yes" : "no";
-  if (typeof v === "number") return f?.spec?.codomain ? new Codomain(f.spec.codomain).format(v) : formatReal(v, 4);
+  if (typeof v === "number") {
+    if (f?.spec?.codomain) return new Codomain(f.spec.codomain).format(v);
+    if (Number.isInteger(v) && Math.abs(v) < 1e9) return String(Math.abs(v)).replace(/\B(?=(\d{3})+(?!\d))/g, "\u202f").replace(/^/, v < 0 ? "−" : "");
+    return formatReal(v, 4);
+  }
   return v;
 }
 
@@ -48,7 +52,7 @@ export class RecordPane {
     }
 
     for (const f of facets) {
-      if (!f.varying) continue;
+      if (!f.varying || f.attribute) continue;
       const row = document.createElement("div"); row.className = "prow";
       const label = document.createElement("label"); label.textContent = f.name;
       label.dataset.tip = `${f.spec?.summary ?? `the sweep key "${f.key}"`} — ${f.kind}, ${f.values.filter((v) => v.members.length).length} values across the members. Click a value to switch to the member with it that changes the fewest other keys.`;
@@ -63,7 +67,8 @@ export class RecordPane {
         if (!v.members.length) seg.dataset.tip = `${f.name} = ${fmtOf(f.key)(v.value)}: no member of the sweep has this value`;
         else if (isCurrent) seg.dataset.tip = `${f.name} = ${fmtOf(f.key)(v.value)}: this member's value (${v.members.length} member${v.members.length === 1 ? "" : "s"} share it)`;
         else if (target) {
-          const changes = changedKeys(record, sweep.record(target), f.key).map(([k, val]) => `${facets.find((x) => x.key === k)?.name ?? k} → ${val === undefined ? "—" : fmtOf(k)(val)}`);
+          // what else the switch changes — coordinates only; attributes (parameter count, test accuracy) follow the member and are shown in the record row
+          const changes = changedKeys(record, sweep.record(target), f.key).filter(([k]) => !facets.find((x) => x.key === k)?.attribute).map(([k, val]) => `${facets.find((x) => x.key === k)?.name ?? k} → ${val === undefined ? "—" : fmtOf(k)(val)}`);
           seg.dataset.tip = changes.length ? `${f.name} → ${fmtOf(f.key)(v.value)} also changes ${changes.join(", ")} (no member differs only in ${f.name}); switches to "${target}"` : `${f.name} → ${fmtOf(f.key)(v.value)}: switches to "${target}", nothing else changes`;
           seg.addEventListener("click", () => onPick(target, [`${f.name} → ${fmtOf(f.key)(v.value)}`, ...changes].join(", ")));
         }
@@ -73,11 +78,12 @@ export class RecordPane {
       this.host.appendChild(row);
     }
 
-    const fixed = facets.filter((f) => !f.varying && record[f.key] !== undefined);
+    // the rest of the record: keys that do not vary, and the member's attributes (measurements) whether they vary or not
+    const fixed = facets.filter((f) => (!f.varying || f.attribute) && record[f.key] !== undefined);
     if (fixed.length) {
       const row = document.createElement("div"); row.className = "prow";
       const label = document.createElement("label"); label.textContent = "record";
-      label.dataset.tip = "The keys of this member's record that are the same on every member of the sweep.";
+      label.dataset.tip = "The rest of this member's record: keys that are the same on every member, and the member's own measurements (test accuracy, parameter count, …) — attributes of the member, not coordinates of the sweep.";
       const val = document.createElement("div"); val.className = "pval";
       val.textContent = fixed.map((f) => `${f.name} ${fmtOf(f.key)(record[f.key]!)}`).join(" · ");
       row.append(label, val);
